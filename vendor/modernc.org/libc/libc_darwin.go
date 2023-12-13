@@ -1951,12 +1951,12 @@ func Xsetattrlist(t *TLS, path, attrList, attrBuf uintptr, attrBufSize types.Siz
 }
 
 // int copyfile(const char *from, const char *to, copyfile_state_t state, copyfile_flags_t flags);
-func Xcopyfile(...interface{}) int32 {
+func Xcopyfile(t *TLS, _ ...interface{}) int32 {
 	panic(todo(""))
 }
 
 // int truncate(const char *path, off_t length);
-func Xtruncate(...interface{}) int32 {
+func Xtruncate(t *TLS, _ ...interface{}) int32 {
 	panic(todo(""))
 }
 
@@ -2422,4 +2422,55 @@ func X__swbuf(t *TLS, i int32, f uintptr) int32 {
 		trc("t=%v i=%v f=%v, (%v:)", t, i, f, origin(2))
 	}
 	panic(todo(""))
+}
+
+// int nanosleep(const struct timespec *req, struct timespec *rem);
+func Xnanosleep(t *TLS, req, rem uintptr) int32 {
+	if __ccgo_strace {
+		trc("t=%v rem=%v, (%v:)", t, rem, origin(2))
+	}
+	v := *(*time.Timespec)(unsafe.Pointer(req))
+	gotime.Sleep(gotime.Second*gotime.Duration(v.Ftv_sec) + gotime.Duration(v.Ftv_nsec))
+	return 0
+}
+
+// // void malloc_set_zone_name(malloc_zone_t *zone, const char *name)
+// func Xmalloc_set_zone_name(t *TLS, zone, name uintptr) {
+// 	if __ccgo_strace {
+// 		trc("t=%v zone=%v name=%v, (%v:)", t, zone, name, origin(2))
+// 	}
+// 	// nop
+// }
+
+// size_t malloc_size(const void *ptr);
+func Xmalloc_size(t *TLS, ptr uintptr) types.Size_t {
+	if __ccgo_strace {
+		trc("t=%v ptr=%v, (%v:)", t, ptr, origin(2))
+	}
+	panic(todo(""))
+}
+
+// int open(const char *pathname, int flags, ...);
+func Xopen64(t *TLS, pathname uintptr, flags int32, args uintptr) int32 {
+	if __ccgo_strace {
+		trc("t=%v pathname=%v flags=%v args=%v, (%v:)", t, pathname, flags, args, origin(2))
+	}
+	var mode types.Mode_t
+	if args != 0 {
+		mode = (types.Mode_t)(VaUint32(&args))
+	}
+	fdcwd := fcntl.AT_FDCWD
+	n, _, err := unix.Syscall6(unix.SYS_OPENAT, uintptr(fdcwd), pathname, uintptr(flags), uintptr(mode), 0, 0)
+	if err != 0 {
+		// if dmesgs {
+		// 	dmesg("%v: %q %#x: %v", origin(1), GoString(pathname), flags, err)
+		// }
+		t.setErrno(err)
+		return -1
+	}
+
+	// if dmesgs {
+	// 	dmesg("%v: %q flags %#x mode %#o: fd %v", origin(1), GoString(pathname), flags, mode, n)
+	// }
+	return int32(n)
 }
