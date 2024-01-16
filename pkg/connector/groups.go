@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -28,14 +27,9 @@ func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 
 func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
 	members := make([]string, len(group.Members))
-	ents := make([]string, len(group.Entitlements))
 
 	for i, member := range group.Members {
 		members[i] = member.Ref
-	}
-
-	for i, ent := range group.Entitlements {
-		ents[i] = ent.Value
 	}
 
 	profile := map[string]interface{}{
@@ -44,10 +38,6 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 
 	if len(members) > 0 {
 		profile["members"] = strings.Join(members, ",")
-	}
-
-	if len(ents) > 0 {
-		profile["entitlements"] = strings.Join(ents, ",")
 	}
 
 	groupTraitOptions := []rs.GroupTraitOption{
@@ -81,7 +71,11 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
-	groups, pageTotal, err := g.client.ListGroups(ctx, databricks.NewPaginationVars(page, ResourcesPageSize))
+	groups, total, err := g.client.ListGroups(
+		ctx,
+		databricks.NewPaginationVars(page, ResourcesPageSize),
+		databricks.NewGroupAttrVars(),
+	)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -98,11 +92,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	var token string
-	if len(groups) > 0 {
-		token = strconv.Itoa(int(page + pageTotal))
-	}
-
+	token := prepareNextToken(page, uint(len(groups)), total)
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -148,27 +138,6 @@ func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 		rv = append(rv, ent.NewPermissionEntitlement(resource, role.Name, rolePermissionOptions...))
 	}
 
-	// role entitlement scoped to the group (only avaible in workspace)
-	groupTrait, err := rs.GetGroupTrait(resource)
-	if err != nil {
-		return nil, "", nil, err
-	}
-
-	entitlements, ok := rs.GetProfileStringValue(groupTrait.Profile, "entitlements")
-	if ok {
-		ents := strings.Split(entitlements, ",")
-
-		for _, e := range ents {
-			entPermissionOptions := []ent.EntitlementOption{
-				ent.WithGrantableTo(groupResourceType),
-				ent.WithDisplayName(fmt.Sprintf("%s entitlement", e)),
-				ent.WithDescription(fmt.Sprintf("%s entitlement in Databricks", e)),
-			}
-
-			rv = append(rv, ent.NewPermissionEntitlement(resource, e, entPermissionOptions...))
-		}
-	}
-
 	return rv, "", nil, nil
 }
 
@@ -188,12 +157,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		members := strings.Split(membersPayload, ",")
 
 		for _, m := range members {
-			var memberType, memberID string
-			_, err := fmt.Sscanf(m, "%s/%s", &memberType, &memberID)
-			if err != nil {
-				return nil, "", nil, fmt.Errorf("databricks-connector: invalid member format: %s", m)
+			pp := strings.Split(m, "/")
+			if len(pp) != 2 {
+				return nil, "", nil, fmt.Errorf("databricks-connector: invalid member format of %s: %w", m, err)
 			}
 
+			memberType, memberID := pp[0], pp[1]
 			var resourceId *v2.ResourceId
 
 			switch memberType {
@@ -217,12 +186,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			var principalType, principal string
-			_, err := fmt.Sscanf(p, "%s/%s", &principalType, &principal)
-			if err != nil {
+			pp := strings.Split(p, "/")
+			if len(pp) != 2 {
 				return nil, "", nil, fmt.Errorf("databricks-connector: invalid principal format: %s", p)
 			}
 
+			principalType, principal := pp[0], pp[1]
 			var resourceId *v2.ResourceId
 
 			switch principalType {
@@ -278,8 +247,6 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId))
 		}
 	}
-
-	// TODO: entitlement grants (only avaible in workspace)
 
 	return rv, "", nil, nil
 }

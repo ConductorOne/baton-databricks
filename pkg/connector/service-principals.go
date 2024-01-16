@@ -3,8 +3,6 @@ package connector
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -25,28 +23,9 @@ func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.Resource
 }
 
 func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.ServicePrincipal, parent *v2.ResourceId) (*v2.Resource, error) {
-	roles := make([]string, len(servicePrincipal.Roles))
-	ents := make([]string, len(servicePrincipal.Entitlements))
-
-	for i, r := range servicePrincipal.Roles {
-		roles[i] = r.Value
-	}
-
-	for i, e := range servicePrincipal.Entitlements {
-		ents[i] = e.Value
-	}
-
 	profile := map[string]interface{}{
 		"application_id": servicePrincipal.ApplicationID,
 		"display_name":   servicePrincipal.DisplayName,
-	}
-
-	if len(roles) > 0 {
-		profile["roles"] = strings.Join(roles, ",")
-	}
-
-	if len(ents) > 0 {
-		profile["entitlements"] = strings.Join(ents, ",")
 	}
 
 	servicePrincipalTraitOptions := []rs.GroupTraitOption{
@@ -79,7 +58,11 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
-	servicePrincipals, total, err := s.client.ListServicePrincipals(ctx, databricks.NewPaginationVars(page, ResourcesPageSize))
+	servicePrincipals, total, err := s.client.ListServicePrincipals(
+		ctx,
+		databricks.NewPaginationVars(page, ResourcesPageSize),
+		databricks.NewServicePrincipalAttrVars(),
+	)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -96,13 +79,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		rv = append(rv, gr)
 	}
 
-	var token string
-
-	next := page + uint(len(servicePrincipals))
-	if next < total+1 {
-		token = strconv.Itoa(int(next))
-	}
-
+	token := prepareNextToken(page, uint(len(servicePrincipals)), total)
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -124,31 +101,16 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 		return nil, "", nil, err
 	}
 
-	// role entitlements
-	rolesPayload, ok := rs.GetProfileStringValue(groupTrait.Profile, "roles")
-	if ok {
-		roles := strings.Split(rolesPayload, ",")
-		for _, role := range roles {
-			rolePermissionOptions := []ent.EntitlementOption{
-				ent.WithGrantableTo(servicePrincipalResourceType),
-				ent.WithDisplayName(fmt.Sprintf("%s role", role)),
-				ent.WithDescription(fmt.Sprintf("%s role in Databricks", role)),
-			}
-
-			rv = append(rv, ent.NewPermissionEntitlement(resource, role, rolePermissionOptions...))
-		}
-	}
-
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
 	if !ok {
-		return nil, "", nil, fmt.Errorf("failed to get application_id from service principal profile")
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
 	// role permissions entitlements
 	// get all assignable roles for this specific service principal resource
 	roles, err := s.client.ListRoles(context.Background(), "servicePrincipals", applicationId)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("failed to list roles for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list roles for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
 	}
 
 	for _, role := range roles {
@@ -159,21 +121,6 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 		}
 
 		rv = append(rv, ent.NewPermissionEntitlement(resource, role.Name, rolePermissionOptions...))
-	}
-
-	// workspace permissions entitlements
-	entitlementsPayload, ok := rs.GetProfileStringValue(groupTrait.Profile, "entitlements")
-	if ok {
-		entitlements := strings.Split(entitlementsPayload, ",")
-		for _, e := range entitlements {
-			rolePermissionOptions := []ent.EntitlementOption{
-				ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
-				ent.WithDisplayName(fmt.Sprintf("%s entitlement", e)),
-				ent.WithDescription(fmt.Sprintf("%s entitlement in Databricks", e)),
-			}
-
-			rv = append(rv, ent.NewPermissionEntitlement(resource, e, rolePermissionOptions...))
-		}
 	}
 
 	return rv, "", nil, nil
@@ -187,21 +134,25 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 		return nil, "", nil, err
 	}
 
-	var rv []*v2.Grant
-
-	rolesPayload, ok := rs.GetProfileStringValue(groupTrait.Profile, "roles")
-	if ok {
-		roles := strings.Split(rolesPayload, ",")
-		for _, role := range roles {
-			rv = append(rv, grant.NewGrant(resource, role, resource.Id))
-		}
+	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	entsPayload, ok := rs.GetProfileStringValue(groupTrait.Profile, "entitlements")
-	if ok {
-		ents := strings.Split(entsPayload, ",")
-		for _, e := range ents {
-			rv = append(rv, grant.NewGrant(resource, e, resource.Id))
+	ruleSets, err := s.client.ListRuleSets(ctx, "servicePrincipals", applicationId)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
+	}
+
+	var rv []*v2.Grant
+	for _, ruleSet := range ruleSets {
+		for _, p := range ruleSet.Principals {
+			resourceId, err := prepareResourceID(ctx, s.client, p)
+			if err != nil {
+				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
+			}
+
+			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId))
 		}
 	}
 
