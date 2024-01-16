@@ -13,7 +13,6 @@ type config struct {
 	cli.BaseConfig `mapstructure:",squash"` // Puts the base config options in the same place as the connector options
 
 	AccountId  string   `mapstructure:"account-id"`
-	SCIMToken  string   `mapstructure:"scim-token"`
 	Username   string   `mapstructure:"username"`
 	Password   string   `mapstructure:"password"`
 	Workspaces []string `mapstructure:"workspaces"`
@@ -22,10 +21,6 @@ type config struct {
 
 func (c *config) IsBasicAuth() bool {
 	return c.Username != "" && c.Password != ""
-}
-
-func (c *config) IsSCIMAuth() bool {
-	return c.SCIMToken != ""
 }
 
 func (c *config) AreWorkspacesSet() bool {
@@ -37,11 +32,11 @@ func (c *config) AreTokensSet() bool {
 }
 
 func (c *config) IsAccAuthReady() bool {
-	return c.IsSCIMAuth() || c.IsBasicAuth()
+	return c.IsBasicAuth()
 }
 
 func (c *config) IsWorkspaceAuthReady() bool {
-	return (c.AreWorkspacesSet() && c.AreTokensSet()) || c.IsBasicAuth()
+	return c.AreTokensSet() || c.IsBasicAuth()
 }
 
 // validateConfig is run after the configuration is loaded, and should return an error if it isn't valid.
@@ -51,10 +46,10 @@ func validateConfig(ctx context.Context, cfg *config) error {
 	}
 
 	if !cfg.IsAccAuthReady() {
-		return fmt.Errorf("either SCIM token or username and password must be provided, use --help for more information")
+		return fmt.Errorf("username and password must be provided, use --help for more information")
 	}
 
-	if !cfg.IsWorkspaceAuthReady() {
+	if cfg.AreWorkspacesSet() && !cfg.IsWorkspaceAuthReady() {
 		return fmt.Errorf("either access token along workspaces or username and password must be provided, use --help for more information")
 	}
 
@@ -63,7 +58,6 @@ func validateConfig(ctx context.Context, cfg *config) error {
 
 // cmdFlags sets the cmdFlags required for the connector.
 func cmdFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().String("scim-token", "", "The Databricks SCIM token used to connect to the Databricks Account API. ($BATON_SCIM_TOKEN)")
 	cmd.PersistentFlags().String("account-id", "", "The Databricks account ID used to connect to the Databricks Account and Workspace API. ($BATON_ACCOUNT_ID)")
 	cmd.PersistentFlags().String("username", "", "The Databricks username used to connect to the Databricks API. ($BATON_USERNAME)")
 	cmd.PersistentFlags().String("password", "", "The Databricks password used to connect to the Databricks API. ($BATON_PASSWORD)")

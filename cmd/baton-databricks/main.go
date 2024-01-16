@@ -44,14 +44,7 @@ func prepareClientConfigs(ctx context.Context, cfg *config) []databricks.Config 
 	var cv []databricks.Config
 	l := ctxzap.Extract(ctx)
 
-	if cfg.IsSCIMAuth() {
-		// SCIM token is only available to use with the Account API
-		l.Info("using account API mode", zap.String("account-id", cfg.AccountId), zap.String("scim-token", cfg.SCIMToken))
-
-		cAuth := databricks.NewTokenAuth(cfg.SCIMToken)
-		c := databricks.NewAccountConfig(cfg.AccountId, cAuth)
-		cv = append(cv, c)
-	} else if cfg.IsBasicAuth() {
+	if cfg.IsBasicAuth() {
 		l.Info("using account API mode", zap.String("account-id", cfg.AccountId), zap.String("username", cfg.Username))
 		cAuth := databricks.NewBasicAuth(cfg.Username, cfg.Password)
 		c := databricks.NewAccountConfig(cfg.AccountId, cAuth)

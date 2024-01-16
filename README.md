@@ -10,7 +10,7 @@ Check out [Baton](https://github.com/conductorone/baton) to learn more about the
 
 To work with the connector, you can choose from multiple ways to run it, but the main requirement is to have a Databricks account and its ID. You can find the ID of an account, after you log into account platform and click on your username in right top corner that will open a dropdown menu with the account ID along other options.
 
-Another requirement is to have valid credentials to run the connector with. You can use either basic auth (username and password) or SCIM token. To use the SCIM token, you have to enable User provisioning in the account settings.
+Another requirement is to have valid credentials to run the connector with. You can use either basic auth (username and password).
 
 To get more data about workspaces, you will need to provide a Databricks workspace access token for each workspace you want to sync. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new token. You can also use a basic auth across all workspaces you have access to, but this is not recommended as the token is more secure and must be scoped to specific workspaces.
 
@@ -83,7 +83,6 @@ Flags:
       --log-level string           The log level: debug, info, warn, error ($BATON_LOG_LEVEL) (default "info")
       --password string            The Databricks password used to connect to the Databricks API. ($BATON_PASSWORD)
   -p, --provisioning               This must be set in order for provisioning actions to be enabled. ($BATON_PROVISIONING)
-      --scim-token string          The Databricks SCIM token used to connect to the Databricks Account API. ($BATON_SCIM_TOKEN)
       --username string            The Databricks username used to connect to the Databricks API. ($BATON_USERNAME)
   -v, --version                    version for baton-databricks
       --workspace-tokens strings   The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API. ($BATON_WORKSPACE_TOKENS)
