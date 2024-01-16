@@ -20,10 +20,10 @@ const (
 	MarketplaceAdminRole = "marketplace.admin"
 
 	// Roles (or Entitlements) relevant to Workspace API (Grantable to User, Group or ServicePrincipal)
-	// WorkspaceAccessRole    = "workspace_access"
-	// SQLAccessRole          = "databricks-sql-access"
-	// ClusterCreateRole      = "allow-cluster-create"
-	// InstancePoolCreateRole = "allow-instance-pool-create"
+	WorkspaceAccessRole    = "workspace_access"
+	SQLAccessRole          = "databricks-sql-access"
+	ClusterCreateRole      = "allow-cluster-create"
+	InstancePoolCreateRole = "allow-instance-pool-create"
 
 	UsersType             = "users"
 	GroupsType            = "groups"
@@ -49,6 +49,7 @@ func accountResource(ctx context.Context, accID string) (*v2.Resource, error) {
 			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: workspaceResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
 		),
 	)
 
@@ -101,51 +102,9 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		// rule set contains role and its principals, each one with resource type and resource id seperated by "/"
 		if strings.Contains(ruleSet.Role, MarketplaceAdminRole) {
 			for _, p := range ruleSet.Principals {
-				pp := strings.Split(p, "/")
-				if len(pp) != 2 {
-					return nil, "", nil, fmt.Errorf("databricks-connector: invalid principal format: %s", p)
-				}
-
-				var resourceId *v2.ResourceId
-				principalType, principalID := pp[0], pp[1]
-
-				// principalID represent user's username or service principal's application ID,
-				// so we need to find the actual user or service principal ID
-				switch principalType {
-				case UsersType:
-					users, _, err := a.client.ListUsers(
-						ctx,
-						&databricks.PaginationVars{Count: 1},
-						databricks.NewFilterVars(fmt.Sprintf("userName eq '%s'", principalID)),
-					)
-
-					if err != nil {
-						return nil, "", nil, fmt.Errorf("databricks-connector: failed to find user %s: %w", principalID, err)
-					}
-
-					if len(users) == 0 {
-						return nil, "", nil, fmt.Errorf("databricks-connector: failed to find user %s", principalID)
-					}
-
-					resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: users[0].ID}
-				case ServicePrincipalsType:
-					servicePrincipals, _, err := a.client.ListServicePrincipals(
-						ctx,
-						&databricks.PaginationVars{Count: 1},
-						databricks.NewFilterVars(fmt.Sprintf("applicationId eq '%s'", principalID)),
-					)
-
-					if err != nil {
-						return nil, "", nil, fmt.Errorf("databricks-connector: failed to find service principal %s: %w", principalID, err)
-					}
-
-					if len(servicePrincipals) == 0 {
-						return nil, "", nil, fmt.Errorf("databricks-connector: failed to find service principal %s", principalID)
-					}
-
-					resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: servicePrincipals[0].ID}
-				default:
-					return nil, "", nil, fmt.Errorf("databricks-connector: invalid principal type: %s", principalType)
+				resourceId, err := prepareResourceID(ctx, a.client, p)
+				if err != nil {
+					return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId))

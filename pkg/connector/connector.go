@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -20,9 +21,13 @@ type Databricks struct {
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
 	return []connectorbuilder.ResourceSyncer{
-		// TODO: implement workspace builder that will be able to use different clients for different workspaces
-		// newWorkspaceBuilder(d.client, d.configs),
+		newAccountBuilder(d.client),
+		newGroupBuilder(d.client),
+		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
+		// TODO: implement workspace builder that will be able to use different clients for different workspaces
+		newWorkspaceBuilder(d.client),
+		newRoleBuilder(d.client),
 	}
 }
 
@@ -35,25 +40,30 @@ func (d *Databricks) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.
 // Metadata returns metadata about the connector.
 func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
-		DisplayName: "My Baton Connector",
-		Description: "The template implementation of a baton connector",
+		DisplayName: "Databricks",
+		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton",
 	}, nil
 }
 
 // Validate is called to ensure that the connector is properly configured. It should exercise any API credentials
 // to be sure that they are valid.
 func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, error) {
+	_, _, err := d.client.ListUsers(ctx, &databricks.PaginationVars{Count: 1}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to validate client: %w", err)
+	}
+
 	return nil, nil
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, configs []databricks.Config) (*Databricks, error) {
+func New(ctx context.Context, acc string, configs []databricks.Config) (*Databricks, error) {
 	httpClient, err := uhttp.NewClient(ctx, uhttp.WithLogger(true, ctxzap.Extract(ctx)))
 	if err != nil {
 		return nil, err
 	}
 
-	client := databricks.NewClient(httpClient, configs[0])
+	client := databricks.NewClient(httpClient, acc, configs[0])
 
 	return &Databricks{
 		client,

@@ -40,7 +40,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		return nil, "", nil, nil
 	}
 
-	workspaces, err := w.client.ListWorkspaces(ctx, &databricks.PaginationVars{Count: ResourcesPageSize})
+	workspaces, err := w.client.ListWorkspaces(ctx)
 	if err != nil {
 		return nil, "", nil, err
 	}

@@ -186,62 +186,9 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			pp := strings.Split(p, "/")
-			if len(pp) != 2 {
-				return nil, "", nil, fmt.Errorf("databricks-connector: invalid principal format: %s", p)
-			}
-
-			principalType, principal := pp[0], pp[1]
-			var resourceId *v2.ResourceId
-
-			switch principalType {
-			case UsersType:
-				su, _, err := g.client.ListUsers(
-					ctx,
-					&databricks.PaginationVars{Count: 1},
-					databricks.NewFilterVars(fmt.Sprintf("userName eq '%s'", principal)),
-				)
-				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
-				}
-
-				if len(su) == 0 {
-					return nil, "", nil, fmt.Errorf("databricks-connector: user %s not found", principal)
-				}
-
-				resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: su[0].ID}
-			case GroupsType:
-				sg, _, err := g.client.ListGroups(
-					ctx,
-					&databricks.PaginationVars{Count: 1},
-					databricks.NewFilterVars(fmt.Sprintf("displayName eq '%s'", principal)),
-				)
-				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
-				}
-
-				if len(sg) == 0 {
-					return nil, "", nil, fmt.Errorf("databricks-connector: group %s not found", principal)
-				}
-
-				resourceId = &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: sg[0].ID}
-			case ServicePrincipalsType:
-				ss, _, err := g.client.ListServicePrincipals(
-					ctx,
-					&databricks.PaginationVars{Count: 1},
-					databricks.NewFilterVars(fmt.Sprintf("displayName eq '%s'", principal)),
-				)
-				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to list service principals: %w", err)
-				}
-
-				if len(ss) == 0 {
-					return nil, "", nil, fmt.Errorf("databricks-connector: service principal %s not found", principal)
-				}
-
-				resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: principal}
-			default:
-				return nil, "", nil, fmt.Errorf("databricks-connector: invalid principal type: %s", principalType)
+			resourceId, err := prepareResourceID(ctx, g.client, p)
+			if err != nil {
+				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
 
 			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId))
