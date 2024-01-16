@@ -56,10 +56,12 @@ func convertPageToken(token string) (uint, error) {
 	return uint(page), nil
 }
 
-func prepareNextToken(page uint, pageTotal uint, total uint) string {
+// prepareNextToken prepares the next page token.
+// It calculates the next page number and returns it as a string.
+func prepareNextToken(page uint, pageTotal int, total uint) string {
 	var token string
 
-	next := page + pageTotal
+	next := page + uint(pageTotal)
 	if next < total+1 {
 		token = strconv.Itoa(int(next))
 	}
@@ -67,14 +69,16 @@ func prepareNextToken(page uint, pageTotal uint, total uint) string {
 	return token
 }
 
+// prepareResourceID prepares a resource ID for a user, group, or service principal.
+// It's used when we need to parse results from listing rule sets.
 func prepareResourceID(ctx context.Context, c *databricks.Client, principal string) (*v2.ResourceId, error) {
 	pp := strings.Split(principal, "/")
 	if len(pp) != 2 {
 		return nil, fmt.Errorf("invalid principal format: %s", principal)
 	}
 
-	// principalID represent user's username or service principal's application ID,
-	// so we need to find the actual user or service principal ID
+	// principalID represent user's username, service principal's application ID, or group display name,
+	// so we need to find the actual user, service principal or group ID
 	principalType, principal := pp[0], pp[1]
 	var resourceId *v2.ResourceId
 

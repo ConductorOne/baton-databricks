@@ -29,6 +29,7 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 	members := make([]string, len(group.Members))
 
 	for i, member := range group.Members {
+		// Ref contains both the type and the ID of the member
 		members[i] = member.Ref
 	}
 
@@ -77,7 +78,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		databricks.NewGroupAttrVars(),
 	)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
 	}
 
 	var rv []*v2.Resource
@@ -92,7 +93,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	token := prepareNextToken(page, uint(len(groups)), total)
+	token := prepareNextToken(page, len(groups), total)
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -102,19 +103,15 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 }
 
 // Entitlements return all entitlements relevant to the group.
-// Databricks Group can be linked with group in some workspace
-// and this function takes this in consideration.
-// The difference is that you can setup `entitlements` for the group in the workspace.
 // Group can have members, which represent membership entitlements,
 // it can have permissions assigned to it, which represent role permissions entitlements,
-// it can have roles assigned to it, which represent entitlements in Role resource,
-// and it can have entitlements assigned to it, which represent entitlements in the workspace.
+// and it can also have entitlements assigned to it, which are represented in role resource type.
 func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 
-	// membership entitlement - for user members
+	// membership entitlement - for group members
 	memberAssignmentOptions := []ent.EntitlementOption{
-		ent.WithGrantableTo(userResourceType),
+		ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
 		ent.WithDisplayName(fmt.Sprintf("%s %s", resource.DisplayName, groupMemberEntitlement)),
 		ent.WithDescription(fmt.Sprintf("%s %s in Databricks", resource.DisplayName, groupMemberEntitlement)),
 	}
@@ -142,7 +139,7 @@ func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 }
 
 // Grants return all grants relevant to the group.
-// Databricks Groups have membership and role grants.
+// Databricks Groups have membership and role permissions grants (granting identity resource some permission to this specific group, e.g. group manager).
 func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
 	var rv []*v2.Grant
 
@@ -168,6 +165,8 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			switch memberType {
 			case "Users":
 				resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: memberID}
+			case "Groups":
+				resourceId = &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: memberID}
 			case "ServicePrincipals":
 				resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: memberID}
 			default:
@@ -178,7 +177,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		}
 	}
 
-	// role grants
+	// role permissions grants
 	ruleSets, err := g.client.ListRuleSets(ctx, "groups", resource.Id.Resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)

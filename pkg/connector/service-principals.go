@@ -64,7 +64,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		databricks.NewServicePrincipalAttrVars(),
 	)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list service principals: %w", err)
 	}
 
 	var rv []*v2.Resource
@@ -79,7 +79,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		rv = append(rv, gr)
 	}
 
-	token := prepareNextToken(page, uint(len(servicePrincipals)), total)
+	token := prepareNextToken(page, len(servicePrincipals), total)
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)

@@ -44,6 +44,7 @@ func roleResource(ctx context.Context, role string, ent bool, parent *v2.Resourc
 		"role_id": role,
 	}
 
+	// To differentiate between what type of role does the resource represent.
 	if ent {
 		profile["type"] = EntitlementType
 	} else {
@@ -98,6 +99,7 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 	return rv, "", nil, nil
 }
 
+// Entitlements returns membership entitlements for a given role.
 func (r *roleBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 
@@ -175,7 +177,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			}
 		}
 
-		token := prepareNextToken(page, uint(len(users)), total)
+		token := prepareNextToken(page, len(users), total)
 		err = bag.Next(token)
 		if err != nil {
 			return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -209,7 +211,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			}
 		}
 
-		token := prepareNextToken(page, uint(len(groups)), total)
+		token := prepareNextToken(page, len(groups), total)
 		err = bag.Next(token)
 		if err != nil {
 			return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -244,7 +246,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			}
 		}
 
-		token := prepareNextToken(page, uint(len(servicePrincipals)), total)
+		token := prepareNextToken(page, len(servicePrincipals), total)
 		err = bag.Next(token)
 		if err != nil {
 			return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
