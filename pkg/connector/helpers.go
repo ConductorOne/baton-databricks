@@ -44,7 +44,7 @@ func parsePageToken(i string, resourceID *v2.ResourceId) (*pagination.Bag, uint,
 
 // convertPageToken converts a string token into an int.
 func convertPageToken(token string) (uint, error) {
-	if token == "\x02" || token == "" {
+	if token == "" {
 		return 1, nil
 	}
 

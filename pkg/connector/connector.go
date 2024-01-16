@@ -48,7 +48,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 // Validate is called to ensure that the connector is properly configured. It should exercise any API credentials
 // to be sure that they are valid.
 func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, error) {
-	_, _, err := d.client.ListUsers(ctx, &databricks.PaginationVars{Count: 1}, nil)
+	_, _, err := d.client.ListUsers(ctx, &databricks.PaginationVars{Count: 1})
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to validate client: %w", err)
 	}
