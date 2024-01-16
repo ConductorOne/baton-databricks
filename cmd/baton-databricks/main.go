@@ -37,9 +37,9 @@ func main() {
 	}
 }
 
-// config defines the external configuration required for the connector to run.
-// you can run this connector in multiple modes, Account API mode or Workspace API mode
-// if you specify workspaces, connector will try to sync resources in those workspaces as well
+// Config defines the external configuration required for the connector to run.
+// You can run this connector in multiple modes, Account API mode or Workspace API mode.
+// If you specify workspaces, connector will try to sync resources in those workspaces as well.
 func prepareClientConfigs(ctx context.Context, cfg *config) []databricks.Config {
 	var cv []databricks.Config
 	l := ctxzap.Extract(ctx)
@@ -51,7 +51,7 @@ func prepareClientConfigs(ctx context.Context, cfg *config) []databricks.Config 
 		cv = append(cv, c)
 
 		if cfg.AreWorkspacesSet() {
-			fmt.Printf("using workspace API mode\n\tworkspaces: %v\n", cfg.Workspaces)
+			l.Info("using workspace API mode", zap.String("account-id", cfg.AccountId), zap.Strings("workspaces", cfg.Workspaces))
 
 			for _, workspace := range cfg.Workspaces {
 				c := databricks.NewWorkspaceConfig(workspace, cfg.AccountId, cAuth)
@@ -61,19 +61,6 @@ func prepareClientConfigs(ctx context.Context, cfg *config) []databricks.Config 
 	}
 
 	return cv
-
-	// TODO: Handle workspaces without basic auth
-	// l.Info("using workspace API mode", zap.String("account-id", cfg.AccountId), zap.Strings("workspaces", cfg.Workspaces))
-	//
-	// if cfg.AreWorkspacesSet() {
-	// 	fmt.Printf("using workspace API mode\n\tworkspaces: %v\n", cfg.Workspaces)
-	// }
-	//
-	// for i, workspace := range cfg.Workspaces {
-	// 	cAuth := databricks.NewTokenAuth(cfg.Tokens[i])
-	// 	c := databricks.NewWorkspaceConfig(workspace, cfg.AccountId, cAuth)
-	//
-	// 	cv = append(cv, c)
 }
 
 func getConnector(ctx context.Context, cfg *config) (types.ConnectorServer, error) {
