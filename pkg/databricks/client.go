@@ -13,17 +13,17 @@ const (
 	Base        = "cloud.databricks.com"
 	APIEndpoint = "/api/2.0"
 
-	// helpers
+	// Helper endpoints.
 	PreviewEndpoint       = "/preview"
 	AccessControlEndpoint = "/access-control"
 	SCIMEndpoint          = "/scim/v2"
 	AccountsEndpoint      = "/accounts"
 
-	// base hosts
+	// Base hosts.
 	AccountBaseHost   = "accounts." + Base + APIEndpoint
 	WorkspaceBaseHost = "%s." + Base + APIEndpoint + PreviewEndpoint
 
-	// resource endpoints
+	// Resource endpoints.
 	UsersEndpoint             = "/Users"
 	GroupsEndpoint            = "/Groups"
 	ServicePrincipalsEndpoint = "/ServicePrincipals"

@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	// Roles relevant to Account API (Grantable to User or ServicePrincipal)
+	// Roles relevant to Account API (Grantable to User or ServicePrincipal).
 	AccountAdminRole     = "account_admin"
 	MarketplaceAdminRole = "marketplace.admin"
 
-	// Roles (or Entitlements) relevant to Workspace API (Grantable to User, Group or ServicePrincipal)
+	// Roles (or Entitlements) relevant to Workspace API (Grantable to User, Group or ServicePrincipal).
 	WorkspaceAccessRole    = "workspace_access"
 	SQLAccessRole          = "databricks-sql-access"
 	ClusterCreateRole      = "allow-cluster-create"
@@ -73,7 +73,7 @@ func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 	return rv, "", nil, nil
 }
 
-// Entitlements returns slice of entitlements for marketplace admins under account
+// Entitlements returns slice of entitlements for marketplace admins under account.
 func (a *accountBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 
@@ -88,7 +88,7 @@ func (a *accountBuilder) Entitlements(_ context.Context, resource *v2.Resource, 
 	return rv, "", nil, nil
 }
 
-// Grants returns grants for marketplace admins under account
+// Grants returns grants for marketplace admins under account.
 func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
 	var rv []*v2.Grant
 

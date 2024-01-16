@@ -89,10 +89,6 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 }
 
 // Entitlements return all entitlements relevant to the servicePrincipal.
-// Similar to Groups, ServicePrincipals have:
-// - role entitlements (can have account_admin or marketplace_admin roles)
-// - role permissions entitlements (can have specific roles - e.g. manager or user)
-// - workspace permissions entitlements
 func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 

@@ -13,7 +13,7 @@ type Config interface {
 	IsScopedToWorkspace() bool
 }
 
-// Account Config for account API
+// Account Config for account API.
 type AccountConfig struct {
 	acc  string
 	auth Auth
@@ -69,7 +69,7 @@ func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, er
 	return &u, nil
 }
 
-// Workspace Config for workspace API
+// Workspace Config for workspace API.
 type WorkspaceConfig struct {
 	workspace string
 	auth      Auth
