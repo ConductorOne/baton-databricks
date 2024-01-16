@@ -6,71 +6,22 @@ import (
 	"net/url"
 )
 
-type Auth interface {
-	Apply(req *http.Request)
+type Config interface {
+	BaseUrl() *url.URL
+	ResolvePath(base *url.URL, endpoint string) (*url.URL, error)
+	ApplyAuth(req *http.Request)
+	IsScopedToWorkspace() bool
 }
 
-type TokenAuth struct {
-	Token string
-}
-
-func NewTokenAuth(token string) *TokenAuth {
-	return &TokenAuth{
-		Token: token,
-	}
-}
-
-func (t *TokenAuth) Apply(req *http.Request) {
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.Token))
-}
-
-type BasicAuth struct {
-	Username string
-	Password string
-}
-
-func NewBasicAuth(username, password string) *BasicAuth {
-	return &BasicAuth{
-		Username: username,
-		Password: password,
-	}
-}
-
-func (b *BasicAuth) Apply(req *http.Request) {
-	req.SetBasicAuth(b.Username, b.Password)
-}
-
-type WorkspaceConfig struct {
-	baseHost string
-	auth     Auth
-}
-
-func NewWorkspaceConfig(baseHost string, auth Auth) *WorkspaceConfig {
-	return &WorkspaceConfig{
-		baseHost,
-		auth,
-	}
-}
-
-func (c *WorkspaceConfig) BaseUrl() *url.URL {
-	return &url.URL{
-		Scheme: "https",
-		Host:   c.baseHost,
-	}
-}
-
-func (c *WorkspaceConfig) ApplyAuth(req *http.Request) {
-	c.auth.Apply(req)
-}
-
+// Account Config for account API
 type AccountConfig struct {
-	accountId string
-	auth      Auth
+	acc  string
+	auth Auth
 }
 
-func NewAccountConfig(accountId string, auth Auth) *AccountConfig {
+func NewAccountConfig(acc string, auth Auth) *AccountConfig {
 	return &AccountConfig{
-		accountId,
+		acc,
 		auth,
 	}
 }
@@ -79,7 +30,6 @@ func (c *AccountConfig) BaseUrl() *url.URL {
 	return &url.URL{
 		Scheme: "https",
 		Host:   AccountBaseHost,
-		Path:   fmt.Sprintf(AccountEndpoint, c.accountId),
 	}
 }
 
@@ -87,7 +37,86 @@ func (c *AccountConfig) ApplyAuth(req *http.Request) {
 	c.auth.Apply(req)
 }
 
-type Config interface {
-	BaseUrl() *url.URL
-	ApplyAuth(req *http.Request)
+func (c *AccountConfig) IsScopedToWorkspace() bool {
+	return false
+}
+
+func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, error) {
+	u := *base
+
+	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
+
+	var pathParts []string
+
+	switch endpoint {
+	case UsersEndpoint, GroupsEndpoint, ServicePrincipalsEndpoint:
+		pathParts = []string{baseEndpoint, SCIMEndpoint, endpoint}
+	case RolesEndpoint, RuleSetsEndpoint:
+		pathParts = []string{PreviewEndpoint, baseEndpoint, AccessControlEndpoint, endpoint}
+	case WorkspacesEndpoint:
+		pathParts = []string{baseEndpoint, endpoint}
+	default:
+		return nil, fmt.Errorf("unknown endpoint %s", endpoint)
+	}
+
+	path, err := url.JoinPath(pathParts[0], pathParts[1:]...)
+	if err != nil {
+		return nil, err
+	}
+
+	u.Path = path
+
+	return &u, nil
+}
+
+// Workspace Config for workspace API
+type WorkspaceConfig struct {
+	workspace string
+	auth      Auth
+}
+
+func NewWorkspaceConfig(acc, workspace string, auth Auth) *WorkspaceConfig {
+	return &WorkspaceConfig{
+		workspace,
+		auth,
+	}
+}
+
+func (c *WorkspaceConfig) BaseUrl() *url.URL {
+	return &url.URL{
+		Scheme: "https",
+		Host:   fmt.Sprintf(WorkspaceBaseHost, c.workspace),
+	}
+}
+
+func (c *WorkspaceConfig) IsScopedToWorkspace() bool {
+	return true
+}
+
+func (c *WorkspaceConfig) ApplyAuth(req *http.Request) {
+	c.auth.Apply(req)
+}
+
+func (c WorkspaceConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, error) {
+	u := *base
+
+	var pathParts []string
+
+	switch endpoint {
+	case UsersEndpoint, GroupsEndpoint, ServicePrincipalsEndpoint:
+		pathParts = []string{SCIMEndpoint, endpoint}
+	case RolesEndpoint:
+		pathParts = []string{AccountsEndpoint, AccessControlEndpoint, RolesEndpoint}
+	default:
+		return nil, fmt.Errorf("unknown endpoint %s", endpoint)
+	}
+
+	path, err := url.JoinPath(pathParts[0], pathParts[1:]...)
+	if err != nil {
+		return nil, err
+	}
+
+	u.Path = path
+
+	return &u, nil
 }
