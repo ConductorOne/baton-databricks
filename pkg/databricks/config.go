@@ -1,6 +1,7 @@
 package databricks
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ type Config interface {
 	ResolvePath(base *url.URL, endpoint string) (*url.URL, error)
 	ApplyAuth(req *http.Request)
 	IsScopedToWorkspace() bool
+	GetClient(ctx context.Context) (*http.Client, error)
 }
 
 // Account Config for account API.
@@ -69,6 +71,10 @@ func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, er
 	return &u, nil
 }
 
+func (c *AccountConfig) GetClient(ctx context.Context) (*http.Client, error) {
+	return c.auth.GetClient(ctx)
+}
+
 // Workspace Config for workspace API.
 type WorkspaceConfig struct {
 	workspace string
@@ -119,4 +125,8 @@ func (c WorkspaceConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, 
 	u.Path = path
 
 	return &u, nil
+}
+
+func (c *WorkspaceConfig) GetClient(ctx context.Context) (*http.Client, error) {
+	return c.auth.GetClient(ctx)
 }

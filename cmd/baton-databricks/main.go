@@ -42,21 +42,27 @@ func main() {
 // If you specify workspaces, connector will try to sync resources in those workspaces as well.
 func prepareClientConfigs(ctx context.Context, cfg *config) []databricks.Config {
 	var cv []databricks.Config
+	var cAuth databricks.Auth
 	l := ctxzap.Extract(ctx)
 
+	// Account API configs
 	if cfg.IsBasicAuth() {
-		l.Info("using account API mode", zap.String("account-id", cfg.AccountId), zap.String("username", cfg.Username))
-		cAuth := databricks.NewBasicAuth(cfg.Username, cfg.Password)
+		l.Info("using basic auth", zap.String("account-id", cfg.AccountId), zap.String("username", cfg.Username))
+		cAuth = databricks.NewBasicAuth(cfg.Username, cfg.Password)
 		c := databricks.NewAccountConfig(cfg.AccountId, cAuth)
 		cv = append(cv, c)
+	} else if cfg.IsOauth() {
+		l.Info("using oauth", zap.String("account-id", cfg.AccountId), zap.String("client-id", cfg.DatabricksClientId))
+		cAuth = databricks.NewOAuth2(cfg.AccountId, cfg.DatabricksClientId, cfg.DatabricksClientSecret)
+		c := databricks.NewAccountConfig(cfg.AccountId, cAuth)
+		cv = append(cv, c)
+	}
 
-		if cfg.AreWorkspacesSet() {
-			l.Info("using workspace API mode", zap.String("account-id", cfg.AccountId), zap.Strings("workspaces", cfg.Workspaces))
-
-			for _, workspace := range cfg.Workspaces {
-				c := databricks.NewWorkspaceConfig(workspace, cfg.AccountId, cAuth)
-				cv = append(cv, c)
-			}
+	// Workspace API configs
+	if cfg.AreWorkspacesSet() {
+		for _, workspace := range cfg.Workspaces {
+			c := databricks.NewWorkspaceConfig(workspace, cfg.AccountId, cAuth)
+			cv = append(cv, c)
 		}
 	}
 

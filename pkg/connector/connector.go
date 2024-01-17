@@ -9,8 +9,6 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/conductorone/baton-sdk/pkg/uhttp"
-	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 )
 
 type Databricks struct {
@@ -58,7 +56,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 // New returns a new instance of the connector.
 func New(ctx context.Context, acc string, configs []databricks.Config) (*Databricks, error) {
-	httpClient, err := uhttp.NewClient(ctx, uhttp.WithLogger(true, ctxzap.Extract(ctx)))
+	httpClient, err := configs[0].GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
