@@ -114,6 +114,21 @@ func prepareResourceID(ctx context.Context, c *databricks.Client, principal stri
 	return resourceId, anns, nil
 }
 
+// prepareResourceType prepares a resource type for a user, group, or service principal.
+// It's used when we need to parse results from listing rule sets.
+func prepareResourceType(principal *databricks.WorkspacePrincipal) (*v2.ResourceType, error) {
+	switch {
+	case principal.UserName != "":
+		return userResourceType, nil
+	case principal.GroupDisplayName != "":
+		return groupResourceType, nil
+	case principal.ServicePrincipalAppID != "":
+		return servicePrincipalResourceType, nil
+	default:
+		return nil, fmt.Errorf("invalid principal: %v", principal)
+	}
+}
+
 func expandGrantForGroup(id string) *v2.GrantExpandable {
 	return &v2.GrantExpandable{
 		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", id, groupMemberEntitlement)},

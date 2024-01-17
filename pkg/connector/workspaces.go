@@ -2,13 +2,19 @@ package connector
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
+
+const workspaceMemberEntitlement = "member"
 
 type workspaceBuilder struct {
 	client       *databricks.Client
@@ -42,7 +48,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	workspaces, err := w.client.ListWorkspaces(ctx)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
 	var rv []*v2.Resource
@@ -61,15 +67,46 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 }
 
 func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
-	// TODO: Implement Workspace API support
+	var rv []*v2.Entitlement
 
-	return nil, "", nil, nil
+	memberAssignmentOptions := []ent.EntitlementOption{
+		ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
+		ent.WithDisplayName(fmt.Sprintf("%s %s", resource.DisplayName, workspaceMemberEntitlement)),
+		ent.WithDescription(fmt.Sprintf("%s %s in Databricks", resource.DisplayName, workspaceMemberEntitlement)),
+	}
+
+	rv = append(rv, ent.NewAssignmentEntitlement(resource, workspaceMemberEntitlement, memberAssignmentOptions...))
+
+	return rv, "", nil, nil
 }
 
 func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
-	// TODO: Implement Workspace API support
+	assignments, err := w.client.ListWorkspaceMembers(ctx, resource.Id.Resource)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
+	}
 
-	return nil, "", nil, nil
+	var rv []*v2.Grant
+	for _, assignment := range assignments {
+		resourceType, err := prepareResourceType(assignment.Principal)
+		if err != nil {
+			return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource type: %w", err)
+		}
+
+		resourceID, err := rs.NewResourceID(resourceType, assignment.Principal.ID)
+		if err != nil {
+			return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource ID: %w", err)
+		}
+
+		var annotations []protoreflect.ProtoMessage
+		if resourceType == groupResourceType {
+			annotations = append(annotations, expandGrantForGroup(resourceID.Resource))
+		}
+
+		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
+	}
+
+	return rv, "", nil, nil
 }
 
 func newWorkspaceBuilder(client *databricks.Client) *workspaceBuilder {

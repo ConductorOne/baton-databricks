@@ -99,6 +99,17 @@ type Workspace struct {
 	Status string `json:"workspace_status"`
 }
 
+type WorkspacePrincipal struct {
+	ServicePrincipalAppID string `json:"service_principal_name"`
+	GroupDisplayName      string `json:"group_name"`
+	UserName              string `json:"user_name"`
+	ID                    int    `json:"principal_id"`
+}
+
+type WorkspaceAssignment struct {
+	Principal *WorkspacePrincipal `json:"principal"`
+}
+
 type Role struct {
 	Name string `json:"name"`
 }

@@ -24,12 +24,13 @@ const (
 	WorkspaceBaseHost = "%s." + Base + APIEndpoint + PreviewEndpoint
 
 	// Resource endpoints.
-	UsersEndpoint             = "/Users"
-	GroupsEndpoint            = "/Groups"
-	ServicePrincipalsEndpoint = "/ServicePrincipals"
-	RolesEndpoint             = "/assignable-roles"
-	RuleSetsEndpoint          = "/rule-sets"
-	WorkspacesEndpoint        = "/workspaces"
+	UsersEndpoint                = "/Users"
+	GroupsEndpoint               = "/Groups"
+	ServicePrincipalsEndpoint    = "/ServicePrincipals"
+	RolesEndpoint                = "/assignable-roles"
+	RuleSetsEndpoint             = "/rule-sets"
+	WorkspacesEndpoint           = "/workspaces"
+	WorkspaceAssignmentsEndpoint = "/permissionassignments"
 )
 
 type Client struct {
@@ -207,6 +208,27 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	}
 
 	return res, nil
+}
+
+func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([]WorkspaceAssignment, error) {
+	var res struct {
+		Assignments []WorkspaceAssignment `json:"permission_assignments"`
+	}
+
+	u := *c.baseUrl
+	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
+	path, err := url.JoinPath(baseEndpoint, WorkspacesEndpoint, workspaceID, WorkspaceAssignmentsEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	u.Path = path
+
+	err = c.Get(ctx, &u, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res.Assignments, nil
 }
 
 func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId string) ([]RuleSet, error) {
