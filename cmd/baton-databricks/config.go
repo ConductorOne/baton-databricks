@@ -65,10 +65,22 @@ func validateConfig(ctx context.Context, cfg *config) error {
 // cmdFlags sets the cmdFlags required for the connector.
 func cmdFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().String("account-id", "", "The Databricks account ID used to connect to the Databricks Account and Workspace API. ($BATON_ACCOUNT_ID)")
-	cmd.PersistentFlags().String("databricks-client-id", "", "The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_ID)")
-	cmd.PersistentFlags().String("databricks-client-secret", "", "The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_SECRET)")
+	cmd.PersistentFlags().String(
+		"databricks-client-id",
+		"",
+		"The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_ID)",
+	)
+	cmd.PersistentFlags().String(
+		"databricks-client-secret",
+		"",
+		"The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_SECRET)",
+	)
 	cmd.PersistentFlags().String("username", "", "The Databricks username used to connect to the Databricks API. ($BATON_USERNAME)")
 	cmd.PersistentFlags().String("password", "", "The Databricks password used to connect to the Databricks API. ($BATON_PASSWORD)")
 	cmd.PersistentFlags().StringSlice("workspaces", []string{}, "Limit syncing to the specified workspaces. ($BATON_WORKSPACES)")
-	cmd.PersistentFlags().StringSlice("workspace-tokens", []string{}, "The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API. ($BATON_WORKSPACE_TOKENS)")
+	cmd.PersistentFlags().StringSlice(
+		"workspace-tokens",
+		[]string{},
+		"The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API. ($BATON_WORKSPACE_TOKENS)",
+	)
 }
