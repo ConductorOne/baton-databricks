@@ -10,9 +10,9 @@ Check out [Baton](https://github.com/conductorone/baton) to learn more about the
 
 To work with the connector, you can choose from multiple ways to run it, but the main requirement is to have a Databricks account and its ID. You can find the ID of an account, after you log into account platform and click on your username in right top corner that will open a dropdown menu with the account ID along other options.
 
-Another requirement is to have valid credentials to run the connector with. You can use either basic auth (username and password).
+Another requirement is to have valid credentials to run the connector with. You can use either OAuth client credentials flow or basic auth flow (username and password). To use the OAuth, you need to create a service principal and add OAuth secret (client id and secret) to it. You can do that by going to the user management tab and clicking on the Service Principals tab. Then click on the Add Service principal button and name it. You then need to add OAuth secret to it by clicking on the Generate secret button. You can use this secret to authenticate across all workspaces that service principal has access to. To use basic auth, you just need to provide a username and password of a user that has access to the Databricks API. 
 
-To get more data about workspaces, you will need to provide a Databricks workspace access token for each workspace you want to sync. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new token. You can also use a basic auth across all workspaces you have access to, but this is not recommended as the token is more secure and must be scoped to specific workspaces.
+To get more data about workspaces, you will need to provide a Databricks workspace access token for each workspace you want to sync or already mentioned OAuth secret. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new token. You can also use a basic auth across all workspaces you have access to, but this is not recommended as the token is more secure and must be scoped to specific workspaces.
 
 # Getting Started
 
@@ -74,19 +74,21 @@ Available Commands:
   help               Help about any command
 
 Flags:
-      --account-id string          The Databricks account ID used to connect to the Databricks Account and Workspace API. ($BATON_ACCOUNT_ID)
-      --client-id string           The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
-      --client-secret string       The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
-  -f, --file string                The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")
-  -h, --help                       help for baton-databricks
-      --log-format string          The output format for logs: json, console ($BATON_LOG_FORMAT) (default "json")
-      --log-level string           The log level: debug, info, warn, error ($BATON_LOG_LEVEL) (default "info")
-      --password string            The Databricks password used to connect to the Databricks API. ($BATON_PASSWORD)
-  -p, --provisioning               This must be set in order for provisioning actions to be enabled. ($BATON_PROVISIONING)
-      --username string            The Databricks username used to connect to the Databricks API. ($BATON_USERNAME)
-  -v, --version                    version for baton-databricks
-      --workspace-tokens strings   The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API. ($BATON_WORKSPACE_TOKENS)
-      --workspaces strings         Limit syncing to the specified workspaces. ($BATON_WORKSPACES)
+      --account-id string                 The Databricks account ID used to connect to the Databricks Account and Workspace API. ($BATON_ACCOUNT_ID)
+      --client-id string                  The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
+      --client-secret string              The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
+      --databricks-client-id string       The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_ID)
+      --databricks-client-secret string   The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_SECRET)
+  -f, --file string                       The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")
+  -h, --help                              help for baton-databricks
+      --log-format string                 The output format for logs: json, console ($BATON_LOG_FORMAT) (default "json")
+      --log-level string                  The log level: debug, info, warn, error ($BATON_LOG_LEVEL) (default "info")
+      --password string                   The Databricks password used to connect to the Databricks API. ($BATON_PASSWORD)
+  -p, --provisioning                      This must be set in order for provisioning actions to be enabled. ($BATON_PROVISIONING)
+      --username string                   The Databricks username used to connect to the Databricks API. ($BATON_USERNAME)
+  -v, --version                           version for baton-databricks
+      --workspace-tokens strings          The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API. ($BATON_WORKSPACE_TOKENS)
+      --workspaces strings                Limit syncing to the specified workspaces. ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```
