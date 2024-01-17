@@ -102,12 +102,12 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		// rule set contains role and its principals, each one with resource type and resource id seperated by "/"
 		if strings.Contains(ruleSet.Role, MarketplaceAdminRole) {
 			for _, p := range ruleSet.Principals {
-				resourceId, err := prepareResourceID(ctx, a.client, p)
+				resourceId, anns, err := prepareResourceID(ctx, a.client, p)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 				}
 
-				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId))
+				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId, grant.WithAnnotation(anns...)))
 			}
 		}
 	}

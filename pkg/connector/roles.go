@@ -207,7 +207,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create group resource id: %w", err)
 				}
 
-				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, gID))
+				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, gID, grant.WithAnnotation(expandGrantForGroup(g.ID))))
 			}
 		}
 

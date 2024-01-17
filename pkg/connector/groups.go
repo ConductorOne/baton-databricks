@@ -12,6 +12,7 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const groupMemberEntitlement = "member"
@@ -161,19 +162,21 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 			memberType, memberID := pp[0], pp[1]
 			var resourceId *v2.ResourceId
+			var anns []protoreflect.ProtoMessage
 
 			switch memberType {
 			case "Users":
 				resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: memberID}
 			case "Groups":
 				resourceId = &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: memberID}
+				anns = append(anns, expandGrantForGroup(memberID))
 			case "ServicePrincipals":
 				resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: memberID}
 			default:
 				return nil, "", nil, fmt.Errorf("databricks-connector: invalid member type: %s", memberType)
 			}
 
-			rv = append(rv, grant.NewGrant(resource, groupMemberEntitlement, resourceId))
+			rv = append(rv, grant.NewGrant(resource, groupMemberEntitlement, resourceId, grant.WithAnnotation(anns...)))
 		}
 	}
 
@@ -185,12 +188,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			resourceId, err := prepareResourceID(ctx, g.client, p)
+			resourceId, anns, err := prepareResourceID(ctx, g.client, p)
 			if err != nil {
 				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
 
-			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId))
+			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(anns...)))
 		}
 	}
 
