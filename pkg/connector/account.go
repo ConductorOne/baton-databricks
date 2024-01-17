@@ -12,6 +12,7 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const (
@@ -102,12 +103,17 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		// rule set contains role and its principals, each one with resource type and resource id seperated by "/"
 		if strings.Contains(ruleSet.Role, MarketplaceAdminRole) {
 			for _, p := range ruleSet.Principals {
-				resourceId, anns, err := prepareResourceID(ctx, a.client, p)
+				resourceId, err := prepareResourceID(ctx, a.client, p)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 				}
 
-				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId, grant.WithAnnotation(anns...)))
+				var annotations []protoreflect.ProtoMessage
+				if resourceId.ResourceType == groupResourceType.Id {
+					annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
+				}
+
+				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId, grant.WithAnnotation(annotations...)))
 			}
 		}
 	}

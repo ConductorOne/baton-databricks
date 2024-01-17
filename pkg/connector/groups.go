@@ -188,12 +188,17 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			resourceId, anns, err := prepareResourceID(ctx, g.client, p)
+			resourceId, err := prepareResourceID(ctx, g.client, p)
 			if err != nil {
 				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
 
-			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(anns...)))
+			var annotations []protoreflect.ProtoMessage
+			if resourceId.ResourceType == groupResourceType.Id {
+				annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
+			}
+
+			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))
 		}
 	}
 
