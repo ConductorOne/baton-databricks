@@ -12,8 +12,7 @@ import (
 )
 
 type Databricks struct {
-	client  *databricks.Client
-	configs []databricks.Config
+	client *databricks.Client
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
@@ -55,16 +54,13 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, acc string, configs []databricks.Config) (*Databricks, error) {
-	httpClient, err := configs[0].GetClient(ctx)
+func New(ctx context.Context, acc string, auth databricks.Auth) (*Databricks, error) {
+	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	client := databricks.NewClient(httpClient, acc, configs[0])
+	client := databricks.NewClient(httpClient, acc, auth)
 
-	return &Databricks{
-		client,
-		configs,
-	}, nil
+	return &Databricks{client}, nil
 }
