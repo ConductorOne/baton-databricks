@@ -38,6 +38,7 @@ var (
 	workspaceResourceType = &v2.ResourceType{
 		Id:          "workspace",
 		DisplayName: "Workspace",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_GROUP},
 	}
 
 	// The account resource type is for top level resource type.

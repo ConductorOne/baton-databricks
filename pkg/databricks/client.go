@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 const (
@@ -54,6 +55,10 @@ func NewClient(httpClient *http.Client, acc string, auth Auth) *Client {
 		"",
 		acc,
 	}
+}
+
+func (c *Client) GetCurrentConfig() Config {
+	return c.cfg
 }
 
 func (c *Client) UpdateConfig(cfg Config) {
@@ -213,14 +218,15 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	return res, nil
 }
 
-func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([]WorkspaceAssignment, error) {
+func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID int) ([]WorkspaceAssignment, error) {
 	var res struct {
 		Assignments []WorkspaceAssignment `json:"permission_assignments"`
 	}
 
+	id := strconv.Itoa(workspaceID)
 	u := *c.baseUrl
 	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
-	path, err := url.JoinPath(baseEndpoint, WorkspacesEndpoint, workspaceID, WorkspaceAssignmentsEndpoint)
+	path, err := url.JoinPath(baseEndpoint, WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
 	if err != nil {
 		return nil, err
 	}

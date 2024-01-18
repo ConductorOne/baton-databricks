@@ -26,11 +26,21 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 }
 
 func workspaceResource(ctx context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
-	resource, err := rs.NewResource(
+	profile := map[string]interface{}{
+		"workspace_id": workspace.ID,
+	}
+
+	resource, err := rs.NewGroupResource(
 		workspace.Name,
 		workspaceResourceType,
-		workspace.ID,
+		workspace.Host,
+		[]rs.GroupTraitOption{
+			rs.WithGroupProfile(profile),
+		},
 		rs.WithParentResourceID(parent),
+		rs.WithAnnotation(
+			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+		),
 	)
 
 	if err != nil {
@@ -81,7 +91,17 @@ func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource
 }
 
 func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
-	assignments, err := w.client.ListWorkspaceMembers(ctx, resource.Id.Resource)
+	groupTrait, err := rs.GetGroupTrait(resource)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	}
+
+	workspaceID, ok := rs.GetProfileInt64Value(groupTrait.Profile, "workspace_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
+	}
+
+	assignments, err := w.client.ListWorkspaceMembers(ctx, int(workspaceID))
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
