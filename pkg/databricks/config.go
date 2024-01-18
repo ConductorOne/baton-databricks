@@ -1,31 +1,22 @@
 package databricks
 
 import (
-	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 )
 
 type Config interface {
 	BaseUrl() *url.URL
 	ResolvePath(base *url.URL, endpoint string) (*url.URL, error)
-	ApplyAuth(req *http.Request)
-	IsScopedToWorkspace() bool
-	GetClient(ctx context.Context) (*http.Client, error)
 }
 
 // Account Config for account API.
 type AccountConfig struct {
-	acc  string
-	auth Auth
+	acc string
 }
 
 func NewAccountConfig(acc string, auth Auth) *AccountConfig {
-	return &AccountConfig{
-		acc,
-		auth,
-	}
+	return &AccountConfig{acc}
 }
 
 func (c *AccountConfig) BaseUrl() *url.URL {
@@ -33,14 +24,6 @@ func (c *AccountConfig) BaseUrl() *url.URL {
 		Scheme: "https",
 		Host:   AccountBaseHost,
 	}
-}
-
-func (c *AccountConfig) ApplyAuth(req *http.Request) {
-	c.auth.Apply(req)
-}
-
-func (c *AccountConfig) IsScopedToWorkspace() bool {
-	return false
 }
 
 func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, error) {
@@ -71,21 +54,13 @@ func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, er
 	return &u, nil
 }
 
-func (c *AccountConfig) GetClient(ctx context.Context) (*http.Client, error) {
-	return c.auth.GetClient(ctx)
-}
-
 // Workspace Config for workspace API.
 type WorkspaceConfig struct {
 	workspace string
-	auth      Auth
 }
 
-func NewWorkspaceConfig(acc, workspace string, auth Auth) *WorkspaceConfig {
-	return &WorkspaceConfig{
-		workspace,
-		auth,
-	}
+func NewWorkspaceConfig(acc, workspace string) *WorkspaceConfig {
+	return &WorkspaceConfig{workspace}
 }
 
 func (c *WorkspaceConfig) BaseUrl() *url.URL {
@@ -93,14 +68,6 @@ func (c *WorkspaceConfig) BaseUrl() *url.URL {
 		Scheme: "https",
 		Host:   fmt.Sprintf(WorkspaceBaseHost, c.workspace),
 	}
-}
-
-func (c *WorkspaceConfig) IsScopedToWorkspace() bool {
-	return true
-}
-
-func (c *WorkspaceConfig) ApplyAuth(req *http.Request) {
-	c.auth.Apply(req)
 }
 
 func (c WorkspaceConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, error) {
@@ -125,8 +92,4 @@ func (c WorkspaceConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, 
 	u.Path = path
 
 	return &u, nil
-}
-
-func (c *WorkspaceConfig) GetClient(ctx context.Context) (*http.Client, error) {
-	return c.auth.GetClient(ctx)
 }

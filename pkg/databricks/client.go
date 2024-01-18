@@ -37,17 +37,20 @@ type Client struct {
 	httpClient *http.Client
 	baseUrl    *url.URL
 	cfg        Config
+	auth       Auth
 	etag       string
 	acc        string
 }
 
-func NewClient(httpClient *http.Client, acc string, cfg Config) *Client {
+func NewClient(httpClient *http.Client, acc string, auth Auth) *Client {
+	cfg := NewAccountConfig(acc, auth)
 	baseUrl := cfg.BaseUrl()
 
 	return &Client{
 		httpClient,
 		baseUrl,
 		cfg,
+		auth,
 		"",
 		acc,
 	}
@@ -282,7 +285,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 		req.URL.RawQuery = query.Encode()
 	}
 
-	c.cfg.ApplyAuth(req)
+	c.auth.Apply(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
