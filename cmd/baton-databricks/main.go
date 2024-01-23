@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/conductorone/baton-databricks/pkg/connector"
+	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
 var version = "dev"
@@ -27,6 +28,7 @@ func main() {
 	}
 
 	cmd.Version = version
+	cmdFlags(cmd)
 
 	err = cmd.Execute()
 	if err != nil {
@@ -35,10 +37,28 @@ func main() {
 	}
 }
 
-func getConnector(ctx context.Context, cfg *config) (types.ConnectorServer, error) {
+func prepareClientAuth(ctx context.Context, cfg *config) databricks.Auth {
 	l := ctxzap.Extract(ctx)
 
-	cb, err := connector.New(ctx)
+	if cfg.IsBasicAuth() {
+		l.Info("using basic auth", zap.String("account-id", cfg.AccountId), zap.String("username", cfg.Username))
+		cAuth := databricks.NewBasicAuth(cfg.Username, cfg.Password)
+
+		return cAuth
+	} else if cfg.IsOauth() {
+		l.Info("using oauth", zap.String("account-id", cfg.AccountId), zap.String("client-id", cfg.DatabricksClientId))
+		cAuth := databricks.NewOAuth2(cfg.AccountId, cfg.DatabricksClientId, cfg.DatabricksClientSecret)
+
+		return cAuth
+	}
+
+	return nil
+}
+
+func getConnector(ctx context.Context, cfg *config) (types.ConnectorServer, error) {
+	l := ctxzap.Extract(ctx)
+	auth := prepareClientAuth(ctx, cfg)
+	cb, err := connector.New(ctx, cfg.AccountId, auth)
 	if err != nil {
 		l.Error("error creating connector", zap.Error(err))
 		return nil, err
