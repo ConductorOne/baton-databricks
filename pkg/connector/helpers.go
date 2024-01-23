@@ -131,3 +131,9 @@ func expandGrantForGroup(id string) *v2.GrantExpandable {
 		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", id, groupMemberEntitlement)},
 	}
 }
+
+func isValidPrincipal(principal *v2.ResourceId) bool {
+	return principal.ResourceType == userResourceType.Id ||
+		principal.ResourceType == groupResourceType.Id ||
+		principal.ResourceType == servicePrincipalResourceType.Id
+}
