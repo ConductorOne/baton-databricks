@@ -42,7 +42,9 @@ func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.Resource, error) {
 	var roleID string
 	profile := map[string]interface{}{
-		"role_name": role,
+		"role_name":   role,
+		"parent_type": parent.ResourceType,
+		"parent_id":   parent.Resource,
 	}
 
 	// To differentiate between what type of role does the resource represent.
@@ -124,20 +126,29 @@ func (r *roleBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *
 // we have to go through all the users, groups and servicePrincipals to check if they have the role.
 func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
 	var rv []*v2.Grant
-	var cfg databricks.Config
-	isWorkspaceRole := false
-
-	// If the role is a workspace role, we need to update the client config to use the workspace API.
-	if resource.ParentResourceId.ResourceType == workspaceResourceType.Id {
-		cfg = r.client.GetCurrentConfig()
-		workspaceConfig := databricks.NewWorkspaceConfig(r.client.GetAccountId(), resource.ParentResourceId.Resource)
-		r.client.UpdateConfig(workspaceConfig)
-		isWorkspaceRole = true
-	}
 
 	roleTrait, err := rs.GetRoleTrait(resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
+	}
+
+	parentType, ok := rs.GetProfileStringValue(roleTrait.Profile, "parent_type")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(roleTrait.Profile, "parent_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	}
+
+	isWorkspaceRole := parentType == workspaceResourceType.Id
+
+	// If the role is a workspace role, we need to update the client config to use the workspace API.
+	if isWorkspaceRole {
+		r.client.SetWorkspaceConfig(parentID)
+	} else {
+		r.client.SetAccountConfig()
 	}
 
 	roleName, ok := rs.GetProfileStringValue(roleTrait.Profile, "role_name")
@@ -279,11 +290,6 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 	nextPage, err := bag.Marshal()
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
-	}
-
-	// Reset the client config to the original one.
-	if cfg != nil {
-		r.client.UpdateConfig(cfg)
 	}
 
 	return rv, nextPage, nil, nil

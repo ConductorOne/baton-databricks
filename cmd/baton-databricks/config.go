@@ -29,19 +29,11 @@ func (c *config) IsOauth() bool {
 	return c.DatabricksClientId != "" && c.DatabricksClientSecret != ""
 }
 
-func (c *config) AreWorkspacesSet() bool {
-	return len(c.Workspaces) > 0
-}
-
 func (c *config) AreTokensSet() bool {
-	return len(c.Workspaces) == len(c.Tokens)
+	return (len(c.Tokens) > 0) && (len(c.Workspaces) == len(c.Tokens))
 }
 
-func (c *config) IsAccAuthReady() bool {
-	return c.IsOauth() || c.IsBasicAuth()
-}
-
-func (c *config) IsWorkspaceAuthReady() bool {
+func (c *config) IsAuthReady() bool {
 	return c.AreTokensSet() || c.IsOauth() || c.IsBasicAuth()
 }
 
@@ -51,12 +43,8 @@ func validateConfig(ctx context.Context, cfg *config) error {
 		return fmt.Errorf("account ID must be provided, use --help for more information")
 	}
 
-	if !cfg.IsAccAuthReady() {
-		return fmt.Errorf("username and password must be provided, use --help for more information")
-	}
-
-	if cfg.AreWorkspacesSet() && !cfg.IsWorkspaceAuthReady() {
-		return fmt.Errorf("either access token along workspaces or username and password must be provided, use --help for more information")
+	if !cfg.IsAuthReady() {
+		return fmt.Errorf("either access token along workspaces or username and password or client id and client secret must be provided, use --help for more information")
 	}
 
 	return nil

@@ -59,12 +59,18 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 
 	userTraitOptions = append(userTraitOptions, emailOptions...)
 
+	// keep the parent resource id, only if the parent resource is account
+	var options []rs.ResourceOption
+	if parent.ResourceType == accountResourceType.Id {
+		options = append(options, rs.WithParentResourceID(parent))
+	}
+
 	resource, err := rs.NewUserResource(
 		user.DisplayName,
 		userResourceType,
 		user.ID,
 		userTraitOptions,
-		rs.WithParentResourceID(parent),
+		options...,
 	)
 
 	if err != nil {
@@ -79,6 +85,12 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
 	if parentResourceID == nil {
 		return nil, "", nil, nil
+	}
+
+	if parentResourceID.ResourceType == workspaceResourceType.Id {
+		u.client.SetWorkspaceConfig(parentResourceID.Resource)
+	} else {
+		u.client.SetAccountConfig()
 	}
 
 	bag, page, err := parsePageToken(pToken.Token, &v2.ResourceId{ResourceType: userResourceType.Id})

@@ -17,17 +17,29 @@ type Auth interface {
 }
 
 type TokenAuth struct {
-	Token string
+	Tokens           map[string]string
+	CurrentWorkspace string
 }
 
-func NewTokenAuth(token string) *TokenAuth {
+func NewTokenAuth(workspaces, tokens []string) *TokenAuth {
+	tokensMap := make(map[string]string)
+
+	for i, workspace := range workspaces {
+		tokensMap[workspace] = tokens[i]
+	}
+
 	return &TokenAuth{
-		Token: token,
+		Tokens:           tokensMap,
+		CurrentWorkspace: workspaces[0],
 	}
 }
 
 func (t *TokenAuth) Apply(req *http.Request) {
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.Token))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.Tokens[t.CurrentWorkspace]))
+}
+
+func (t *TokenAuth) SetWorkspace(workspace string) {
+	t.CurrentWorkspace = workspace
 }
 
 func (t *TokenAuth) GetClient(ctx context.Context) (*http.Client, error) {

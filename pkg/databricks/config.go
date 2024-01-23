@@ -15,7 +15,7 @@ type AccountConfig struct {
 	acc string
 }
 
-func NewAccountConfig(acc string, auth Auth) *AccountConfig {
+func NewAccountConfig(acc string) *AccountConfig {
 	return &AccountConfig{acc}
 }
 
@@ -63,6 +63,10 @@ func NewWorkspaceConfig(acc, workspace string) *WorkspaceConfig {
 	return &WorkspaceConfig{workspace}
 }
 
+func (c *WorkspaceConfig) Workspace() string {
+	return c.workspace
+}
+
 func (c *WorkspaceConfig) BaseUrl() *url.URL {
 	return &url.URL{
 		Scheme: "https",
@@ -78,8 +82,8 @@ func (c WorkspaceConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, 
 	switch endpoint {
 	case UsersEndpoint, GroupsEndpoint, ServicePrincipalsEndpoint:
 		pathParts = []string{SCIMEndpoint, endpoint}
-	case RolesEndpoint:
-		pathParts = []string{AccountsEndpoint, AccessControlEndpoint, RolesEndpoint}
+	case RolesEndpoint, RuleSetsEndpoint:
+		pathParts = []string{AccountsEndpoint, AccessControlEndpoint, endpoint}
 	default:
 		return nil, fmt.Errorf("unknown endpoint %s", endpoint)
 	}

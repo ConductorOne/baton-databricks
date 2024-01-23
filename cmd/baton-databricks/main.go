@@ -50,6 +50,11 @@ func prepareClientAuth(ctx context.Context, cfg *config) databricks.Auth {
 		cAuth := databricks.NewOAuth2(cfg.AccountId, cfg.DatabricksClientId, cfg.DatabricksClientSecret)
 
 		return cAuth
+	} else if cfg.AreTokensSet() {
+		l.Info("using access token", zap.String("account-id", cfg.AccountId))
+		cAuth := databricks.NewTokenAuth(cfg.Workspaces, cfg.Tokens)
+
+		return cAuth
 	}
 
 	return nil
@@ -58,7 +63,7 @@ func prepareClientAuth(ctx context.Context, cfg *config) databricks.Auth {
 func getConnector(ctx context.Context, cfg *config) (types.ConnectorServer, error) {
 	l := ctxzap.Extract(ctx)
 	auth := prepareClientAuth(ctx, cfg)
-	cb, err := connector.New(ctx, cfg.AccountId, auth)
+	cb, err := connector.New(ctx, cfg.AccountId, auth, cfg.Workspaces)
 	if err != nil {
 		l.Error("error creating connector", zap.Error(err))
 		return nil, err

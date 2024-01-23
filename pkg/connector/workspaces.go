@@ -19,10 +19,33 @@ const workspaceMemberEntitlement = "member"
 type workspaceBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	workspaces   map[string]struct{}
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return workspaceResourceType
+}
+
+func minimalWorkspaceResource(ctx context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
+	resource, err := rs.NewGroupResource(
+		workspace.Host,
+		workspaceResourceType,
+		workspace.Host,
+		nil,
+		rs.WithParentResourceID(parent),
+		rs.WithAnnotation(
+			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+		),
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return resource, nil
 }
 
 func workspaceResource(ctx context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
@@ -56,27 +79,55 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		return nil, "", nil, nil
 	}
 
-	workspaces, err := w.client.ListWorkspaces(ctx)
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
-	}
-
 	var rv []*v2.Resource
-	for _, workspace := range workspaces {
-		wCopy := workspace
-
-		wr, err := workspaceResource(ctx, &wCopy, parentResourceID)
+	if w.client.IsAccountAPIAvailable() {
+		workspaces, err := w.client.ListWorkspaces(ctx)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 		}
 
-		rv = append(rv, wr)
+		for _, workspace := range workspaces {
+			// If workspaces are specified, skip all the workspaces that are not in the list.
+			if _, ok := w.workspaces[workspace.Host]; !ok && len(w.workspaces) > 0 {
+				continue
+			}
+
+			wCopy := workspace
+
+			wr, err := workspaceResource(ctx, &wCopy, parentResourceID)
+			if err != nil {
+				return nil, "", nil, err
+			}
+
+			rv = append(rv, wr)
+		}
+	} else {
+		for workspace := range w.workspaces {
+			ws := &databricks.Workspace{
+				Host: workspace,
+			}
+
+			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID)
+			if err != nil {
+				return nil, "", nil, err
+			}
+
+			rv = append(rv, wr)
+		}
 	}
 
 	return rv, "", nil, nil
 }
 
+// Entitlements returns slice of entitlements representing workspace members.
+// To get workspace members, we can only use the account API.
 func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
+	if !w.client.IsAccountAPIAvailable() {
+		return nil, "", nil, nil
+	}
+
+	w.client.SetAccountConfig()
+
 	var rv []*v2.Entitlement
 
 	memberAssignmentOptions := []ent.EntitlementOption{
@@ -90,7 +141,15 @@ func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource
 	return rv, "", nil, nil
 }
 
+// Grants returns slice of grants representing workspace members.
+// To get workspace members, we can only use the account API.
 func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
+	if !w.client.IsAccountAPIAvailable() {
+		return nil, "", nil, nil
+	}
+
+	w.client.SetAccountConfig()
+
 	groupTrait, err := rs.GetGroupTrait(resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
@@ -129,9 +188,15 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 	return rv, "", nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client) *workspaceBuilder {
+func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
+	wMap := make(map[string]struct{}, len(workspaces))
+	for _, w := range workspaces {
+		wMap[w] = struct{}{}
+	}
+
 	return &workspaceBuilder{
 		client:       client,
 		resourceType: workspaceResourceType,
+		workspaces:   wMap,
 	}
 }

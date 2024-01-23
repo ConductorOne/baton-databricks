@@ -12,7 +12,8 @@ import (
 )
 
 type Databricks struct {
-	client *databricks.Client
+	client     *databricks.Client
+	workspaces []string
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
@@ -22,8 +23,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		// TODO: implement workspace builder that will be able to use different clients for different workspaces
-		newWorkspaceBuilder(d.client),
+		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
 	}
 }
@@ -43,18 +43,68 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 }
 
 // Validate is called to ensure that the connector is properly configured. It should exercise any API credentials
-// to be sure that they are valid.
+// to be sure that they are valid. Since this connector works with two APIs and can have different types of credentials
+// it is important to validate that the connector is properly configured before attempting to sync.
 func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, error) {
-	_, _, err := d.client.ListUsers(ctx, &databricks.PaginationVars{Count: 1})
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to validate client: %w", err)
+	cfg := d.client.GetCurrentConfig()
+	isAccAPIAvailable := false
+	isWSAPIAvailable := false
+
+	// Check if we can list users from Account API (unless we are using token auth specific to a single workspace).
+	if !d.client.IsTokenAuth() {
+		_, err := d.client.ListRoles(ctx, "", "")
+		if err == nil {
+			isAccAPIAvailable = true
+		}
 	}
+
+	// Validate that credentials are valid for each targetted workspace.
+	if len(d.workspaces) > 0 {
+		for _, workspace := range d.workspaces {
+			d.client.SetWorkspaceConfig(workspace)
+
+			_, err := d.client.ListRoles(ctx, "", "")
+			if err != nil && !isAccAPIAvailable {
+				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
+			}
+
+			isWSAPIAvailable = true
+		}
+	}
+
+	// Validate that credentials are valid for every workspace.
+	if len(d.workspaces) == 0 {
+		workspaces, err := d.client.ListWorkspaces(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		}
+
+		for _, workspace := range workspaces {
+			d.client.SetWorkspaceConfig(workspace.Host)
+
+			_, err := d.client.ListRoles(ctx, "", "")
+			if err != nil && !isAccAPIAvailable {
+				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace.Host, err)
+			}
+
+			isWSAPIAvailable = true
+		}
+	}
+
+	// Resolve the result.
+	if !isAccAPIAvailable && !isWSAPIAvailable {
+		return nil, fmt.Errorf("databricks-connector: failed to validate credentials")
+	}
+
+	// Restore the original config.
+	d.client.UpdateConfig(cfg)
+	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
 	return nil, nil
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, acc string, auth databricks.Auth) (*Databricks, error) {
+func New(ctx context.Context, acc string, auth databricks.Auth, workspaces []string) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
 		return nil, err
@@ -62,5 +112,14 @@ func New(ctx context.Context, acc string, auth databricks.Auth) (*Databricks, er
 
 	client := databricks.NewClient(httpClient, acc, auth)
 
-	return &Databricks{client}, nil
+	if client.IsTokenAuth() {
+		client.SetWorkspaceConfig(workspaces[0])
+	} else {
+		client.SetAccountConfig()
+	}
+
+	return &Databricks{
+		client,
+		workspaces,
+	}, nil
 }
