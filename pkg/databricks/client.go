@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 const (
@@ -24,12 +25,13 @@ const (
 	WorkspaceBaseHost = "%s." + Base + APIEndpoint + PreviewEndpoint
 
 	// Resource endpoints.
-	UsersEndpoint             = "/Users"
-	GroupsEndpoint            = "/Groups"
-	ServicePrincipalsEndpoint = "/ServicePrincipals"
-	RolesEndpoint             = "/assignable-roles"
-	RuleSetsEndpoint          = "/rule-sets"
-	WorkspacesEndpoint        = "/workspaces"
+	UsersEndpoint                = "/Users"
+	GroupsEndpoint               = "/Groups"
+	ServicePrincipalsEndpoint    = "/ServicePrincipals"
+	RolesEndpoint                = "/assignable-roles"
+	RuleSetsEndpoint             = "/rule-sets"
+	WorkspacesEndpoint           = "/workspaces"
+	WorkspaceAssignmentsEndpoint = "/permissionassignments"
 )
 
 type Client struct {
@@ -39,26 +41,72 @@ type Client struct {
 	auth       Auth
 	etag       string
 	acc        string
+
+	isAccAPIAvailable bool
+	isWSAPIAvailable  bool
 }
 
 func NewClient(httpClient *http.Client, acc string, auth Auth) *Client {
-	cfg := NewAccountConfig(acc, auth)
-	baseUrl := cfg.BaseUrl()
-
 	return &Client{
-		httpClient,
-		baseUrl,
-		cfg,
-		auth,
-		"",
-		acc,
+		httpClient: httpClient,
+		auth:       auth,
+		acc:        acc,
 	}
 }
 
+func (c *Client) IsWorkspaceAPIAvailable() bool {
+	return c.isWSAPIAvailable
+}
+
+func (c *Client) IsAccountAPIAvailable() bool {
+	return c.isAccAPIAvailable
+}
+
+func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {
+	c.isAccAPIAvailable = accAPI
+	c.isWSAPIAvailable = wsAPI
+}
+
+func (c *Client) GetCurrentConfig() Config {
+	return c.cfg
+}
+
+func (c *Client) IsAccountConfig() bool {
+	_, ok := c.cfg.(*AccountConfig)
+	return ok
+}
+
+func (c *Client) IsTokenAuth() bool {
+	_, ok := c.auth.(*TokenAuth)
+	return ok
+}
+
+func (c *Client) SetWorkspaceConfig(workspace string) {
+	wc, ok := c.cfg.(*WorkspaceConfig)
+	if ok && wc.Workspace() == workspace {
+		return
+	}
+
+	c.cfg = NewWorkspaceConfig(c.acc, workspace)
+	c.baseUrl = c.cfg.BaseUrl()
+
+	if tokenAuth, ok := c.auth.(*TokenAuth); ok {
+		tokenAuth.SetWorkspace(workspace)
+	}
+}
+
+func (c *Client) SetAccountConfig() {
+	if _, ok := c.cfg.(*AccountConfig); ok {
+		return
+	}
+
+	c.cfg = NewAccountConfig(c.acc)
+	c.baseUrl = c.cfg.BaseUrl()
+}
+
 func (c *Client) UpdateConfig(cfg Config) {
-	baseUrl := cfg.BaseUrl()
-	c.baseUrl = baseUrl
 	c.cfg = cfg
+	c.baseUrl = c.cfg.BaseUrl()
 }
 
 func (c *Client) UpdateEtag(etag string) {
@@ -210,6 +258,28 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	}
 
 	return res, nil
+}
+
+func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID int) ([]WorkspaceAssignment, error) {
+	var res struct {
+		Assignments []WorkspaceAssignment `json:"permission_assignments"`
+	}
+
+	id := strconv.Itoa(workspaceID)
+	u := *c.baseUrl
+	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
+	path, err := url.JoinPath(baseEndpoint, WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	u.Path = path
+
+	err = c.Get(ctx, &u, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res.Assignments, nil
 }
 
 func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId string) ([]RuleSet, error) {

@@ -11,6 +11,7 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 type servicePrincipalBuilder struct {
@@ -26,10 +27,18 @@ func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.
 	profile := map[string]interface{}{
 		"application_id": servicePrincipal.ApplicationID,
 		"display_name":   servicePrincipal.DisplayName,
+		"parent_type":    parent.ResourceType,
+		"parent_id":      parent.Resource,
 	}
 
 	servicePrincipalTraitOptions := []rs.GroupTraitOption{
 		rs.WithGroupProfile(profile),
+	}
+
+	// keep the parent resource id, only if the parent resource is account
+	var options []rs.ResourceOption
+	if parent.ResourceType == accountResourceType.Id {
+		options = append(options, rs.WithParentResourceID(parent))
 	}
 
 	resource, err := rs.NewGroupResource(
@@ -37,7 +46,7 @@ func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.
 		servicePrincipalResourceType,
 		servicePrincipal.ID,
 		servicePrincipalTraitOptions,
-		rs.WithParentResourceID(parent),
+		options...,
 	)
 
 	if err != nil {
@@ -51,6 +60,12 @@ func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.
 func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
 	if parentResourceID == nil {
 		return nil, "", nil, nil
+	}
+
+	if parentResourceID.ResourceType == workspaceResourceType.Id {
+		s.client.SetWorkspaceConfig(parentResourceID.Resource)
+	} else {
+		s.client.SetAccountConfig()
 	}
 
 	bag, page, err := parsePageToken(pToken.Token, &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id})
@@ -97,6 +112,22 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 		return nil, "", nil, err
 	}
 
+	parentType, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_type")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	}
+
+	if parentType == workspaceResourceType.Id {
+		s.client.SetWorkspaceConfig(parentID)
+	} else {
+		s.client.SetAccountConfig()
+	}
+
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
 	if !ok {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
@@ -130,6 +161,22 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 		return nil, "", nil, err
 	}
 
+	parentType, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_type")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	}
+
+	if parentType == workspaceResourceType.Id {
+		s.client.SetWorkspaceConfig(parentID)
+	} else {
+		s.client.SetAccountConfig()
+	}
+
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
 	if !ok {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
@@ -143,12 +190,17 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 	var rv []*v2.Grant
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			resourceId, anns, err := prepareResourceID(ctx, s.client, p)
+			resourceId, err := prepareResourceID(ctx, s.client, p)
 			if err != nil {
 				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
 
-			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(anns...)))
+			var annotations []protoreflect.ProtoMessage
+			if resourceId.ResourceType == groupResourceType.Id {
+				annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
+			}
+
+			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))
 		}
 	}
 

@@ -10,7 +10,6 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
-	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const ResourcesPageSize uint = 50
@@ -72,46 +71,59 @@ func prepareNextToken(page uint, pageTotal int, total uint) string {
 
 // prepareResourceID prepares a resource ID for a user, group, or service principal.
 // It's used when we need to parse results from listing rule sets.
-func prepareResourceID(ctx context.Context, c *databricks.Client, principal string) (*v2.ResourceId, []protoreflect.ProtoMessage, error) {
+func prepareResourceID(ctx context.Context, c *databricks.Client, principal string) (*v2.ResourceId, error) {
 	pp := strings.Split(principal, "/")
 	if len(pp) != 2 {
-		return nil, nil, fmt.Errorf("invalid principal format: %s", principal)
+		return nil, fmt.Errorf("invalid principal format: %s", principal)
 	}
 
 	// principalID represent user's username, service principal's application ID, or group display name,
 	// so we need to find the actual user, service principal or group ID
 	principalType, principal := pp[0], pp[1]
 	var resourceId *v2.ResourceId
-	var anns []protoreflect.ProtoMessage
 
 	switch principalType {
 	case UsersType:
 		userID, err := c.FindUserID(ctx, principal)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to find user %s: %w", principal, err)
+			return nil, fmt.Errorf("failed to find user %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: userID}
 	case GroupsType:
 		groupID, err := c.FindGroupID(ctx, principal)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to find group %s: %w", principal, err)
+			return nil, fmt.Errorf("failed to find group %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: groupID}
-		anns = append(anns, expandGrantForGroup(groupID))
 	case ServicePrincipalsType:
 		servicePrincipalID, err := c.FindServicePrincipalID(ctx, principal)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to find service principal %s: %w", principal, err)
+			return nil, fmt.Errorf("failed to find service principal %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: servicePrincipalID}
 	default:
-		return nil, nil, fmt.Errorf("invalid principal type: %s", principalType)
+		return nil, fmt.Errorf("invalid principal type: %s", principalType)
 	}
 
-	return resourceId, anns, nil
+	return resourceId, nil
+}
+
+// prepareResourceType prepares a resource type for a user, group, or service principal.
+// It's used when we need to parse results from listing rule sets.
+func prepareResourceType(principal *databricks.WorkspacePrincipal) (*v2.ResourceType, error) {
+	switch {
+	case principal.UserName != "":
+		return userResourceType, nil
+	case principal.GroupDisplayName != "":
+		return groupResourceType, nil
+	case principal.ServicePrincipalAppID != "":
+		return servicePrincipalResourceType, nil
+	default:
+		return nil, fmt.Errorf("invalid principal: %v", principal)
+	}
 }
 
 func expandGrantForGroup(id string) *v2.GrantExpandable {

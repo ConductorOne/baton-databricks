@@ -10,9 +10,11 @@ Check out [Baton](https://github.com/conductorone/baton) to learn more about the
 
 To work with the connector, you can choose from multiple ways to run it, but the main requirement is to have a Databricks account and its ID. You can find the ID of an account, after you log into account platform and click on your username in right top corner that will open a dropdown menu with the account ID along other options.
 
-Another requirement is to have valid credentials to run the connector with. You can use either OAuth client credentials flow or basic auth flow (username and password). To use the OAuth, you need to create a service principal and add OAuth secret (client id and secret) to it. You can do that by going to the user management tab and clicking on the Service Principals tab. Then click on the Add Service principal button and name it. You then need to add OAuth secret to it by clicking on the Generate secret button. You can use this secret to authenticate across all workspaces that service principal has access to. To use basic auth, you just need to provide a username and password of a user that has access to the Databricks API. 
+Another requirement is to have valid credentials to run the connector with. This will decide how connector will be executed. You can use either OAuth client credentials flow or Basic auth flow (username and password) or Bearer auth flow. Both OAuth and Basic can be used across account and all workspaces you have access to. Bearer auth can be used only for a specific workspace.
 
-To get more data about workspaces, you will need to provide a Databricks workspace access token for each workspace you want to sync or already mentioned OAuth secret. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new token. You can also use a basic auth across all workspaces you have access to, but this is not recommended as the token is more secure and must be scoped to specific workspaces.
+To use the OAuth, you need to create a service principal and add OAuth secret (client id and secret) to it. You can do that by going to the user management tab and clicking on the Service Principals tab. Then click on the Add Service principal button and name it. You then need to add OAuth secret to it by clicking on the Generate secret button. You can use this secret to authenticate across all workspaces that service principal has access to. To use basic auth, you just need to provide a username and password of a user that has access to the Databricks API. Both methods require admin access to the Databricks account and each workspace you want to sync.
+
+To use bearer auth, you need to provide a Databricks workspace access token. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new access token.
 
 # Getting Started
 
@@ -52,6 +54,8 @@ baton resources
 - Service Principals
 - Users
 - Roles
+
+By default, connector will fetch all resources from the account and all workspaces. You can limit the scope of the sync by providing a list of workspaces to sync with. You can do that by providing a comma-separated list of workspace hostnames to the `--workspaces` flag. Connector expects admin permissions in all workspaces you want to sync with.
 
 # Contributing, Support and Issues
 

@@ -12,6 +12,7 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const (
@@ -39,18 +40,25 @@ func (a *accountBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return accountResourceType
 }
 
-func accountResource(ctx context.Context, accID string) (*v2.Resource, error) {
+func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*v2.Resource, error) {
+	children := []protoreflect.ProtoMessage{
+		&v2.ChildResourceType{ResourceTypeId: workspaceResourceType.Id},
+	}
+
+	if accAPIAvailable {
+		children = append(children,
+			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+		)
+	}
+
 	resource, err := rs.NewResource(
 		accID,
 		accountResourceType,
 		accID,
-		rs.WithAnnotation(
-			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: workspaceResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
-		),
+		rs.WithAnnotation(children...),
 	)
 
 	if err != nil {
@@ -63,7 +71,7 @@ func accountResource(ctx context.Context, accID string) (*v2.Resource, error) {
 func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
 	var rv []*v2.Resource
 
-	ur, err := accountResource(ctx, a.client.GetAccountId())
+	ur, err := accountResource(ctx, a.client.GetAccountId(), a.client.IsAccountAPIAvailable())
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -75,6 +83,10 @@ func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 
 // Entitlements returns slice of entitlements for marketplace admins under account.
 func (a *accountBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
+	if !a.client.IsAccountAPIAvailable() {
+		return nil, "", nil, nil
+	}
+
 	var rv []*v2.Entitlement
 
 	permissiongOptions := []ent.EntitlementOption{
@@ -89,7 +101,14 @@ func (a *accountBuilder) Entitlements(_ context.Context, resource *v2.Resource, 
 }
 
 // Grants returns grants for marketplace admins under account.
+// To get marketplace admins, we can only use the account API.
 func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
+	if !a.client.IsAccountAPIAvailable() {
+		return nil, "", nil, nil
+	}
+
+	a.client.SetAccountConfig()
+
 	var rv []*v2.Grant
 
 	// list rule sets for the account
@@ -102,12 +121,17 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		// rule set contains role and its principals, each one with resource type and resource id seperated by "/"
 		if strings.Contains(ruleSet.Role, MarketplaceAdminRole) {
 			for _, p := range ruleSet.Principals {
-				resourceId, anns, err := prepareResourceID(ctx, a.client, p)
+				resourceId, err := prepareResourceID(ctx, a.client, p)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 				}
 
-				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId, grant.WithAnnotation(anns...)))
+				var annotations []protoreflect.ProtoMessage
+				if resourceId.ResourceType == groupResourceType.Id {
+					annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
+				}
+
+				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId, grant.WithAnnotation(annotations...)))
 			}
 		}
 	}

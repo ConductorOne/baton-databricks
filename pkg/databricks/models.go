@@ -48,6 +48,9 @@ type Group struct {
 	Entitlements []struct {
 		Value string `json:"value"`
 	} `json:"entitlements"`
+	Meta struct {
+		Type string `json:"resourceType"`
+	} `json:"meta"`
 }
 
 func (g Group) HaveEntitlement(entitlement string) bool {
@@ -58,6 +61,10 @@ func (g Group) HaveEntitlement(entitlement string) bool {
 	}
 
 	return false
+}
+
+func (g Group) IsAccountGroup() bool {
+	return g.Meta.Type == "Group"
 }
 
 type ServicePrincipal struct {
@@ -97,6 +104,18 @@ type Workspace struct {
 	ID     int    `json:"workspace_id"`
 	Name   string `json:"workspace_name"`
 	Status string `json:"workspace_status"`
+	Host   string `json:"deployment_name"`
+}
+
+type WorkspacePrincipal struct {
+	ServicePrincipalAppID string `json:"service_principal_name"`
+	GroupDisplayName      string `json:"group_name"`
+	UserName              string `json:"user_name"`
+	ID                    int    `json:"principal_id"`
+}
+
+type WorkspaceAssignment struct {
+	Principal *WorkspacePrincipal `json:"principal"`
 }
 
 type Role struct {

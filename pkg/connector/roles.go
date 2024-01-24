@@ -39,16 +39,19 @@ func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return roleResourceType
 }
 
-func roleResource(ctx context.Context, role string, ent bool, parent *v2.ResourceId) (*v2.Resource, error) {
+func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.Resource, error) {
+	var roleID string
 	profile := map[string]interface{}{
-		"role_id": role,
+		"role_name":   role,
+		"parent_type": parent.ResourceType,
+		"parent_id":   parent.Resource,
 	}
 
 	// To differentiate between what type of role does the resource represent.
-	if ent {
-		profile["type"] = EntitlementType
-	} else {
-		profile["type"] = RoleType
+	if parent.ResourceType == workspaceResourceType.Id {
+		roleID = fmt.Sprintf("%s:%s", parent.Resource, role)
+	} else if parent.ResourceType == accountResourceType.Id {
+		roleID = role
 	}
 
 	roleTraitOptions := []rs.RoleTraitOption{
@@ -58,7 +61,7 @@ func roleResource(ctx context.Context, role string, ent bool, parent *v2.Resourc
 	resource, err := rs.NewRoleResource(
 		role,
 		roleResourceType,
-		role,
+		roleID,
 		roleTraitOptions,
 		rs.WithParentResourceID(parent),
 	)
@@ -78,22 +81,26 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 	}
 
 	var rv []*v2.Resource
-	for _, role := range roles {
-		rr, err := roleResource(ctx, role, false, parentResourceID)
-		if err != nil {
-			return nil, "", nil, err
-		}
+	if parentResourceID.ResourceType == accountResourceType.Id {
+		for _, role := range roles {
+			rr, err := roleResource(ctx, role, parentResourceID)
+			if err != nil {
+				return nil, "", nil, err
+			}
 
-		rv = append(rv, rr)
+			rv = append(rv, rr)
+		}
 	}
 
-	for _, ent := range entitlements {
-		er, err := roleResource(ctx, ent, true, parentResourceID)
-		if err != nil {
-			return nil, "", nil, err
-		}
+	if parentResourceID.ResourceType == workspaceResourceType.Id {
+		for _, ent := range entitlements {
+			er, err := roleResource(ctx, ent, parentResourceID)
+			if err != nil {
+				return nil, "", nil, err
+			}
 
-		rv = append(rv, er)
+			rv = append(rv, er)
+		}
 	}
 
 	return rv, "", nil, nil
@@ -125,7 +132,26 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
 	}
 
-	rType, ok := rs.GetProfileStringValue(roleTrait.Profile, "type")
+	parentType, ok := rs.GetProfileStringValue(roleTrait.Profile, "parent_type")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(roleTrait.Profile, "parent_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	}
+
+	isWorkspaceRole := parentType == workspaceResourceType.Id
+
+	// If the role is a workspace role, we need to update the client config to use the workspace API.
+	if isWorkspaceRole {
+		r.client.SetWorkspaceConfig(parentID)
+	} else {
+		r.client.SetAccountConfig()
+	}
+
+	roleName, ok := rs.GetProfileStringValue(roleTrait.Profile, "role_name")
 	if !ok {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get role type: %w", err)
 	}
@@ -160,14 +186,14 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 
 		// check if user has the role
 		for _, u := range users {
-			if rType == RoleType && u.HaveRole(resource.Id.Resource) {
+			if !isWorkspaceRole && u.HaveRole(roleName) {
 				uID, err := rs.NewResourceID(userResourceType, u.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create user resource id: %w", err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, uID))
-			} else if rType == EntitlementType && u.HaveEntitlement(resource.Id.Resource) {
+			} else if isWorkspaceRole && u.HaveEntitlement(roleName) {
 				uID, err := rs.NewResourceID(userResourceType, u.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create user resource id: %w", err)
@@ -185,7 +211,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 
 	case groupResourceType.Id:
 		// groups don't contain roles, only entitlements
-		if rType == RoleType {
+		if !isWorkspaceRole {
 			bag.Pop()
 			break
 		}
@@ -201,7 +227,12 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 
 		// check if group has the role
 		for _, g := range groups {
-			if rType == EntitlementType && g.HaveEntitlement(resource.Id.Resource) {
+			// skip workspace specific groups (admins and users)
+			if !g.IsAccountGroup() {
+				continue
+			}
+
+			if isWorkspaceRole && g.HaveEntitlement(roleName) {
 				gID, err := rs.NewResourceID(groupResourceType, g.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create group resource id: %w", err)
@@ -229,14 +260,14 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 
 		// check if service principal has the role
 		for _, sp := range servicePrincipals {
-			if rType == RoleType && sp.HaveRole(resource.Id.Resource) {
+			if !isWorkspaceRole && sp.HaveRole(roleName) {
 				spID, err := rs.NewResourceID(servicePrincipalResourceType, sp.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create service principal resource id: %w", err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, spID))
-			} else if rType == EntitlementType && sp.HaveEntitlement(resource.Id.Resource) {
+			} else if isWorkspaceRole && sp.HaveEntitlement(roleName) {
 				spID, err := rs.NewResourceID(servicePrincipalResourceType, sp.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create service principal resource id: %w", err)

@@ -36,6 +36,9 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 
 	profile := map[string]interface{}{
 		"display_name": group.DisplayName,
+		"group_id":     group.ID,
+		"parent_type":  parent.ResourceType,
+		"parent_id":    parent.Resource,
 	}
 
 	if len(members) > 0 {
@@ -46,12 +49,18 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 		rs.WithGroupProfile(profile),
 	}
 
+	// keep the parent resource id, only if the parent resource is account
+	var options []rs.ResourceOption
+	if parent.ResourceType == accountResourceType.Id {
+		options = append(options, rs.WithParentResourceID(parent))
+	}
+
 	resource, err := rs.NewGroupResource(
 		group.DisplayName,
 		groupResourceType,
 		group.ID,
 		groupTraitOptions,
-		rs.WithParentResourceID(parent),
+		options...,
 	)
 
 	if err != nil {
@@ -66,6 +75,12 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pg *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
 	if parentResourceID == nil {
 		return nil, "", nil, nil
+	}
+
+	if parentResourceID.ResourceType == workspaceResourceType.Id {
+		g.client.SetWorkspaceConfig(parentResourceID.Resource)
+	} else {
+		g.client.SetAccountConfig()
 	}
 
 	bag, page, err := parsePageToken(pg.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})
@@ -110,6 +125,27 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 
+	groupTrait, err := rs.GetGroupTrait(resource)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	parentType, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_type")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	}
+
+	if parentType == workspaceResourceType.Id {
+		g.client.SetWorkspaceConfig(parentID)
+	} else {
+		g.client.SetAccountConfig()
+	}
+
 	// membership entitlement - for group members
 	memberAssignmentOptions := []ent.EntitlementOption{
 		ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
@@ -144,12 +180,30 @@ func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
 	var rv []*v2.Grant
 
-	// membership grants
 	groupTrait, err := rs.GetGroupTrait(resource)
 	if err != nil {
 		return nil, "", nil, err
 	}
 
+	parentType, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_type")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_id")
+	if !ok {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	}
+
+	isWorkspaceGroup := parentType == workspaceResourceType.Id
+
+	if isWorkspaceGroup {
+		g.client.SetWorkspaceConfig(parentID)
+	} else {
+		g.client.SetAccountConfig()
+	}
+
+	// membership grants
 	membersPayload, ok := rs.GetProfileStringValue(groupTrait.Profile, "members")
 	if ok {
 		members := strings.Split(membersPayload, ",")
@@ -188,12 +242,17 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			resourceId, anns, err := prepareResourceID(ctx, g.client, p)
+			resourceId, err := prepareResourceID(ctx, g.client, p)
 			if err != nil {
 				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
 
-			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(anns...)))
+			var annotations []protoreflect.ProtoMessage
+			if resourceId.ResourceType == groupResourceType.Id {
+				annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
+			}
+
+			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))
 		}
 	}
 
