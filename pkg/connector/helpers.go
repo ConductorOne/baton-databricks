@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -128,36 +129,38 @@ func prepareResourceType(principal *databricks.WorkspacePrincipal) (*v2.Resource
 	}
 }
 
-func preparePrincipalID(ctx context.Context, c *databricks.Client, pType, pID string) (string, error) {
-	var principalID string
+// preparePrincipalID prepares a principal ID for a user, group, or service principal.
+// It's used when we need edit rule sets with new principals.
+func preparePrincipalID(ctx context.Context, c *databricks.Client, principalType, principalID string) (string, error) {
+	var result string
 
-	switch pType {
+	switch principalType {
 	case userResourceType.Id:
-		username, err := c.FindUsername(ctx, pID)
+		username, err := c.FindUsername(ctx, principalID)
 		if err != nil {
-			return "", fmt.Errorf("failed to find user %s: %w", pID, err)
+			return "", fmt.Errorf("failed to find user %s: %w", principalID, err)
 		}
 
-		principalID = fmt.Sprintf("%s/%s", UsersType, username)
+		result = fmt.Sprintf("%s/%s", UsersType, username)
 	case groupResourceType.Id:
-		displayName, err := c.FindGroupDisplayName(ctx, pID)
+		displayName, err := c.FindGroupDisplayName(ctx, principalID)
 		if err != nil {
-			return "", fmt.Errorf("failed to find group %s: %w", pID, err)
+			return "", fmt.Errorf("failed to find group %s: %w", principalID, err)
 		}
 
-		principalID = fmt.Sprintf("%s/%s", GroupsType, displayName)
+		result = fmt.Sprintf("%s/%s", GroupsType, displayName)
 	case servicePrincipalResourceType.Id:
-		appID, err := c.FindServicePrincipalAppID(ctx, pID)
+		appID, err := c.FindServicePrincipalAppID(ctx, principalID)
 		if err != nil {
-			return "", fmt.Errorf("failed to find service principal %s: %w", pID, err)
+			return "", fmt.Errorf("failed to find service principal %s: %w", principalID, err)
 		}
 
-		principalID = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)
+		result = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)
 	default:
-		return "", fmt.Errorf("invalid principal type: %s", pType)
+		return "", fmt.Errorf("invalid principal type: %s", principalType)
 	}
 
-	return principalID, nil
+	return result, nil
 }
 
 func expandGrantForGroup(id string) *v2.GrantExpandable {
@@ -184,4 +187,43 @@ func getParentInfoFromProfile(profile *structpb.Struct) (string, string, error) 
 	}
 
 	return parentType, parentID, nil
+}
+
+func addPermissions(isWorkspaceRole bool, perms *databricks.Permissions, entitlement string) {
+	if !isWorkspaceRole {
+		perms.Roles = append(perms.Roles, databricks.PermissionValue{
+			Value: entitlement,
+		})
+	} else {
+		perms.Entitlements = append(perms.Entitlements, databricks.PermissionValue{
+			Value: entitlement,
+		})
+	}
+}
+
+func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, entitlement string) {
+	if !isWorkspaceRole {
+		for i, r := range perms.Roles {
+			if r.Value == entitlement {
+				perms.Roles = slices.Delete(perms.Roles, i, i+1)
+				break
+			}
+		}
+	} else {
+		for i, e := range perms.Entitlements {
+			if e.Value == entitlement {
+				perms.Entitlements = slices.Delete(perms.Entitlements, i, i+1)
+				break
+			}
+		}
+	}
+}
+
+func prepareWorkspaceRole(entitlement string) string {
+	parts := strings.Split(entitlement, ":")
+	if len(parts) != 2 {
+		return ""
+	}
+
+	return parts[1]
 }

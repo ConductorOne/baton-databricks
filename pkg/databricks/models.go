@@ -1,20 +1,28 @@
 package databricks
 
+type BaseResponse struct {
+	ID string `json:"id"`
+}
+
+type PermissionValue struct {
+	Value string `json:"value"`
+}
+
+type Permissions struct {
+	Roles        []PermissionValue `json:"roles,omitempty"`
+	Entitlements []PermissionValue `json:"entitlements,omitempty"`
+}
+
 type User struct {
-	ID     string `json:"id"`
+	BaseResponse
+	Permissions
 	Emails []struct {
 		Primary bool   `json:"primary"`
 		Value   string `json:"value"`
 	} `json:"emails"`
 	UserName    string `json:"userName"`
 	DisplayName string `json:"displayName"`
-	Active      bool   `json:"active"`
-	Roles       []struct {
-		Value string `json:"value"`
-	} `json:"roles"`
-	Entitlements []struct {
-		Value string `json:"value"`
-	} `json:"entitlements"`
+	Active      bool   `json:"active,omitempty"`
 }
 
 func (u User) HaveRole(role string) bool {
@@ -37,20 +45,31 @@ func (u User) HaveEntitlement(entitlement string) bool {
 	return false
 }
 
+type Member struct {
+	ID          string `json:"value"`
+	DisplayName string `json:"display"`
+	Ref         string `json:"$ref"`
+}
+
 type Group struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName"`
-	Members     []struct {
-		ID          string `json:"value"`
-		DisplayName string `json:"display"`
-		Ref         string `json:"$ref"`
-	} `json:"members"`
-	Entitlements []struct {
-		Value string `json:"value"`
-	} `json:"entitlements"`
-	Meta struct {
+	BaseResponse
+	Permissions
+	DisplayName string   `json:"displayName"`
+	Members     []Member `json:"members,omitempty"`
+	Meta        struct {
 		Type string `json:"resourceType"`
-	} `json:"meta"`
+	} `json:"meta,omitempty"`
+	Schemas []string `json:"schemas,omitempty"`
+}
+
+func (g Group) HaveRole(role string) bool {
+	for _, r := range g.Roles {
+		if r.Value == role {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (g Group) HaveEntitlement(entitlement string) bool {
@@ -68,15 +87,10 @@ func (g Group) IsAccountGroup() bool {
 }
 
 type ServicePrincipal struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName"`
-	Active      bool   `json:"active"`
-	Roles       []struct {
-		Value string `json:"value"`
-	} `json:"roles"`
-	Entitlements []struct {
-		Value string `json:"value"`
-	} `json:"entitlements"`
+	BaseResponse
+	Permissions
+	DisplayName   string `json:"displayName"`
+	Active        bool   `json:"active"`
 	ApplicationID string `json:"applicationId"`
 }
 
