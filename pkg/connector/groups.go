@@ -339,7 +339,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 				}
 
 				// add the principal to the rule set
-				ruleSets[i].Principals = append(ruleSet.Principals, principalID)
+				ruleSets[i].Principals = append(ruleSets[i].Principals, principalID)
 			}
 		}
 

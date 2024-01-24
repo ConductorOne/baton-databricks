@@ -24,7 +24,7 @@ const (
 	MarketplaceAdminRole = "marketplace.admin"
 
 	// Roles (or Entitlements) relevant to Workspace API (Grantable to User, Group or ServicePrincipal).
-	WorkspaceAccessRole    = "workspace_access"
+	WorkspaceAccessRole    = "workspace-access"
 	SQLAccessRole          = "databricks-sql-access"
 	ClusterCreateRole      = "allow-cluster-create"
 	InstancePoolCreateRole = "allow-instance-pool-create"
@@ -184,7 +184,7 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 			}
 
 			// add the principal to the rule set
-			ruleSets[i].Principals = append(ruleSet.Principals, principalID)
+			ruleSets[i].Principals = append(ruleSets[i].Principals, principalID)
 		}
 	}
 
