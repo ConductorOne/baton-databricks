@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -12,6 +13,8 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -130,14 +133,9 @@ func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 		return nil, "", nil, err
 	}
 
-	parentType, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_type")
-	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
-	}
-
-	parentID, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_id")
-	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
 
 	if parentType == workspaceResourceType.Id {
@@ -157,7 +155,7 @@ func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 
 	// role permissions entitlements
 	// get all assignable roles for this specific group resource
-	roles, err := g.client.ListRoles(context.Background(), "groups", resource.Id.Resource)
+	roles, err := g.client.ListRoles(context.Background(), GroupsType, resource.Id.Resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list roles for group %s: %w", resource.Id.Resource, err)
 	}
@@ -185,14 +183,9 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		return nil, "", nil, err
 	}
 
-	parentType, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_type")
-	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
-	}
-
-	parentID, ok := rs.GetProfileStringValue(groupTrait.Profile, "parent_id")
-	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
 
 	isWorkspaceGroup := parentType == workspaceResourceType.Id
@@ -235,7 +228,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	}
 
 	// role permissions grants
-	ruleSets, err := g.client.ListRuleSets(ctx, "groups", resource.Id.Resource)
+	ruleSets, err := g.client.ListRuleSets(ctx, GroupsType, resource.Id.Resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)
 	}
@@ -257,6 +250,219 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	}
 
 	return rv, "", nil, nil
+}
+
+func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
+
+	if !isValidPrincipal(principal.Id) {
+		l.Warn(
+			"databricks-connector: only users, groups and service principals can be granted group permissions",
+			zap.String("principal_id", principal.Id.String()),
+			zap.String("principal_type", principal.Id.ResourceType),
+		)
+
+		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted group permissions")
+	}
+
+	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	}
+
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
+	}
+
+	if parentType == workspaceResourceType.Id {
+		g.client.SetWorkspaceConfig(parentID)
+	} else {
+		g.client.SetAccountConfig()
+	}
+
+	groupID := entitlement.Resource.Id.Resource
+
+	if entitlement.Slug == groupMemberEntitlement {
+		group, err := g.client.GetGroup(ctx, groupID)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupID, err)
+		}
+
+		for _, member := range group.Members {
+			if member.ID == principal.Id.Resource {
+				l.Info(
+					"databricks-connector: group already has the member added",
+					zap.String("principal_id", principal.Id.Resource),
+					zap.String("entitlement", entitlement.Slug),
+				)
+
+				return nil, nil
+			}
+		}
+
+		// add the member to the group
+		group.Members = append(group.Members, databricks.Member{
+			ID: principal.Id.Resource,
+		})
+
+		err = g.client.UpdateGroup(ctx, group)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupID, err)
+		}
+	} else {
+		ruleSets, err := g.client.ListRuleSets(ctx, GroupsType, groupID)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to list rule sets for group %s (%s): %w", principal.Id.Resource, groupID, err)
+		}
+
+		principalID, err := preparePrincipalID(ctx, g.client, principal.Id.ResourceType, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
+		}
+
+		found := false
+
+		for i, ruleSet := range ruleSets {
+			if ruleSet.Role == entitlement.Slug {
+				found = true
+
+				// check if it contains the principals and add principal to the rule set
+				if slices.Contains(ruleSet.Principals, principalID) {
+					l.Info(
+						"databricks-connector: group already has the entitlement",
+						zap.String("principal_id", principalID),
+						zap.String("entitlement", entitlement.Slug),
+					)
+
+					return nil, nil
+				}
+
+				// add the principal to the rule set
+				ruleSets[i].Principals = append(ruleSet.Principals, principalID)
+			}
+		}
+
+		if len(ruleSets) == 0 || !found {
+			ruleSets = append(ruleSets, databricks.RuleSet{
+				Role:       entitlement.Slug,
+				Principals: []string{principalID},
+			})
+		}
+
+		err = g.client.UpdateRuleSets(ctx, GroupsType, groupID, ruleSets)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to update rule sets for group %s (%s): %w", principal.Id.Resource, groupID, err)
+		}
+	}
+
+	return nil, nil
+}
+
+func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
+
+	principal := grant.Principal
+	entitlement := grant.Entitlement
+
+	if !isValidPrincipal(principal.Id) {
+		l.Warn(
+			"databricks-connector: only users, groups and service principals can have group permissions revoked",
+			zap.String("principal_id", principal.Id.String()),
+			zap.String("principal_type", principal.Id.ResourceType),
+		)
+
+		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have group permissions revoked")
+	}
+
+	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	}
+
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
+	}
+
+	if parentType == workspaceResourceType.Id {
+		g.client.SetWorkspaceConfig(parentID)
+	} else {
+		g.client.SetAccountConfig()
+	}
+
+	groupID := entitlement.Resource.Id.Resource
+
+	if entitlement.Slug == groupMemberEntitlement {
+		group, err := g.client.GetGroup(ctx, groupID)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupID, err)
+		}
+
+		for i, member := range group.Members {
+			if member.ID == principal.Id.Resource {
+				group.Members = slices.Delete(group.Members, i, i+1)
+				break
+			}
+		}
+
+		err = g.client.UpdateGroup(ctx, group)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupID, err)
+		}
+	} else {
+		ruleSets, err := g.client.ListRuleSets(ctx, GroupsType, groupID)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to list rule sets for group %s (%s): %w", principal.Id.Resource, groupID, err)
+		}
+
+		if len(ruleSets) == 0 {
+			l.Info(
+				"databricks-connector: group already does not have the entitlement",
+				zap.String("principal_id", principal.Id.Resource),
+				zap.String("entitlement", entitlement.Slug),
+			)
+
+			return nil, nil
+		}
+
+		principalID, err := preparePrincipalID(ctx, g.client, principal.Id.ResourceType, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
+		}
+
+		for i, ruleSet := range ruleSets {
+			if ruleSet.Role == entitlement.Slug {
+				// check if it contains the principals and remove the principal to the rule set
+				if slices.Contains(ruleSet.Principals, principalID) {
+					// if there is only one principal, remove the whole rule set
+					if len(ruleSet.Principals) == 1 {
+						ruleSets = slices.Delete(ruleSets, i, i+1)
+						break
+					} else {
+						pI := slices.Index(ruleSet.Principals, principalID)
+						ruleSets[i].Principals = slices.Delete(ruleSet.Principals, pI, pI+1)
+						break
+					}
+				}
+
+				l.Info(
+					"databricks-connector: group already does not have the entitlement",
+					zap.String("principal_id", principalID),
+					zap.String("entitlement", entitlement.Slug),
+				)
+
+				return nil, nil
+			}
+		}
+
+		err = g.client.UpdateRuleSets(ctx, GroupsType, groupID, ruleSets)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to update rule sets for group %s (%s): %w", principal.Id.Resource, groupID, err)
+		}
+	}
+
+	return nil, nil
 }
 
 func newGroupBuilder(client *databricks.Client) *groupBuilder {
