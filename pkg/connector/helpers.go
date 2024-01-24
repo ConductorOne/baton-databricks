@@ -10,6 +10,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const ResourcesPageSize uint = 50
@@ -126,6 +128,38 @@ func prepareResourceType(principal *databricks.WorkspacePrincipal) (*v2.Resource
 	}
 }
 
+func preparePrincipalID(ctx context.Context, c *databricks.Client, pType, pID string) (string, error) {
+	var principalID string
+
+	switch pType {
+	case userResourceType.Id:
+		username, err := c.FindUsername(ctx, pID)
+		if err != nil {
+			return "", fmt.Errorf("failed to find user %s: %w", pID, err)
+		}
+
+		principalID = fmt.Sprintf("%s/%s", UsersType, username)
+	case groupResourceType.Id:
+		displayName, err := c.FindGroupDisplayName(ctx, pID)
+		if err != nil {
+			return "", fmt.Errorf("failed to find group %s: %w", pID, err)
+		}
+
+		principalID = fmt.Sprintf("%s/%s", GroupsType, displayName)
+	case servicePrincipalResourceType.Id:
+		appID, err := c.FindServicePrincipalAppID(ctx, pID)
+		if err != nil {
+			return "", fmt.Errorf("failed to find service principal %s: %w", pID, err)
+		}
+
+		principalID = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)
+	default:
+		return "", fmt.Errorf("invalid principal type: %s", pType)
+	}
+
+	return principalID, nil
+}
+
 func expandGrantForGroup(id string) *v2.GrantExpandable {
 	return &v2.GrantExpandable{
 		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", id, groupMemberEntitlement)},
@@ -136,4 +170,18 @@ func isValidPrincipal(principal *v2.ResourceId) bool {
 	return principal.ResourceType == userResourceType.Id ||
 		principal.ResourceType == groupResourceType.Id ||
 		principal.ResourceType == servicePrincipalResourceType.Id
+}
+
+func getParentInfoFromProfile(profile *structpb.Struct) (string, string, error) {
+	parentType, ok := rs.GetProfileStringValue(profile, "parent_type")
+	if !ok {
+		return "", "", fmt.Errorf("parent type not found")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(profile, "parent_id")
+	if !ok {
+		return "", "", fmt.Errorf("parent id not found")
+	}
+
+	return parentType, parentID, nil
 }
