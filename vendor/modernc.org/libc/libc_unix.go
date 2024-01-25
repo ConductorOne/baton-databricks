@@ -219,20 +219,6 @@ func Xpoll(t *TLS, fds uintptr, nfds poll.Nfds_t, timeout int32) int32 {
 	return int32(n)
 }
 
-// ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
-func Xrecvmsg(t *TLS, sockfd int32, msg uintptr, flags int32) types.Ssize_t {
-	if __ccgo_strace {
-		trc("t=%v sockfd=%v msg=%v flags=%v, (%v:)", t, sockfd, msg, flags, origin(2))
-	}
-	n, _, err := unix.Syscall(unix.SYS_RECVMSG, uintptr(sockfd), msg, uintptr(flags))
-	if err != 0 {
-		t.setErrno(err)
-		return -1
-	}
-
-	return types.Ssize_t(n)
-}
-
 // struct cmsghdr *CMSG_NXTHDR(struct msghdr *msgh, struct cmsghdr *cmsg);
 func X__cmsg_nxthdr(t *TLS, msgh, cmsg uintptr) uintptr {
 	if __ccgo_strace {
@@ -1173,7 +1159,7 @@ func Xpread(t *TLS, fd int32, buf uintptr, count types.Size_t, offset types.Off_
 // 	}
 // 	panic(todo(""))
 // }
-// 
+//
 // // void * malloc_zone_malloc(malloc_zone_t *zone, size_t size);
 // func Xmalloc_zone_malloc(t *TLS, zone uintptr, size types.Size_t) uintptr {
 // 	if __ccgo_strace {
@@ -1182,10 +1168,10 @@ func Xpread(t *TLS, fd int32, buf uintptr, count types.Size_t, offset types.Off_
 // 	if zone == defaultZone {
 // 		return Xmalloc(t, size)
 // 	}
-// 
+//
 // 	panic(todo(""))
 // }
-// 
+//
 // // malloc_zone_t *  malloc_default_zone(void);
 // func Xmalloc_default_zone(t *TLS) uintptr {
 // 	if __ccgo_strace {
@@ -1193,21 +1179,21 @@ func Xpread(t *TLS, fd int32, buf uintptr, count types.Size_t, offset types.Off_
 // 	}
 // 	return defaultZone
 // }
-// 
+//
 // // void malloc_zone_free(malloc_zone_t *zone, void *ptr);
 // func Xmalloc_zone_free(t *TLS, zone, ptr uintptr) {
 // 	if __ccgo_strace {
 // 		trc("t=%v zone=%v ptr=%v, (%v:)", t, zone, ptr, origin(2))
 // 	}
-// 
+//
 // 	if zone == defaultZone {
 // 		Xfree(t, ptr)
 // 		return
 // 	}
-// 
+//
 // 	panic(todo(""))
 // }
-// 
+//
 // // void * malloc_zone_realloc(malloc_zone_t *zone, void *ptr, size_t size);
 // func Xmalloc_zone_realloc(t *TLS, zone, ptr uintptr, size types.Size_t) uintptr {
 // 	if __ccgo_strace {
@@ -1239,18 +1225,18 @@ func Xsysctlbyname(t *TLS, name, oldp, oldlenp, newp uintptr, newlen types.Size_
 // type mallocZone struct {
 // 	a memory.Allocator
 // 	mu sync.Mutex
-// 
+//
 // 	isDefault bool
 // }
-// 
+//
 // func newMallocZone(isDefault bool) *mallocZone {
 // 	return &mallocZone{isDefault: isDefault}
 // }
-// 
+//
 // var (
 // 	defaultZone uintptr
 // )
-// 
+//
 // func init() {
 // 	defaultZone = addObject(newMallocZone(true))
 // }
