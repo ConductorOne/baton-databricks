@@ -16,6 +16,19 @@ type Auth interface {
 	GetClient(ctx context.Context) (*http.Client, error)
 }
 
+type NoAuth struct{}
+
+func (n *NoAuth) Apply(req *http.Request) {}
+
+func (n *NoAuth) GetClient(ctx context.Context) (*http.Client, error) {
+	httpClient, err := uhttp.NewClient(ctx, uhttp.WithLogger(true, ctxzap.Extract(ctx)))
+	if err != nil {
+		return nil, err
+	}
+
+	return httpClient, nil
+}
+
 type TokenAuth struct {
 	Tokens           map[string]string
 	CurrentWorkspace string
