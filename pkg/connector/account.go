@@ -92,13 +92,13 @@ func (a *accountBuilder) Entitlements(_ context.Context, resource *v2.Resource, 
 
 	var rv []*v2.Entitlement
 
-	permissiongOptions := []ent.EntitlementOption{
+	permissionOptions := []ent.EntitlementOption{
 		ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
 		ent.WithDisplayName(fmt.Sprintf("%s %s role", resource.DisplayName, MarketplaceAdminRole)),
 		ent.WithDescription(fmt.Sprintf("%s %s role in Databricks", resource.DisplayName, MarketplaceAdminRole)),
 	}
 
-	rv = append(rv, ent.NewPermissionEntitlement(resource, MarketplaceAdminRole, permissiongOptions...))
+	rv = append(rv, ent.NewPermissionEntitlement(resource, MarketplaceAdminRole, permissionOptions...))
 
 	return rv, "", nil, nil
 }
@@ -169,26 +169,28 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	found := false
 
 	for i, ruleSet := range ruleSets {
-		if strings.Contains(ruleSet.Role, entitlement.Slug) {
-			found = true
-
-			// check if it contains the principals and add principal to the rule set
-			if slices.Contains(ruleSet.Principals, principalID) {
-				l.Info(
-					"databricks-connector: account already has the entitlement",
-					zap.String("principal_id", principalID),
-					zap.String("entitlement", entitlement.Slug),
-				)
-
-				return nil, nil
-			}
-
-			// add the principal to the rule set
-			ruleSets[i].Principals = append(ruleSets[i].Principals, principalID)
+		if !strings.Contains(ruleSet.Role, entitlement.Slug) {
+			continue
 		}
+
+		found = true
+
+		// check if it contains the principals and add principal to the rule set
+		if slices.Contains(ruleSet.Principals, principalID) {
+			l.Info(
+				"databricks-connector: account already has the entitlement",
+				zap.String("principal_id", principalID),
+				zap.String("entitlement", entitlement.Slug),
+			)
+
+			return nil, nil
+		}
+
+		// add the principal to the rule set
+		ruleSets[i].Principals = append(ruleSets[i].Principals, principalID)
 	}
 
-	if len(ruleSets) == 0 || !found {
+	if !found {
 		ruleSets = append(ruleSets, databricks.RuleSet{
 			Role:       fmt.Sprintf("roles/%s", entitlement.Slug),
 			Principals: []string{principalID},

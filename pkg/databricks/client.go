@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 const (
-	Base        = "cloud.databricks.com"
-	APIEndpoint = "/api/2.0"
+	Base            = "cloud.databricks.com"
+	APIEndpoint     = "/api/2.0"
+	JSONContentType = "application/json"
 
 	// Helper endpoints.
 	PreviewEndpoint       = "/preview"
@@ -551,6 +553,35 @@ func (c *Client) Put(ctx context.Context, urlAddress *url.URL, body io.Reader, r
 	return c.doRequest(ctx, urlAddress, http.MethodPut, body, response, params...)
 }
 
+func checkContentType(contentType string) error {
+	if !strings.HasPrefix(contentType, "application") {
+		return fmt.Errorf("unexpected content type %s", contentType)
+	}
+
+	if !strings.Contains(contentType, "json") {
+		return fmt.Errorf("unexpected content type %s", contentType)
+	}
+
+	return nil
+}
+
+func parseJSON(body io.Reader, contentType string, res interface{}) error {
+	if err := checkContentType(contentType); err != nil {
+		r, rerr := io.ReadAll(body)
+		if rerr != nil {
+			return fmt.Errorf("%w - error reading response body: %w", err, rerr)
+		}
+
+		return fmt.Errorf("%w - %v", err, string(r))
+	}
+
+	if err := json.NewDecoder(body).Decode(res); err != nil {
+		return fmt.Errorf("failed to decode response body: %w", err)
+	}
+
+	return nil
+}
+
 func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body io.Reader, response interface{}, params ...Vars) error {
 	u, err := url.PathUnescape(urlAddress.String())
 	if err != nil {
@@ -573,6 +604,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	c.auth.Apply(req)
+	req.Header.Set("Content-Type", JSONContentType)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -581,6 +613,8 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 
 	defer resp.Body.Close()
 
+	contentType := resp.Header.Get("Content-Type")
+
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusBadRequest {
 			var res struct {
@@ -588,8 +622,8 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 				Message string `json:"message"`
 			}
 
-			if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-				return fmt.Errorf("unexpected status code %d", resp.StatusCode)
+			if err := parseJSON(resp.Body, contentType, &res); err != nil {
+				return err
 			}
 
 			var message string
@@ -606,8 +640,8 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	if method == http.MethodGet {
-		if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
-			return fmt.Errorf("failed to decode response body: %w", err)
+		if err := parseJSON(resp.Body, contentType, response); err != nil {
+			return err
 		}
 	}
 
