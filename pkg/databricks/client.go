@@ -1,6 +1,7 @@
 package databricks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,11 +9,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 const (
-	Base        = "cloud.databricks.com"
-	APIEndpoint = "/api/2.0"
+	Base            = "cloud.databricks.com"
+	APIEndpoint     = "/api/2.0"
+	JSONContentType = "application/json"
 
 	// Helper endpoints.
 	PreviewEndpoint       = "/preview"
@@ -137,6 +140,39 @@ func (c *Client) ListUsers(ctx context.Context, vars ...Vars) ([]User, uint, err
 	return res.Resources, res.Total, nil
 }
 
+func (c *Client) GetUser(ctx context.Context, userID string) (*User, error) {
+	var res *User
+	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
+	}
+
+	u.Path = fmt.Sprintf("%s/%s", u.Path, userID)
+
+	err = c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func (c *Client) UpdateUser(ctx context.Context, user *User) error {
+	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
+	if err != nil {
+		return fmt.Errorf("failed to prepare url to fetch users: %w", err)
+	}
+
+	u.Path = fmt.Sprintf("%s/%s", u.Path, user.ID)
+
+	b, err := json.Marshal(user)
+	if err != nil {
+		return err
+	}
+
+	return c.Put(ctx, u, bytes.NewReader(b), nil)
+}
+
 func (c *Client) FindUserID(ctx context.Context, username string) (string, error) {
 	users, _, err := c.ListUsers(
 		ctx,
@@ -155,6 +191,24 @@ func (c *Client) FindUserID(ctx context.Context, username string) (string, error
 	return users[0].ID, nil
 }
 
+func (c *Client) FindUsername(ctx context.Context, userID string) (string, error) {
+	users, _, err := c.ListUsers(
+		ctx,
+		&PaginationVars{Count: 1},
+		NewFilterVars(fmt.Sprintf("id eq '%s'", userID)),
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(users) == 0 {
+		return "", err
+	}
+
+	return users[0].UserName, nil
+}
+
 func (c *Client) ListGroups(ctx context.Context, vars ...Vars) ([]Group, uint, error) {
 	var res ListResponse[Group]
 	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
@@ -168,6 +222,39 @@ func (c *Client) ListGroups(ctx context.Context, vars ...Vars) ([]Group, uint, e
 	}
 
 	return res.Resources, res.Total, nil
+}
+
+func (c *Client) GetGroup(ctx context.Context, groupID string) (*Group, error) {
+	var res *Group
+	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	}
+
+	u.Path = fmt.Sprintf("%s/%s", u.Path, groupID)
+
+	err = c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func (c *Client) UpdateGroup(ctx context.Context, group *Group) error {
+	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
+	if err != nil {
+		return fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	}
+
+	u.Path = fmt.Sprintf("%s/%s", u.Path, group.ID)
+
+	b, err := json.Marshal(group)
+	if err != nil {
+		return err
+	}
+
+	return c.Put(ctx, u, bytes.NewReader(b), nil)
 }
 
 func (c *Client) FindGroupID(ctx context.Context, displayName string) (string, error) {
@@ -188,6 +275,24 @@ func (c *Client) FindGroupID(ctx context.Context, displayName string) (string, e
 	return groups[0].ID, nil
 }
 
+func (c *Client) FindGroupDisplayName(ctx context.Context, groupID string) (string, error) {
+	groups, _, err := c.ListGroups(
+		ctx,
+		&PaginationVars{Count: 1},
+		NewFilterVars(fmt.Sprintf("id eq '%s'", groupID)),
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(groups) == 0 {
+		return "", err
+	}
+
+	return groups[0].DisplayName, nil
+}
+
 func (c *Client) ListServicePrincipals(ctx context.Context, vars ...Vars) ([]ServicePrincipal, uint, error) {
 	var res ListResponse[ServicePrincipal]
 	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
@@ -201,6 +306,39 @@ func (c *Client) ListServicePrincipals(ctx context.Context, vars ...Vars) ([]Ser
 	}
 
 	return res.Resources, res.Total, nil
+}
+
+func (c *Client) GetServicePrincipal(ctx context.Context, servicePrincipalID string) (*ServicePrincipal, error) {
+	var res *ServicePrincipal
+	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	}
+
+	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipalID)
+
+	err = c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func (c *Client) UpdateServicePrincipal(ctx context.Context, servicePrincipal *ServicePrincipal) error {
+	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
+	if err != nil {
+		return fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	}
+
+	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipal.ID)
+
+	b, err := json.Marshal(servicePrincipal)
+	if err != nil {
+		return err
+	}
+
+	return c.Put(ctx, u, bytes.NewReader(b), nil)
 }
 
 func (c *Client) FindServicePrincipalID(ctx context.Context, appID string) (string, error) {
@@ -219,6 +357,24 @@ func (c *Client) FindServicePrincipalID(ctx context.Context, appID string) (stri
 	}
 
 	return servicePrincipals[0].ID, nil
+}
+
+func (c *Client) FindServicePrincipalAppID(ctx context.Context, servicePrincipalID string) (string, error) {
+	servicePrincipals, _, err := c.ListServicePrincipals(
+		ctx,
+		&PaginationVars{Count: 1},
+		NewFilterVars(fmt.Sprintf("id eq '%s'", servicePrincipalID)),
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(servicePrincipals) == 0 {
+		return "", err
+	}
+
+	return servicePrincipals[0].ApplicationID, nil
 }
 
 func (c *Client) ListRoles(ctx context.Context, resourceType, resourceId string) ([]Role, error) {
@@ -260,26 +416,68 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	return res, nil
 }
 
+func (c *Client) prepareURLForWorkspaceMembers(params ...string) (*url.URL, error) {
+	u := *c.baseUrl
+
+	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
+	path, err := url.JoinPath(baseEndpoint, params...)
+	if err != nil {
+		return nil, err
+	}
+	u.Path = path
+
+	return &u, nil
+}
+
 func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID int) ([]WorkspaceAssignment, error) {
 	var res struct {
 		Assignments []WorkspaceAssignment `json:"permission_assignments"`
 	}
 
 	id := strconv.Itoa(workspaceID)
-	u := *c.baseUrl
-	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
-	path, err := url.JoinPath(baseEndpoint, WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
+	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to prepare url to fetch workspace members: %w", err)
 	}
-	u.Path = path
 
-	err = c.Get(ctx, &u, &res)
+	err = c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, err
 	}
 
 	return res.Assignments, nil
+}
+
+func (c *Client) CreateOrUpdateWorkspaceMember(ctx context.Context, workspaceID int64, principalID string) error {
+	wID := strconv.Itoa(int(workspaceID))
+	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, wID, WorkspaceAssignmentsEndpoint, "principals", principalID)
+	if err != nil {
+		return fmt.Errorf("failed to prepare url to create workspace member: %w", err)
+	}
+
+	payload := struct {
+		Permission []string `json:"permissions"`
+	}{
+		Permission: []string{"USER"},
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	return c.Put(ctx, u, bytes.NewReader(b), nil)
+}
+
+func (c *Client) RemoveWorkspaceMember(ctx context.Context, workspaceID int64, principalID string) error {
+	wID := strconv.Itoa(int(workspaceID))
+
+	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, wID, WorkspaceAssignmentsEndpoint, "principals", principalID)
+	if err != nil {
+		return fmt.Errorf("failed to prepare url to create workspace member: %w", err)
+	}
+
+	return c.Put(ctx, u, nil, nil)
 }
 
 func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId string) ([]RuleSet, error) {
@@ -290,7 +488,7 @@ func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId stri
 
 	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch roles: %w", err)
+		return nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
 	}
 
 	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
@@ -308,8 +506,80 @@ func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId stri
 	return res.RuleSets, nil
 }
 
+func (c *Client) UpdateRuleSets(ctx context.Context, resourceType, resourceId string, ruleSets []RuleSet) error {
+	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
+	if err != nil {
+		return fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
+	}
+
+	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
+	if err != nil {
+		return fmt.Errorf("failed to prepare resource payload: %w", err)
+	}
+
+	payload := struct {
+		Name    string `json:"name"`
+		RuleSet struct {
+			Name       string    `json:"name"`
+			Etag       string    `json:"etag"`
+			GrantRules []RuleSet `json:"grant_rules"`
+		} `json:"rule_set"`
+	}{
+		Name: resourcePayload,
+		RuleSet: struct {
+			Name       string    `json:"name"`
+			Etag       string    `json:"etag"`
+			GrantRules []RuleSet `json:"grant_rules"`
+		}{
+			Name:       resourcePayload,
+			Etag:       c.etag,
+			GrantRules: ruleSets,
+		},
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	return c.Put(ctx, u, bytes.NewReader(b), nil, NewNameVars(resourcePayload, c.etag))
+}
+
 func (c *Client) Get(ctx context.Context, urlAddress *url.URL, response interface{}, params ...Vars) error {
 	return c.doRequest(ctx, urlAddress, http.MethodGet, nil, response, params...)
+}
+
+func (c *Client) Put(ctx context.Context, urlAddress *url.URL, body io.Reader, response interface{}, params ...Vars) error {
+	return c.doRequest(ctx, urlAddress, http.MethodPut, body, response, params...)
+}
+
+func checkContentType(contentType string) error {
+	if !strings.HasPrefix(contentType, "application") {
+		return fmt.Errorf("unexpected content type %s", contentType)
+	}
+
+	if !strings.Contains(contentType, "json") {
+		return fmt.Errorf("unexpected content type %s", contentType)
+	}
+
+	return nil
+}
+
+func parseJSON(body io.Reader, contentType string, res interface{}) error {
+	if err := checkContentType(contentType); err != nil {
+		r, rerr := io.ReadAll(body)
+		if rerr != nil {
+			return fmt.Errorf("%w - error reading response body: %w", err, rerr)
+		}
+
+		return fmt.Errorf("%w - %v", err, string(r))
+	}
+
+	if err := json.NewDecoder(body).Decode(res); err != nil {
+		return fmt.Errorf("failed to decode response body: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body io.Reader, response interface{}, params ...Vars) error {
@@ -334,6 +604,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	c.auth.Apply(req)
+	req.Header.Set("Content-Type", JSONContentType)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -342,12 +613,36 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 
 	defer resp.Body.Close()
 
+	contentType := resp.Header.Get("Content-Type")
+
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusBadRequest {
+			var res struct {
+				Detail  string `json:"detail"`
+				Message string `json:"message"`
+			}
+
+			if err := parseJSON(resp.Body, contentType, &res); err != nil {
+				return err
+			}
+
+			var message string
+			if res.Detail != "" {
+				message = res.Detail
+			} else if res.Message != "" {
+				message = res.Message
+			}
+
+			return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, message)
+		}
+
 		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
-		return fmt.Errorf("failed to decode response body: %w", err)
+	if method == http.MethodGet {
+		if err := parseJSON(resp.Body, contentType, response); err != nil {
+			return err
+		}
 	}
 
 	return nil

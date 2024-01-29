@@ -54,7 +54,7 @@ func prepareClientAuth(ctx context.Context, cfg *config) databricks.Auth {
 		cAuth := databricks.NewTokenAuth(cfg.Workspaces, cfg.Tokens)
 		return cAuth
 	default:
-		return nil
+		return &databricks.NoAuth{}
 	}
 }
 

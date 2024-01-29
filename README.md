@@ -14,7 +14,7 @@ Another requirement is to have valid credentials to run the connector with. This
 
 To use the OAuth, you need to create a service principal and add OAuth secret (client id and secret) to it. You can do that by going to the user management tab and clicking on the Service Principals tab. Then click on the Add Service principal button and name it. You then need to add OAuth secret to it by clicking on the Generate secret button. You can use this secret to authenticate across all workspaces that service principal has access to. To use basic auth, you just need to provide a username and password of a user that has access to the Databricks API. Both methods require admin access to the Databricks account and each workspace you want to sync.
 
-To use bearer auth, you need to provide a Databricks workspace access token. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new access token.
+To use bearer auth, you need to provide a Databricks workspace access token. You can create a new token by logging into the workspace and going into user settings. Then go to Developer tab and create a new access token. This will try to work with only specified workspaces and their respective tokens. You can provide multiple tokens by separating them with a comma. This method requires admin access to each workspace you want to sync. 
 
 # Getting Started
 
@@ -55,7 +55,7 @@ baton resources
 - Users
 - Roles
 
-By default, connector will fetch all resources from the account and all workspaces. You can limit the scope of the sync by providing a list of workspaces to sync with. You can do that by providing a comma-separated list of workspace hostnames to the `--workspaces` flag. Connector expects admin permissions in all workspaces you want to sync with.
+By default, connector will fetch all resources from the account and all workspaces. You can limit the scope of the sync by providing a list of workspaces to sync with. You can do that by providing a comma-separated list of workspace hostnames to the `--workspaces` flag. You can also provide a list of workspace access tokens to the `--workspace-tokens` flag. This will limit the sync to only workspaces that are associated with those tokens. You can also use both flags at the same time. If you do that, connector will sync with all workspaces that are associated with provided tokens and all workspaces that are in the list of workspaces.
 
 # Contributing, Support and Issues
 

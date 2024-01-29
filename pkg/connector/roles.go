@@ -11,6 +11,8 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
 
 const (
@@ -132,14 +134,9 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
 	}
 
-	parentType, ok := rs.GetProfileStringValue(roleTrait.Profile, "parent_type")
-	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent type from group profile")
-	}
-
-	parentID, ok := rs.GetProfileStringValue(roleTrait.Profile, "parent_id")
-	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent id from group profile")
+	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
 	}
 
 	isWorkspaceRole := parentType == workspaceResourceType.Id
@@ -210,12 +207,6 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		}
 
 	case groupResourceType.Id:
-		// groups don't contain roles, only entitlements
-		if !isWorkspaceRole {
-			bag.Pop()
-			break
-		}
-
 		groups, total, err := r.client.ListGroups(
 			ctx,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
@@ -232,7 +223,14 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 				continue
 			}
 
-			if isWorkspaceRole && g.HaveEntitlement(roleName) {
+			if !isWorkspaceRole && g.HaveRole(roleName) {
+				gID, err := rs.NewResourceID(groupResourceType, g.ID)
+				if err != nil {
+					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create group resource id: %w", err)
+				}
+
+				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, gID, grant.WithAnnotation(expandGrantForGroup(g.ID))))
+			} else if isWorkspaceRole && g.HaveEntitlement(roleName) {
 				gID, err := rs.NewResourceID(groupResourceType, g.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create group resource id: %w", err)
@@ -293,6 +291,167 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 	}
 
 	return rv, nextPage, nil, nil
+}
+
+func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
+
+	if !isValidPrincipal(principal.Id) {
+		l.Warn(
+			"databricks-connector: only users, groups and service principals can be granted role membership",
+			zap.String("principal_id", principal.Id.String()),
+			zap.String("principal_type", principal.Id.ResourceType),
+		)
+
+		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted role membership")
+	}
+
+	roleTrait, err := rs.GetRoleTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
+	}
+
+	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
+	}
+
+	isWorkspaceRole := parentType == workspaceResourceType.Id
+	permissionName := entitlement.Resource.Id.Resource
+	if isWorkspaceRole {
+		r.client.SetWorkspaceConfig(parentID)
+		permissionName = prepareWorkspaceRole(permissionName)
+	} else {
+		r.client.SetAccountConfig()
+	}
+
+	switch principal.Id.ResourceType {
+	case userResourceType.Id:
+		u, err := r.client.GetUser(ctx, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
+		}
+
+		addPermissions(isWorkspaceRole, &u.Permissions, permissionName)
+
+		err = r.client.UpdateUser(ctx, u)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
+		}
+
+	case groupResourceType.Id:
+		g, err := r.client.GetGroup(ctx, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
+		}
+
+		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
+
+		err = r.client.UpdateGroup(ctx, g)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
+		}
+
+	case servicePrincipalResourceType.Id:
+		sp, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
+		}
+
+		addPermissions(isWorkspaceRole, &sp.Permissions, permissionName)
+
+		err = r.client.UpdateServicePrincipal(ctx, sp)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
+		}
+
+	default:
+		return nil, fmt.Errorf("databricks-connector: invalid principal type: %s", principal.Id.ResourceType)
+	}
+
+	return nil, nil
+}
+
+func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.Annotations, error) {
+	l := ctxzap.Extract(ctx)
+
+	principal := grant.Principal
+	entitlement := grant.Entitlement
+
+	if !isValidPrincipal(principal.Id) {
+		l.Warn(
+			"databricks-connector: only users, groups and service principals can have role membership revoked",
+			zap.String("principal_id", principal.Id.String()),
+			zap.String("principal_type", principal.Id.ResourceType),
+		)
+
+		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have role membership revoked")
+	}
+
+	roleTrait, err := rs.GetRoleTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
+	}
+
+	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
+	}
+
+	isWorkspaceRole := parentType == workspaceResourceType.Id
+	permissionName := entitlement.Resource.Id.Resource
+	if isWorkspaceRole {
+		r.client.SetWorkspaceConfig(parentID)
+		permissionName = prepareWorkspaceRole(permissionName)
+	} else {
+		r.client.SetAccountConfig()
+	}
+
+	switch principal.Id.ResourceType {
+	case userResourceType.Id:
+		u, err := r.client.GetUser(ctx, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
+		}
+
+		removePermissions(isWorkspaceRole, &u.Permissions, permissionName)
+
+		err = r.client.UpdateUser(ctx, u)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
+		}
+
+	case groupResourceType.Id:
+		g, err := r.client.GetGroup(ctx, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
+		}
+
+		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
+
+		err = r.client.UpdateGroup(ctx, g)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
+		}
+
+	case servicePrincipalResourceType.Id:
+		sp, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
+		}
+
+		removePermissions(isWorkspaceRole, &sp.Permissions, permissionName)
+
+		err = r.client.UpdateServicePrincipal(ctx, sp)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
+		}
+
+	default:
+		return nil, fmt.Errorf("databricks-connector: invalid principal type: %s", principal.Id.ResourceType)
+	}
+
+	return nil, nil
 }
 
 func newRoleBuilder(client *databricks.Client) *roleBuilder {

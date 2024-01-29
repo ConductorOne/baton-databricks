@@ -96,7 +96,9 @@ func NewGroupAttrVars() *AttrVars {
 func NewGroupRolesAttrVars() *AttrVars {
 	return &AttrVars{
 		Attrs: []string{
+			"roles",
 			"entitlements",
+			"meta",
 		},
 	}
 }

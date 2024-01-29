@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -10,6 +11,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const ResourcesPageSize uint = 50
@@ -126,8 +129,101 @@ func prepareResourceType(principal *databricks.WorkspacePrincipal) (*v2.Resource
 	}
 }
 
+// preparePrincipalID prepares a principal ID for a user, group, or service principal.
+// It's used when we need edit rule sets with new principals.
+func preparePrincipalID(ctx context.Context, c *databricks.Client, principalType, principalID string) (string, error) {
+	var result string
+
+	switch principalType {
+	case userResourceType.Id:
+		username, err := c.FindUsername(ctx, principalID)
+		if err != nil {
+			return "", fmt.Errorf("failed to find user %s: %w", principalID, err)
+		}
+
+		result = fmt.Sprintf("%s/%s", UsersType, username)
+	case groupResourceType.Id:
+		displayName, err := c.FindGroupDisplayName(ctx, principalID)
+		if err != nil {
+			return "", fmt.Errorf("failed to find group %s: %w", principalID, err)
+		}
+
+		result = fmt.Sprintf("%s/%s", GroupsType, displayName)
+	case servicePrincipalResourceType.Id:
+		appID, err := c.FindServicePrincipalAppID(ctx, principalID)
+		if err != nil {
+			return "", fmt.Errorf("failed to find service principal %s: %w", principalID, err)
+		}
+
+		result = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)
+	default:
+		return "", fmt.Errorf("invalid principal type: %s", principalType)
+	}
+
+	return result, nil
+}
+
 func expandGrantForGroup(id string) *v2.GrantExpandable {
 	return &v2.GrantExpandable{
 		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", id, groupMemberEntitlement)},
 	}
+}
+
+func isValidPrincipal(principal *v2.ResourceId) bool {
+	return principal.ResourceType == userResourceType.Id ||
+		principal.ResourceType == groupResourceType.Id ||
+		principal.ResourceType == servicePrincipalResourceType.Id
+}
+
+func getParentInfoFromProfile(profile *structpb.Struct) (string, string, error) {
+	parentType, ok := rs.GetProfileStringValue(profile, "parent_type")
+	if !ok {
+		return "", "", fmt.Errorf("parent type not found")
+	}
+
+	parentID, ok := rs.GetProfileStringValue(profile, "parent_id")
+	if !ok {
+		return "", "", fmt.Errorf("parent id not found")
+	}
+
+	return parentType, parentID, nil
+}
+
+func addPermissions(isWorkspaceRole bool, perms *databricks.Permissions, entitlement string) {
+	if !isWorkspaceRole {
+		perms.Roles = append(perms.Roles, databricks.PermissionValue{
+			Value: entitlement,
+		})
+	} else {
+		perms.Entitlements = append(perms.Entitlements, databricks.PermissionValue{
+			Value: entitlement,
+		})
+	}
+}
+
+func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, entitlement string) {
+	if !isWorkspaceRole {
+		for i, r := range perms.Roles {
+			if r.Value == entitlement {
+				perms.Roles = slices.Delete(perms.Roles, i, i+1)
+				break
+			}
+		}
+	} else {
+		for i, e := range perms.Entitlements {
+			if e.Value == entitlement {
+				perms.Entitlements = slices.Delete(perms.Entitlements, i, i+1)
+				break
+			}
+		}
+	}
+}
+
+func prepareWorkspaceRole(entitlement string) string {
+	parts := strings.Split(entitlement, ":")
+	if len(parts) != 2 {
+		return ""
+	}
+
+	return parts[1]
 }
