@@ -58,3 +58,5 @@ jobs:
         uses: actions/checkout@v4
       - name: Install baton
         run: ./scripts/get-baton.sh && mv baton /usr/local/bin
+      - name: Build baton-databricks
+        run: go build ./cmd/baton-databricks
