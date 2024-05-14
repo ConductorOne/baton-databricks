@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 )
 
 const (
@@ -553,28 +552,8 @@ func (c *Client) Put(ctx context.Context, urlAddress *url.URL, body io.Reader, r
 	return c.doRequest(ctx, urlAddress, http.MethodPut, body, response, params...)
 }
 
-func checkContentType(contentType string) error {
-	if !strings.HasPrefix(contentType, "application") {
-		return fmt.Errorf("unexpected content type %s", contentType)
-	}
-
-	if !strings.Contains(contentType, "json") {
-		return fmt.Errorf("unexpected content type %s", contentType)
-	}
-
-	return nil
-}
-
-func parseJSON(body io.Reader, contentType string, res interface{}) error {
-	if err := checkContentType(contentType); err != nil {
-		r, rerr := io.ReadAll(body)
-		if rerr != nil {
-			return fmt.Errorf("%w - error reading response body: %w", err, rerr)
-		}
-
-		return fmt.Errorf("%w - %v", err, string(r))
-	}
-
+func parseJSON(body io.Reader, res interface{}) error {
+	// Databricks seems to return content-type text/plain even though it's json, so don't check content type
 	if err := json.NewDecoder(body).Decode(res); err != nil {
 		return fmt.Errorf("failed to decode response body: %w", err)
 	}
@@ -613,8 +592,6 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 
 	defer resp.Body.Close()
 
-	contentType := resp.Header.Get("Content-Type")
-
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusBadRequest {
 			var res struct {
@@ -622,7 +599,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 				Message string `json:"message"`
 			}
 
-			if err := parseJSON(resp.Body, contentType, &res); err != nil {
+			if err := parseJSON(resp.Body, &res); err != nil {
 				return err
 			}
 
@@ -640,7 +617,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	if method == http.MethodGet {
-		if err := parseJSON(resp.Body, contentType, response); err != nil {
+		if err := parseJSON(resp.Body, response); err != nil {
 			return err
 		}
 	}
