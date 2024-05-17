@@ -198,8 +198,6 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 
 	// membership grants
 	membersPayload, ok := rs.GetProfileStringValue(groupTrait.Profile, "members")
-	fmt.Println("-- membersPayload")
-	fmt.Println(membersPayload)
 	if ok {
 		members := strings.Split(membersPayload, ",")
 
@@ -230,8 +228,6 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	}
 
 	// role permissions grants
-	fmt.Println("-- GroupsType, resource.Id.Resource")
-	fmt.Println(GroupsType, resource.Id.Resource)
 	ruleSets, err := g.client.ListRuleSets(ctx, GroupsType, resource.Id.Resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)
@@ -248,8 +244,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			if resourceId.ResourceType == groupResourceType.Id {
 				annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
 			}
-			fmt.Println("-- resource, ruleSet.Role, resourceId")
-			fmt.Println(resource, ruleSet.Role, resourceId)
+
 			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))
 		}
 	}
@@ -270,18 +265,15 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted group permissions")
 	}
 
-	// groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	// }
+	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	}
 
-	// parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
-	// }
-
-	parentType := "workspace"
-	parentID := "dbc-dd4d071e-0b85"
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
+	}
 
 	if parentType == workspaceResourceType.Id {
 		g.client.SetWorkspaceConfig(parentID)
@@ -387,18 +379,15 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have group permissions revoked")
 	}
 
-	// groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	// }
+	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	}
 
-	// parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
-	// }
-
-	parentType := "workspace"
-	parentID := "dbc-dd4d071e-0b85"
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
+	}
 
 	if parentType == workspaceResourceType.Id {
 		g.client.SetWorkspaceConfig(parentID)
