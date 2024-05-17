@@ -45,10 +45,10 @@ jobs:
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       # The following parameters are passed to grant/revoke commands
-      CONNECTOR_GRANT: ''
-      CONNECTOR_ENTITLEMENT: ''
-      CONNECTOR_PRINCIPAL_TYPE: ''
-      CONNECTOR_PRINCIPAL: ''
+      CONNECTOR_GRANT: 'group:778441812670942:member:user:5346803201281760'
+      CONNECTOR_ENTITLEMENT: 'group:778441812670942:member'
+      CONNECTOR_PRINCIPAL_TYPE: 'user'
+      CONNECTOR_PRINCIPAL: '5346803201281760'
     steps:
       - name: Install Go
         uses: actions/setup-go@v4
@@ -60,3 +60,6 @@ jobs:
         run: ./scripts/get-baton.sh && mv baton /usr/local/bin
       - name: Build baton-databricks
         run: go build ./cmd/baton-databricks
+      - name: Run baton-databricks
+        run: ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
+      
