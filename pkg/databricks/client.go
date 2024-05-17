@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
 
 const (
@@ -37,7 +39,7 @@ const (
 )
 
 type Client struct {
-	httpClient *http.Client
+	httpClient *uhttp.BaseHttpClient
 	baseUrl    *url.URL
 	cfg        Config
 	auth       Auth
@@ -49,8 +51,9 @@ type Client struct {
 }
 
 func NewClient(httpClient *http.Client, acc string, auth Auth) *Client {
+	cli := uhttp.NewBaseHttpClient(httpClient)
 	return &Client{
-		httpClient: httpClient,
+		httpClient: cli,
 		auth:       auth,
 		acc:        acc,
 	}
@@ -562,19 +565,46 @@ func parseJSON(body io.Reader, res interface{}) error {
 }
 
 func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body io.Reader, response interface{}, params ...Vars) error {
+	var (
+		req *http.Request
+		err error
+	)
 	u, err := url.PathUnescape(urlAddress.String())
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, u, body)
+	uri, err := url.Parse(u)
+	if err != nil {
+		return err
+	}
+
+	switch method {
+	case http.MethodGet:
+		req, err = c.httpClient.NewRequest(ctx,
+			http.MethodGet,
+			uri,
+			uhttp.WithAcceptJSONHeader(),
+			uhttp.WithContentTypeJSONHeader(),
+		)
+	case http.MethodPut:
+		req, err = c.httpClient.NewRequest(ctx,
+			http.MethodPut,
+			uri,
+			uhttp.WithAcceptJSONHeader(),
+			uhttp.WithContentTypeJSONHeader(),
+			uhttp.WithJSONBody(body),
+		)
+	default:
+		return fmt.Errorf("databricks-connector: invalid http method: %s", method)
+	}
+
 	if err != nil {
 		return err
 	}
 
 	if len(params) > 0 {
 		query := url.Values{}
-
 		for _, param := range params {
 			param.Apply(&query)
 		}
@@ -583,15 +613,12 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	c.auth.Apply(req)
-	req.Header.Set("Content-Type", JSONContentType)
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req, uhttp.WithJSONResponse(&response))
 	if err != nil {
 		return err
 	}
 
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusBadRequest {
 			var res struct {
@@ -614,12 +641,6 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 		}
 
 		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
-	}
-
-	if method == http.MethodGet {
-		if err := parseJSON(resp.Body, response); err != nil {
-			return err
-		}
 	}
 
 	return nil
