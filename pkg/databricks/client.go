@@ -585,7 +585,6 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 			http.MethodGet,
 			uri,
 			uhttp.WithAcceptJSONHeader(),
-			uhttp.WithContentTypeJSONHeader(),
 		)
 	case http.MethodPut:
 		req, err = c.httpClient.NewRequest(ctx,
