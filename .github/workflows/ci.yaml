@@ -44,6 +44,9 @@ jobs:
       # Add any environment variables needed to run baton-bitbucket-datacenter
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      BATON_ACCOUNT_ID: ${{ secrets.BATON_ACCOUNT_ID }}
+      BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
+      BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
       # The following parameters are passed to grant/revoke commands
       CONNECTOR_GRANT: 'group:778441812670942:member:user:5346803201281760'
       CONNECTOR_ENTITLEMENT: 'group:778441812670942:member'
