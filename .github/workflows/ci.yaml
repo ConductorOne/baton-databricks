@@ -65,12 +65,12 @@ jobs:
         run: go build ./cmd/baton-databricks
       - name: Run baton-databricks
         run: ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
-      - name: Check for grant before revoking
-        run: baton grants --entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --output-format=json | jq --exit-status ".grants[].principal.id.resource == \"${{ env.CONNECTOR_PRINCIPAL }}\""
-      - name: Revoke grants
-        run: |
-            ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
-            ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }} --revoke-grant="${{ env.CONNECTOR_GRANT }}"
+      # - name: Check for grant before revoking
+      #   run: baton grants --entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --output-format=json | jq --exit-status ".grants[].principal.id.resource == \"${{ env.CONNECTOR_PRINCIPAL }}\""
+      # - name: Revoke grants
+      #   run: |
+      #       ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
+      #       ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }} --revoke-grant="${{ env.CONNECTOR_GRANT }}"
       # - name: Check grant was revoked
       #   run: |
       #       ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
