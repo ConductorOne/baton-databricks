@@ -76,3 +76,8 @@ jobs:
             ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
             # baton grants --entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --output-format=json | jq --exit-status "if .grants then .grants[]?.principal.id.resource != \"${{ env.CONNECTOR_PRINCIPAL }}\" else . end"
             baton grants --entitlement ${{ env.CONNECTOR_ENTITLEMENT }} --output-format=json | jq -e ".grants | any(.principal.id.resource !=\"${{ env.CONNECTOR_PRINCIPAL }}\")"
+      - name: Grant entitlement
+        run: |
+            ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }}
+            ./baton-databricks --account-id ${{ env.BATON_ACCOUNT_ID }} --workspaces ${{ env.BATON_WORKSPACES }} --workspace-tokens ${{ env.BATON_WORKSPACE_TOKENS }} --grant-entitlement="${{ env.CONNECTOR_ENTITLEMENT }}" --grant-principal="${{ env.CONNECTOR_PRINCIPAL }}" --grant-principal-type="${{ env.CONNECTOR_PRINCIPAL_TYPE }}"
+      
