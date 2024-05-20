@@ -565,23 +565,6 @@ func parseJSON(body io.Reader, res interface{}) error {
 	return nil
 }
 
-func WithJSONBody(body interface{}) uhttp.RequestOption {
-	return func() (io.ReadWriter, map[string]string, error) {
-		buffer := new(bytes.Buffer)
-		err := json.NewEncoder(buffer).Encode(body)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		_, headers, err := uhttp.WithContentTypeJSONHeader()()
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return buffer, headers, nil
-	}
-}
-
 func WithJSONResponse(response interface{}) uhttp.DoOption {
 	return func(resp *uhttp.WrapperResponse) error {
 		return json.Unmarshal(resp.Body, response)
@@ -616,7 +599,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 			uri,
 			uhttp.WithAcceptJSONHeader(),
 			uhttp.WithContentTypeJSONHeader(),
-			WithJSONBody(body),
+			uhttp.WithJSONBody(body),
 		)
 	default:
 		return fmt.Errorf("databricks-connector: invalid http method: %s", method)
