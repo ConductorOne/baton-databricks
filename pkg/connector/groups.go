@@ -379,18 +379,15 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have group permissions revoked")
 	}
 
-	// groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	// }
+	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	}
 
-	// parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
-	// }
-
-	parentType := "workspace"
-	parentID := "dbc-dd4d071e-0b85"
+	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
+	}
 
 	if parentType == workspaceResourceType.Id {
 		g.client.SetWorkspaceConfig(parentID)
