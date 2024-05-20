@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
@@ -564,6 +565,29 @@ func parseJSON(body io.Reader, res interface{}) error {
 	return nil
 }
 
+func WithJSONBody(body interface{}) uhttp.RequestOption {
+	return func() (io.ReadWriter, map[string]string, error) {
+		buffer := new(bytes.Buffer)
+		err := json.NewEncoder(buffer).Encode(body)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		_, headers, err := uhttp.WithContentTypeJSONHeader()()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return buffer, headers, nil
+	}
+}
+
+func WithJSONResponse(response interface{}) uhttp.DoOption {
+	return func(resp *uhttp.WrapperResponse) error {
+		return json.Unmarshal(resp.Body, response)
+	}
+}
+
 func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body io.Reader, response interface{}, params ...Vars) error {
 	var (
 		req *http.Request
@@ -592,7 +616,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 			uri,
 			uhttp.WithAcceptJSONHeader(),
 			uhttp.WithContentTypeJSONHeader(),
-			uhttp.WithJSONBody(body),
+			WithJSONBody(body),
 		)
 	default:
 		return fmt.Errorf("databricks-connector: invalid http method: %s", method)
@@ -612,34 +636,23 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	c.auth.Apply(req)
-	resp, err := c.httpClient.Do(req, uhttp.WithJSONResponse(&response))
+	resp, err := c.httpClient.Do(req, WithJSONResponse(&response))
 	if err != nil {
-		return err
+		return fmt.Errorf("databricks-connector: error: %s %v", err.Error(), resp.Body)
 	}
 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusBadRequest {
-			var res struct {
-				Detail  string `json:"detail"`
-				Message string `json:"message"`
-			}
-
-			if err := parseJSON(resp.Body, &res); err != nil {
-				return err
-			}
-
-			var message string
-			if res.Detail != "" {
-				message = res.Detail
-			} else if res.Message != "" {
-				message = res.Message
-			}
-
-			return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, message)
+		var res struct {
+			Detail  string `json:"detail"`
+			Message string `json:"message"`
+		}
+		if err := parseJSON(resp.Body, &res); err != nil {
+			return err
 		}
 
-		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
+		message := strings.Join([]string{res.Detail, res.Message}, " ")
+		return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, message)
 	}
 
 	return nil
