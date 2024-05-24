@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
 
 const (
@@ -37,7 +40,7 @@ const (
 )
 
 type Client struct {
-	httpClient *http.Client
+	httpClient *uhttp.BaseHttpClient
 	baseUrl    *url.URL
 	cfg        Config
 	auth       Auth
@@ -49,8 +52,9 @@ type Client struct {
 }
 
 func NewClient(httpClient *http.Client, acc string, auth Auth) *Client {
+	cli := uhttp.NewBaseHttpClient(httpClient)
 	return &Client{
-		httpClient: httpClient,
+		httpClient: cli,
 		auth:       auth,
 		acc:        acc,
 	}
@@ -561,20 +565,52 @@ func parseJSON(body io.Reader, res interface{}) error {
 	return nil
 }
 
+func WithJSONResponse(response interface{}) uhttp.DoOption {
+	return func(resp *uhttp.WrapperResponse) error {
+		return json.Unmarshal(resp.Body, response)
+	}
+}
+
 func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body io.Reader, response interface{}, params ...Vars) error {
+	var (
+		req *http.Request
+		err error
+	)
 	u, err := url.PathUnescape(urlAddress.String())
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, u, body)
+	uri, err := url.Parse(u)
+	if err != nil {
+		return err
+	}
+
+	switch method {
+	case http.MethodGet:
+		req, err = c.httpClient.NewRequest(ctx,
+			http.MethodGet,
+			uri,
+			uhttp.WithAcceptJSONHeader(),
+		)
+	case http.MethodPut:
+		req, err = c.httpClient.NewRequest(ctx,
+			http.MethodPut,
+			uri,
+			uhttp.WithAcceptJSONHeader(),
+			uhttp.WithContentTypeJSONHeader(),
+			uhttp.WithJSONBody(body),
+		)
+	default:
+		return fmt.Errorf("databricks-connector: invalid http method: %s", method)
+	}
+
 	if err != nil {
 		return err
 	}
 
 	if len(params) > 0 {
 		query := url.Values{}
-
 		for _, param := range params {
 			param.Apply(&query)
 		}
@@ -583,43 +619,23 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	}
 
 	c.auth.Apply(req)
-	req.Header.Set("Content-Type", JSONContentType)
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req, WithJSONResponse(&response))
 	if err != nil {
-		return err
+		return fmt.Errorf("databricks-connector: error: %s %v", err.Error(), resp.Body)
 	}
 
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusBadRequest {
-			var res struct {
-				Detail  string `json:"detail"`
-				Message string `json:"message"`
-			}
-
-			if err := parseJSON(resp.Body, &res); err != nil {
-				return err
-			}
-
-			var message string
-			if res.Detail != "" {
-				message = res.Detail
-			} else if res.Message != "" {
-				message = res.Message
-			}
-
-			return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, message)
+		var res struct {
+			Detail  string `json:"detail"`
+			Message string `json:"message"`
 		}
-
-		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
-	}
-
-	if method == http.MethodGet {
-		if err := parseJSON(resp.Body, response); err != nil {
+		if err := parseJSON(resp.Body, &res); err != nil {
 			return err
 		}
+
+		message := strings.Join([]string{res.Detail, res.Message}, " ")
+		return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, message)
 	}
 
 	return nil
