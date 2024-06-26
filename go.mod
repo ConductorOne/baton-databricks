@@ -3,7 +3,7 @@ module github.com/conductorone/baton-databricks
 go 1.21
 
 require (
-	github.com/conductorone/baton-sdk v0.1.46
+	github.com/conductorone/baton-sdk v0.1.47
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/spf13/cobra v1.8.0
 	go.uber.org/zap v1.27.0
@@ -14,6 +14,7 @@ require (
 require (
 	filippo.io/age v1.1.1 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	go.opentelemetry.io/otel v1.27.0 // indirect
 	go.opentelemetry.io/otel/metric v1.27.0 // indirect
