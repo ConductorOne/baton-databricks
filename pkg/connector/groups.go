@@ -422,28 +422,29 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		}
 
 		for i, ruleSet := range ruleSets {
-			if ruleSet.Role == entitlement.Slug {
-				// check if it contains the principals and remove the principal to the rule set
-				if slices.Contains(ruleSet.Principals, principalID) {
-					// if there is only one principal, remove the whole rule set
-					if len(ruleSet.Principals) == 1 {
-						ruleSets = slices.Delete(ruleSets, i, i+1)
-						break
-					} else {
-						pI := slices.Index(ruleSet.Principals, principalID)
-						ruleSets[i].Principals = slices.Delete(ruleSet.Principals, pI, pI+1)
-						break
-					}
-				}
-
-				l.Info(
-					"databricks-connector: group already does not have the entitlement",
-					zap.String("principal_id", principalID),
-					zap.String("entitlement", entitlement.Slug),
-				)
-
-				return nil, nil
+			if ruleSet.Role != entitlement.Slug {
+				continue
 			}
+
+			// check if it contains the principals and remove the principal to the rule set
+			if slices.Contains(ruleSet.Principals, principalID) {
+				// if there is only one principal, remove the whole rule set
+				if len(ruleSet.Principals) == 1 {
+					ruleSets = slices.Delete(ruleSets, i, i+1)
+				} else {
+					pI := slices.Index(ruleSet.Principals, principalID)
+					ruleSets[i].Principals = slices.Delete(ruleSet.Principals, pI, pI+1)
+				}
+				break
+			}
+
+			l.Info(
+				"databricks-connector: group already does not have the entitlement",
+				zap.String("principal_id", principalID),
+				zap.String("entitlement", entitlement.Slug),
+			)
+
+			return nil, nil
 		}
 
 		err = g.client.UpdateRuleSets(ctx, GroupsType, groupID, ruleSets)
