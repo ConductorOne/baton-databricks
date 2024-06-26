@@ -56,6 +56,7 @@ func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.
 		return nil, err
 	}
 
+	resourceCache.Set(servicePrincipal.ID, resource)
 	return resource, nil
 }
 
@@ -190,7 +191,12 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				annotations = append(annotations, expandGrantForGroup(resourceId.Resource))
+				memberResource, annotation, err := expandGrantForGroup(resourceId.Resource)
+				if err != nil {
+					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
+				}
+				annotations = append(annotations, annotation)
+				resourceId = memberResource.Id
 			}
 
 			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))

@@ -78,6 +78,8 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 		return nil, err
 	}
 
+	resourceCache.Set(user.ID, resource)
+
 	return resource, nil
 }
 
