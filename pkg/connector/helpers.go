@@ -48,12 +48,8 @@ func (c *ResourceCache) Get(resourceId string) *v2.Resource {
 	return c.resources[resourceId]
 }
 
-func (c *ResourceCache) Set(resourceId string, resource *v2.Resource) error {
-	if c.resources[resourceId] != nil {
-		return fmt.Errorf("resource already exists: %s", resourceId)
-	}
+func (c *ResourceCache) Set(resourceId string, resource *v2.Resource) {
 	c.resources[resourceId] = resource
-	return nil
 }
 
 func NewResourceCache() *ResourceCache {
