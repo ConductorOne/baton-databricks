@@ -40,8 +40,8 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 	profile := map[string]interface{}{
 		"display_name": group.DisplayName,
 		"group_id":     group.ID,
-		"parent_type":  parent.ResourceType,
-		"parent_id":    parent.Resource,
+		"parent_type":  parent.GetResourceType(),
+		"parent_id":    parent.GetResource(),
 	}
 
 	if len(members) > 0 {
@@ -52,9 +52,8 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 		rs.WithGroupProfile(profile),
 	}
 
-	// keep the parent resource id, only if the parent resource is account
 	var options []rs.ResourceOption
-	if parent.ResourceType == accountResourceType.Id {
+	if parent != nil {
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 
@@ -128,18 +127,8 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 
-	groupTrait, err := rs.GetGroupTrait(resource)
-	if err != nil {
-		return nil, "", nil, err
-	}
-
-	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
-	}
-
-	if parentType == workspaceResourceType.Id {
-		g.client.SetWorkspaceConfig(parentID)
+	if resource.GetParentResourceId().GetResourceType() == workspaceResourceType.Id {
+		g.client.SetWorkspaceConfig(resource.ParentResourceId.Resource)
 	} else {
 		g.client.SetAccountConfig()
 	}
@@ -379,15 +368,12 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have group permissions revoked")
 	}
 
-	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
+	parentResourceId := entitlement.GetResource().GetParentResourceId()
+	if parentResourceId == nil {
+		return nil, fmt.Errorf("databricks-connector: parent resource id not found")
 	}
-
-	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
-	}
+	parentID := parentResourceId.GetResource()
+	parentType := parentResourceId.GetResourceType()
 
 	if parentType == workspaceResourceType.Id {
 		g.client.SetWorkspaceConfig(parentID)
