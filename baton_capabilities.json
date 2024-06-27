@@ -80,5 +80,9 @@
         "CAPABILITY_PROVISION"
       ]
     }
+  ],
+  "connectorCapabilities":  [
+    "CAPABILITY_SYNC",
+    "CAPABILITY_PROVISION"
   ]
 }
