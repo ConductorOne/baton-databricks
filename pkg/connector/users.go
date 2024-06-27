@@ -55,6 +55,7 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 		rs.WithUserProfile(profile),
 		rs.WithStatus(status),
 		rs.WithUserLogin(user.UserName),
+		rs.WithEmail(primaryEmail, true),
 	}
 
 	userTraitOptions = append(userTraitOptions, emailOptions...)
@@ -76,6 +77,8 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 	if err != nil {
 		return nil, err
 	}
+
+	resourceCache.Set(user.ID, resource)
 
 	return resource, nil
 }

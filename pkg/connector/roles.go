@@ -223,20 +223,12 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 				continue
 			}
 
-			if !isWorkspaceRole && g.HaveRole(roleName) {
-				gID, err := rs.NewResourceID(groupResourceType, g.ID)
+			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
+				memberResource, annotation, err := expandGrantForGroup(g.ID)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create group resource id: %w", err)
+					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", g.ID, err)
 				}
-
-				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, gID, grant.WithAnnotation(expandGrantForGroup(g.ID))))
-			} else if isWorkspaceRole && g.HaveEntitlement(roleName) {
-				gID, err := rs.NewResourceID(groupResourceType, g.ID)
-				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create group resource id: %w", err)
-				}
-
-				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, gID, grant.WithAnnotation(expandGrantForGroup(g.ID))))
+				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, memberResource.Id, grant.WithAnnotation(annotation)))
 			}
 		}
 

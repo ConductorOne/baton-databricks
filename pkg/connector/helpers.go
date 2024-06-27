@@ -17,6 +17,49 @@ import (
 
 const ResourcesPageSize uint = 50
 
+func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) {
+	parts := strings.Split(resourceId, "/")
+	switch len(parts) {
+	case 2:
+		return nil, &v2.ResourceId{
+			ResourceType: parts[0],
+			Resource:     parts[1],
+		}, nil
+	case 4:
+		return &v2.ResourceId{
+				ResourceType: parts[0],
+				Resource:     parts[1],
+			},
+			&v2.ResourceId{
+				ResourceType: parts[2],
+				Resource:     parts[3],
+			}, nil
+	}
+
+	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
+}
+
+type ResourceCache struct {
+	// Map of API IDs to resources
+	resources map[string]*v2.Resource
+}
+
+func (c *ResourceCache) Get(resourceId string) *v2.Resource {
+	return c.resources[resourceId]
+}
+
+func (c *ResourceCache) Set(resourceId string, resource *v2.Resource) {
+	c.resources[resourceId] = resource
+}
+
+func NewResourceCache() *ResourceCache {
+	return &ResourceCache{
+		resources: make(map[string]*v2.Resource),
+	}
+}
+
+var resourceCache = NewResourceCache()
+
 func annotationsForUserResourceType() annotations.Annotations {
 	annos := annotations.Annotations{}
 	annos.Update(&v2.SkipEntitlementsAndGrants{})
@@ -163,10 +206,15 @@ func preparePrincipalID(ctx context.Context, c *databricks.Client, principalType
 	return result, nil
 }
 
-func expandGrantForGroup(id string) *v2.GrantExpandable {
-	return &v2.GrantExpandable{
-		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", id, groupMemberEntitlement)},
+func expandGrantForGroup(id string) (*v2.Resource, *v2.GrantExpandable, error) {
+	memberResource := resourceCache.Get(id)
+	if memberResource == nil {
+		return nil, nil, fmt.Errorf("databricks-connector: group %s not found in cache", id)
 	}
+
+	return memberResource, &v2.GrantExpandable{
+		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", memberResource.Id.Resource, groupMemberEntitlement)},
+	}, nil
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {

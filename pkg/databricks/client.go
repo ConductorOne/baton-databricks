@@ -1,7 +1,6 @@
 package databricks
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -168,12 +167,7 @@ func (c *Client) UpdateUser(ctx context.Context, user *User) error {
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, user.ID)
 
-	b, err := json.Marshal(user)
-	if err != nil {
-		return err
-	}
-
-	return c.Put(ctx, u, bytes.NewReader(b), nil)
+	return c.Put(ctx, u, user, nil)
 }
 
 func (c *Client) FindUserID(ctx context.Context, username string) (string, error) {
@@ -252,12 +246,7 @@ func (c *Client) UpdateGroup(ctx context.Context, group *Group) error {
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, group.ID)
 
-	b, err := json.Marshal(group)
-	if err != nil {
-		return err
-	}
-
-	return c.Put(ctx, u, bytes.NewReader(b), nil)
+	return c.Put(ctx, u, group, nil)
 }
 
 func (c *Client) FindGroupID(ctx context.Context, displayName string) (string, error) {
@@ -336,12 +325,7 @@ func (c *Client) UpdateServicePrincipal(ctx context.Context, servicePrincipal *S
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipal.ID)
 
-	b, err := json.Marshal(servicePrincipal)
-	if err != nil {
-		return err
-	}
-
-	return c.Put(ctx, u, bytes.NewReader(b), nil)
+	return c.Put(ctx, u, servicePrincipal, nil)
 }
 
 func (c *Client) FindServicePrincipalID(ctx context.Context, appID string) (string, error) {
@@ -464,12 +448,7 @@ func (c *Client) CreateOrUpdateWorkspaceMember(ctx context.Context, workspaceID 
 		Permission: []string{"USER"},
 	}
 
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	return c.Put(ctx, u, bytes.NewReader(b), nil)
+	return c.Put(ctx, u, payload, nil)
 }
 
 func (c *Client) RemoveWorkspaceMember(ctx context.Context, workspaceID int64, principalID string) error {
@@ -540,19 +519,14 @@ func (c *Client) UpdateRuleSets(ctx context.Context, resourceType, resourceId st
 		},
 	}
 
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	return c.Put(ctx, u, bytes.NewReader(b), nil, NewNameVars(resourcePayload, c.etag))
+	return c.Put(ctx, u, payload, nil, NewNameVars(resourcePayload, c.etag))
 }
 
 func (c *Client) Get(ctx context.Context, urlAddress *url.URL, response interface{}, params ...Vars) error {
 	return c.doRequest(ctx, urlAddress, http.MethodGet, nil, response, params...)
 }
 
-func (c *Client) Put(ctx context.Context, urlAddress *url.URL, body io.Reader, response interface{}, params ...Vars) error {
+func (c *Client) Put(ctx context.Context, urlAddress *url.URL, body interface{}, response interface{}, params ...Vars) error {
 	return c.doRequest(ctx, urlAddress, http.MethodPut, body, response, params...)
 }
 
@@ -571,7 +545,7 @@ func WithJSONResponse(response interface{}) uhttp.DoOption {
 	}
 }
 
-func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body io.Reader, response interface{}, params ...Vars) error {
+func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body interface{}, response interface{}, params ...Vars) error {
 	var (
 		req *http.Request
 		err error

@@ -181,7 +181,12 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 
 		var annotations []protoreflect.ProtoMessage
 		if resourceType == groupResourceType {
-			annotations = append(annotations, expandGrantForGroup(resourceID.Resource))
+			memberResource, annotation, err := expandGrantForGroup(resourceID.Resource)
+			if err != nil {
+				return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceID.Resource, err)
+			}
+			annotations = append(annotations, annotation)
+			resourceID = memberResource.Id
 		}
 
 		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
