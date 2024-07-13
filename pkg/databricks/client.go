@@ -595,7 +595,7 @@ func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method stri
 	c.auth.Apply(req)
 	resp, err := c.httpClient.Do(req, WithJSONResponse(&response))
 	if err != nil {
-		return fmt.Errorf("databricks-connector: error: %s %v", err.Error(), resp.Body)
+		return fmt.Errorf("databricks-connector: error: %s", err.Error())
 	}
 
 	defer resp.Body.Close()
