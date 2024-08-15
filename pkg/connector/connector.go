@@ -58,7 +58,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		}
 	}
 
-	// Validate that credentials are valid for each targetted workspace.
+	// Validate that credentials are valid for each targeted workspace.
 	if len(d.workspaces) > 0 {
 		for _, workspace := range d.workspaces {
 			d.client.SetWorkspaceConfig(workspace)
@@ -104,13 +104,18 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 }
 
 // New returns a new instance of the connector.
-func New(ctx context.Context, acc string, auth databricks.Auth, workspaces []string) (*Databricks, error) {
+func New(
+	ctx context.Context,
+	accountID string,
+	auth databricks.Auth,
+	workspaces []string,
+) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	client := databricks.NewClient(httpClient, acc, auth)
+	client := databricks.NewClient(httpClient, accountID, auth)
 
 	if client.IsTokenAuth() {
 		client.SetWorkspaceConfig(workspaces[0])

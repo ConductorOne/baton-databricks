@@ -50,12 +50,12 @@ type Client struct {
 	isWSAPIAvailable  bool
 }
 
-func NewClient(httpClient *http.Client, acc string, auth Auth) *Client {
+func NewClient(httpClient *http.Client, accountID string, auth Auth) *Client {
 	cli := uhttp.NewBaseHttpClient(httpClient)
 	return &Client{
 		httpClient: cli,
 		auth:       auth,
-		acc:        acc,
+		acc:        accountID,
 	}
 }
 
