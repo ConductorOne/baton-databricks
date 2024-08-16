@@ -51,12 +51,12 @@ var (
 		field.FieldsAtLeastOneUsed(
 			DatabricksClientIdField,
 			UsernameField,
-			WorkspacesField,
+			TokensField,
 		),
 		field.FieldsMutuallyExclusive(
 			DatabricksClientIdField,
 			UsernameField,
-			WorkspacesField,
+			TokensField,
 		),
 		field.FieldsRequiredTogether(
 			DatabricksClientIdField,
@@ -66,9 +66,9 @@ var (
 			UsernameField,
 			PasswordField,
 		),
-		field.FieldsRequiredTogether(
-			WorkspacesField,
-			TokensField,
+		field.FieldsDependentOn(
+			[]field.SchemaField{TokensField},
+			[]field.SchemaField{WorkspacesField},
 		),
 	}
 )
@@ -78,8 +78,8 @@ func validateConfig(ctx context.Context, cfg *viper.Viper) error {
 	workspaces := cfg.GetStringSlice(WorkspacesField.FieldName)
 	tokens := cfg.GetStringSlice(TokensField.FieldName)
 
-	// It's fine if they are both zero!
-	if len(workspaces) != len(tokens) {
+	// If there are tokens, there must be an equivalent number of workspaces.
+	if len(tokens) > 0 && len(workspaces) != len(tokens) {
 		return fmt.Errorf(
 			"comma-separated list of workspaces and tokens must be the same length. Received %d workspaces and %d tokens",
 			len(workspaces),

@@ -112,14 +112,24 @@ func TestConfigs(t *testing.T) {
 			"missing client secret",
 		},
 		{
+			"--account-id 1 --workspaces 1",
+			false,
+			"missing auth method, but has workspaces",
+		},
+		{
+			"--account-id 1 --workspaces 1 --username 1 --password 1",
+			true,
+			"workspaces + username + password",
+		},
+		{
 			"--account-id 1 --workspaces 1 --workspace-tokens 1",
 			true,
 			"auth tokens",
 		},
 		{
-			"--account-id 1 --workspaces 1",
+			"--account-id 1 --workspace-tokens 1",
 			false,
-			"missing tokens",
+			"mission workspaces",
 		},
 		{
 			// Note this uses a _custom_ validation!
