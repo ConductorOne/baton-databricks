@@ -4,71 +4,88 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/conductorone/baton-sdk/pkg/cli"
-	"github.com/spf13/cobra"
+	"github.com/conductorone/baton-sdk/pkg/field"
+	"github.com/spf13/viper"
 )
 
-// config defines the external configuration required for the connector to run.
-type config struct {
-	cli.BaseConfig `mapstructure:",squash"` // Puts the base config options in the same place as the connector options
-
-	AccountId              string   `mapstructure:"account-id"`
-	DatabricksClientId     string   `mapstructure:"databricks-client-id"`
-	DatabricksClientSecret string   `mapstructure:"databricks-client-secret"`
-	Username               string   `mapstructure:"username"`
-	Password               string   `mapstructure:"password"`
-	Workspaces             []string `mapstructure:"workspaces"`
-	Tokens                 []string `mapstructure:"workspace-tokens"`
-}
-
-func (c *config) IsBasicAuth() bool {
-	return c.Username != "" && c.Password != ""
-}
-
-func (c *config) IsOauth() bool {
-	return c.DatabricksClientId != "" && c.DatabricksClientSecret != ""
-}
-
-func (c *config) AreTokensSet() bool {
-	return (len(c.Tokens) > 0) && (len(c.Workspaces) == len(c.Tokens))
-}
-
-func (c *config) IsAuthReady() bool {
-	return c.AreTokensSet() || c.IsOauth() || c.IsBasicAuth()
-}
-
-// validateConfig is run after the configuration is loaded, and should return an error if it isn't valid.
-func validateConfig(ctx context.Context, cfg *config) error {
-	if cfg.AccountId == "" {
-		return fmt.Errorf("account ID must be provided, use --help for more information")
+var (
+	AccountIdField = field.StringField(
+		"account-id",
+		field.WithDescription("The Databricks account ID used to connect to the Databricks Account and Workspace API"),
+		field.WithRequired(true),
+	)
+	DatabricksClientIdField = field.StringField(
+		"databricks-client-id",
+		field.WithDescription("The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API"),
+	)
+	DatabricksClientSecretField = field.StringField(
+		"databricks-client-secret",
+		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
+	)
+	UsernameField = field.StringField(
+		"username",
+		field.WithDescription("The Databricks username used to connect to the Databricks API"),
+	)
+	PasswordField = field.StringField(
+		"password",
+		field.WithDescription("The Databricks password used to connect to the Databricks API"),
+	)
+	WorkspacesField = field.StringSliceField(
+		"workspaces",
+		field.WithDescription("Limit syncing to the specified workspaces"),
+	)
+	TokensField = field.StringSliceField(
+		"workspace-tokens",
+		field.WithDescription("The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API"),
+	)
+	configurationFields = []field.SchemaField{
+		AccountIdField,
+		DatabricksClientIdField,
+		DatabricksClientSecretField,
+		PasswordField,
+		TokensField,
+		UsernameField,
+		WorkspacesField,
 	}
+	fieldRelationships = []field.SchemaFieldRelationship{
+		field.FieldsAtLeastOneUsed(
+			DatabricksClientIdField,
+			UsernameField,
+			WorkspacesField,
+		),
+		field.FieldsMutuallyExclusive(
+			DatabricksClientIdField,
+			UsernameField,
+			WorkspacesField,
+		),
+		field.FieldsRequiredTogether(
+			DatabricksClientIdField,
+			DatabricksClientSecretField,
+		),
+		field.FieldsRequiredTogether(
+			UsernameField,
+			PasswordField,
+		),
+		field.FieldsRequiredTogether(
+			WorkspacesField,
+			TokensField,
+		),
+	}
+)
 
-	if !cfg.IsAuthReady() {
-		return fmt.Errorf("either access token along workspaces or username and password or client id and client secret must be provided, use --help for more information")
+// validateConfig - additional validations that cannot be encoded in relationships (yet!)
+func validateConfig(ctx context.Context, cfg *viper.Viper) error {
+	workspaces := cfg.GetStringSlice(WorkspacesField.FieldName)
+	tokens := cfg.GetStringSlice(TokensField.FieldName)
+
+	// It's fine if they are both zero!
+	if len(workspaces) != len(tokens) {
+		return fmt.Errorf(
+			"comma-separated list of workspaces and tokens must be the same length. Received %d workspaces and %d tokens",
+			len(workspaces),
+			len(tokens),
+		)
 	}
 
 	return nil
-}
-
-// cmdFlags sets the cmdFlags required for the connector.
-func cmdFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().String("account-id", "", "The Databricks account ID used to connect to the Databricks Account and Workspace API. ($BATON_ACCOUNT_ID)")
-	cmd.PersistentFlags().String(
-		"databricks-client-id",
-		"",
-		"The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_ID)",
-	)
-	cmd.PersistentFlags().String(
-		"databricks-client-secret",
-		"",
-		"The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API. ($BATON_DATABRICKS_CLIENT_SECRET)",
-	)
-	cmd.PersistentFlags().String("username", "", "The Databricks username used to connect to the Databricks API. ($BATON_USERNAME)")
-	cmd.PersistentFlags().String("password", "", "The Databricks password used to connect to the Databricks API. ($BATON_PASSWORD)")
-	cmd.PersistentFlags().StringSlice("workspaces", []string{}, "Limit syncing to the specified workspaces. ($BATON_WORKSPACES)")
-	cmd.PersistentFlags().StringSlice(
-		"workspace-tokens",
-		[]string{},
-		"The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API. ($BATON_WORKSPACE_TOKENS)",
-	)
 }
