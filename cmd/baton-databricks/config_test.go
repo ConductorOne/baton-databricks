@@ -23,7 +23,6 @@ func parseFlags(expression string) (map[string]string, error) {
 	for _, token := range tokens {
 		if strings.HasPrefix(token, flagPrefix) {
 			if currentFlag != "" {
-				// TODO MARCOS should this be a boolean instead?
 				output[currentFlag] = ""
 			}
 			currentFlag = strings.TrimPrefix(token, flagPrefix)
