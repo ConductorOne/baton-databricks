@@ -7,7 +7,6 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
-	"github.com/conductorone/baton-sdk/pkg/helpers"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
@@ -42,7 +41,7 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 		status = v2.UserTrait_Status_STATUS_DISABLED
 	}
 
-	firstName, lastName := helpers.SplitFullName(user.DisplayName)
+	firstName, lastName := rs.SplitFullName(user.DisplayName)
 	profile := map[string]interface{}{
 		"first_name": firstName,
 		"last_name":  lastName,
