@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/conductorone/baton-sdk/pkg/cli"
+	configSchema "github.com/conductorone/baton-sdk/pkg/config"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/field"
 	"github.com/conductorone/baton-sdk/pkg/types"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/conductorone/baton-databricks/pkg/connector"
@@ -19,16 +21,20 @@ var version = "dev"
 
 func main() {
 	ctx := context.Background()
-
-	cfg := &config{}
-	cmd, err := cli.NewCmd(ctx, "baton-databricks", cfg, validateConfig, getConnector)
+	_, cmd, err := configSchema.DefineConfiguration(ctx,
+		"baton-databricks",
+		getConnector,
+		field.NewConfiguration(
+			configurationFields,
+			fieldRelationships...,
+		),
+	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 
 	cmd.Version = version
-	cmdFlags(cmd)
 
 	err = cmd.Execute()
 	if err != nil {
@@ -37,31 +43,76 @@ func main() {
 	}
 }
 
-func prepareClientAuth(ctx context.Context, cfg *config) databricks.Auth {
+func AreTokensSet(workspaces []string, tokens []string) bool {
+	return len(tokens) > 0 &&
+		len(workspaces) == len(tokens)
+}
+
+func prepareClientAuth(ctx context.Context, cfg *viper.Viper) databricks.Auth {
 	l := ctxzap.Extract(ctx)
 
+	accountID := cfg.GetString(AccountIdField.FieldName)
+	databricksClientId := cfg.GetString(DatabricksClientIdField.FieldName)
+	databricksClientSecret := cfg.GetString(DatabricksClientSecretField.FieldName)
+	username := cfg.GetString(UsernameField.FieldName)
+	password := cfg.GetString(PasswordField.FieldName)
+	workspaces := cfg.GetStringSlice(WorkspacesField.FieldName)
+	tokens := cfg.GetStringSlice(TokensField.FieldName)
+
 	switch {
-	case cfg.IsBasicAuth():
-		l.Info("using basic auth", zap.String("account-id", cfg.AccountId), zap.String("username", cfg.Username))
-		cAuth := databricks.NewBasicAuth(cfg.Username, cfg.Password)
+	case username != "" && password != "":
+		l.Info(
+			"using basic auth",
+			zap.String("account-id", accountID),
+			zap.String("username", username),
+		)
+		cAuth := databricks.NewBasicAuth(
+			username,
+			password,
+		)
 		return cAuth
-	case cfg.IsOauth():
-		l.Info("using oauth", zap.String("account-id", cfg.AccountId), zap.String("client-id", cfg.DatabricksClientId))
-		cAuth := databricks.NewOAuth2(cfg.AccountId, cfg.DatabricksClientId, cfg.DatabricksClientSecret)
+	case databricksClientId != "" && databricksClientSecret != "":
+		l.Info(
+			"using oauth",
+			zap.String("account-id", accountID),
+			zap.String("client-id", databricksClientId),
+		)
+		cAuth := databricks.NewOAuth2(
+			accountID,
+			databricksClientId,
+			databricksClientSecret,
+		)
 		return cAuth
-	case cfg.AreTokensSet():
-		l.Info("using access token", zap.String("account-id", cfg.AccountId))
-		cAuth := databricks.NewTokenAuth(cfg.Workspaces, cfg.Tokens)
+	case AreTokensSet(workspaces, tokens):
+		l.Info(
+			"using access token",
+			zap.String("account-id", accountID),
+		)
+		cAuth := databricks.NewTokenAuth(
+			workspaces,
+			tokens,
+		)
 		return cAuth
 	default:
 		return &databricks.NoAuth{}
 	}
 }
 
-func getConnector(ctx context.Context, cfg *config) (types.ConnectorServer, error) {
+func getConnector(ctx context.Context, cfg *viper.Viper) (types.ConnectorServer, error) {
 	l := ctxzap.Extract(ctx)
+
+	err := validateConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	auth := prepareClientAuth(ctx, cfg)
-	cb, err := connector.New(ctx, cfg.AccountId, auth, cfg.Workspaces)
+	cb, err := connector.New(
+		ctx,
+		cfg.GetString(AccountIdField.FieldName),
+		auth,
+		cfg.GetStringSlice(WorkspacesField.FieldName),
+	)
 	if err != nil {
 		l.Error("error creating connector", zap.Error(err))
 		return nil, err
