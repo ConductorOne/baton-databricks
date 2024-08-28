@@ -64,24 +64,48 @@ func TestConfigs(t *testing.T) {
 			false,
 			"mission workspaces",
 		},
-		{
-			// Note this uses a _custom_ validation!
-			"--account-id 1 --workspaces 1,2 --workspace-tokens 1",
-			false,
-			"not enough tokens",
-		},
+	}
+
+	configurations := field.NewConfiguration(
+		configurationFields,
+		fieldRelationships...,
+	)
+
+	extraValidationFunction := func(configs *viper.Viper) error {
+		return validateConfig(ctx, configs)
 	}
 
 	test.ExerciseTestCasesFromExpressions(
 		t,
-		field.NewConfiguration(
-			configurationFields,
-			fieldRelationships...,
-		),
-		func(configs *viper.Viper) error {
-			return validateConfig(ctx, configs)
-		},
+		configurations,
+		extraValidationFunction,
 		ustrings.ParseFlags,
 		testCases,
 	)
+
+	t.Run("should validate token list lengths match", func(t *testing.T) {
+		v := viper.New()
+		v.Set("account-id", "1")
+		v.Set("workspaces", []string{"1", "2"})
+
+		f := func() error {
+			err := field.Validate(configurations, v)
+			if err != nil {
+				return err
+			}
+			return extraValidationFunction(v)
+		}
+
+		t.Run("should fail", func(t *testing.T) {
+			v.Set("workspace-tokens", []string{"3"})
+
+			test.AssertValidation(t, f, false)
+		})
+
+		t.Run("should succeed", func(t *testing.T) {
+			v.Set("workspace-tokens", []string{"3", "4"})
+
+			test.AssertValidation(t, f, true)
+		})
+	})
 }
