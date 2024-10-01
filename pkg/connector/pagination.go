@@ -51,7 +51,7 @@ func convertPageToken(token string) (uint, error) {
 func prepareNextToken(page uint, pageTotal int, total uint) string {
 	var token string
 
-	next := page + uint(pageTotal)
+	next := page + uint(pageTotal) // #nosec G115
 	if next < total+1 {
 		token = strconv.FormatUint(uint64(next), 10)
 	}
