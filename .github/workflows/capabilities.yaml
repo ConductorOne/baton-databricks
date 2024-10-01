@@ -24,6 +24,12 @@ jobs:
         run: go build -o connector ./cmd/baton-databricks
 
       - name: Run and save output
+        env:
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          BATON_ACCOUNT_ID: ${{ secrets.BATON_ACCOUNT_ID }}
+          BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
+          BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
         run: ./connector capabilities > baton_capabilities.json
 
       - name: Commit changes
