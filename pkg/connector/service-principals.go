@@ -77,7 +77,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
-	servicePrincipals, total, err := s.client.ListServicePrincipals(
+	servicePrincipals, total, _, err := s.client.ListServicePrincipals(
 		ctx,
 		databricks.NewPaginationVars(page, ResourcesPageSize),
 		databricks.NewServicePrincipalAttrVars(),
@@ -134,7 +134,7 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 
 	// role permissions entitlements
 	// get all assignable roles for this specific service principal resource
-	roles, err := s.client.ListRoles(context.Background(), ServicePrincipalsType, applicationId)
+	roles, _, err := s.client.ListRoles(context.Background(), ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list roles for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
 	}
@@ -176,7 +176,7 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	ruleSets, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
+	ruleSets, _, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
 	}
@@ -240,7 +240,7 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		return nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	ruleSets, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
+	ruleSets, _, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
@@ -279,7 +279,7 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		})
 	}
 
-	err = s.client.UpdateRuleSets(ctx, ServicePrincipalsType, applicationId, ruleSets)
+	_, err = s.client.UpdateRuleSets(ctx, ServicePrincipalsType, applicationId, ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
@@ -324,7 +324,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	ruleSets, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
+	ruleSets, _, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
@@ -371,7 +371,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, nil
 	}
 
-	err = s.client.UpdateRuleSets(ctx, ServicePrincipalsType, applicationId, ruleSets)
+	_, err = s.client.UpdateRuleSets(ctx, ServicePrincipalsType, applicationId, ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
