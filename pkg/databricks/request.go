@@ -69,6 +69,17 @@ func (c *Client) doRequest(
 	response interface{},
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
+	// TODO(marcos): Refactor URLs so that we don't have to unescape.
+	u, err := url.PathUnescape(urlAddress.String())
+	if err != nil {
+		return nil, err
+	}
+
+	uri, err := url.Parse(u)
+	if err != nil {
+		return nil, err
+	}
+
 	options := []uhttp.RequestOption{
 		uhttp.WithAcceptJSONHeader(),
 	}
@@ -76,7 +87,7 @@ func (c *Client) doRequest(
 		options = append(options, uhttp.WithJSONBody(body))
 	}
 
-	req, err := c.httpClient.NewRequest(ctx, method, urlAddress, options...)
+	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)
 	if err != nil {
 		return nil, err
 	}
