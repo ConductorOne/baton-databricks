@@ -98,26 +98,25 @@ func (c *Client) doRequest(
 		WithJSONResponse(&response),
 		uhttp.WithRatelimitData(ratelimitData),
 	)
-	defer resp.Body.Close()
 
-	if err != nil {
-		if resp.StatusCode != http.StatusOK {
-			var res struct {
-				Detail  string `json:"detail"`
-				Message string `json:"message"`
-			}
-			if err := parseJSON(resp.Body, &res); err != nil {
-				return nil, err
-			}
-
-			return ratelimitData, fmt.Errorf(
-				"unexpected status code %d: %s %s",
-				resp.StatusCode,
-				res.Detail,
-				res.Message,
-			)
-		}
+	if err == nil {
+		return ratelimitData, nil
 	}
 
-	return ratelimitData, nil
+	defer resp.Body.Close()
+
+	var res struct {
+		Detail  string `json:"detail"`
+		Message string `json:"message"`
+	}
+	if err := parseJSON(resp.Body, &res); err != nil {
+		return nil, err
+	}
+
+	return ratelimitData, fmt.Errorf(
+		"unexpected status code %d: %s %s",
+		resp.StatusCode,
+		res.Detail,
+		res.Message,
+	)
 }
