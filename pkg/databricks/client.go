@@ -2,14 +2,12 @@ package databricks
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
+	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
 
@@ -127,42 +125,57 @@ type ListResponse[T any] struct {
 	Total     uint `json:"totalResults"`
 }
 
-func (c *Client) ListUsers(ctx context.Context, vars ...Vars) ([]User, uint, error) {
+func (c *Client) ListUsers(
+	ctx context.Context,
+	vars ...Vars,
+) (
+	[]User,
+	uint,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res ListResponse[User]
 	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to prepare url to fetch users: %w", err)
+		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
 	}
 
-	err = c.Get(ctx, u, &res, vars...)
+	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, ratelimitData, err
 	}
 
-	return res.Resources, res.Total, nil
+	return res.Resources, res.Total, ratelimitData, nil
 }
 
-func (c *Client) GetUser(ctx context.Context, userID string) (*User, error) {
+func (c *Client) GetUser(
+	ctx context.Context,
+	userID string,
+) (
+	*User,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res *User
 	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
 	}
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, userID)
 
-	err = c.Get(ctx, u, &res)
+	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
-		return nil, err
+		return nil, ratelimitData, err
 	}
 
-	return res, nil
+	return res, ratelimitData, nil
 }
 
-func (c *Client) UpdateUser(ctx context.Context, user *User) error {
+func (c *Client) UpdateUser(ctx context.Context, user *User) (*v2.RateLimitDescription, error) {
 	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
 	if err != nil {
-		return fmt.Errorf("failed to prepare url to fetch users: %w", err)
+		return nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
 	}
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, user.ID)
@@ -170,78 +183,107 @@ func (c *Client) UpdateUser(ctx context.Context, user *User) error {
 	return c.Put(ctx, u, user, nil)
 }
 
-func (c *Client) FindUserID(ctx context.Context, username string) (string, error) {
-	users, _, err := c.ListUsers(
+func (c *Client) FindUserID(
+	ctx context.Context,
+	username string,
+) (
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	users, _, ratelimitData, err := c.ListUsers(
 		ctx,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("userName eq '%s'", username)),
 	)
 
 	if err != nil {
-		return "", err
+		return "", ratelimitData, err
 	}
 
 	if len(users) == 0 {
-		return "", err
+		return "", ratelimitData, err
 	}
 
-	return users[0].ID, nil
+	return users[0].ID, ratelimitData, nil
 }
 
-func (c *Client) FindUsername(ctx context.Context, userID string) (string, error) {
-	users, _, err := c.ListUsers(
+func (c *Client) FindUsername(
+	ctx context.Context,
+	userID string,
+) (
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	users, _, ratelimitData, err := c.ListUsers(
 		ctx,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("id eq '%s'", userID)),
 	)
 
 	if err != nil {
-		return "", err
+		return "", ratelimitData, err
 	}
 
 	if len(users) == 0 {
-		return "", err
+		return "", ratelimitData, err
 	}
 
-	return users[0].UserName, nil
+	return users[0].UserName, ratelimitData, nil
 }
 
-func (c *Client) ListGroups(ctx context.Context, vars ...Vars) ([]Group, uint, error) {
+func (c *Client) ListGroups(
+	ctx context.Context,
+	vars ...Vars,
+) (
+	[]Group,
+	uint,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res ListResponse[Group]
 	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
 
-	err = c.Get(ctx, u, &res, vars...)
+	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, ratelimitData, err
 	}
 
-	return res.Resources, res.Total, nil
+	return res.Resources, res.Total, ratelimitData, nil
 }
 
-func (c *Client) GetGroup(ctx context.Context, groupID string) (*Group, error) {
+func (c *Client) GetGroup(
+	ctx context.Context,
+	groupID string,
+) (
+	*Group,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res *Group
 	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, groupID)
 
-	err = c.Get(ctx, u, &res)
+	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
-		return nil, err
+		return nil, ratelimitData, err
 	}
 
-	return res, nil
+	return res, ratelimitData, nil
 }
 
-func (c *Client) UpdateGroup(ctx context.Context, group *Group) error {
+func (c *Client) UpdateGroup(ctx context.Context, group *Group) (*v2.RateLimitDescription, error) {
 	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
 	if err != nil {
-		return fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, group.ID)
@@ -249,78 +291,113 @@ func (c *Client) UpdateGroup(ctx context.Context, group *Group) error {
 	return c.Put(ctx, u, group, nil)
 }
 
-func (c *Client) FindGroupID(ctx context.Context, displayName string) (string, error) {
-	groups, _, err := c.ListGroups(
+func (c *Client) FindGroupID(
+	ctx context.Context,
+	displayName string,
+) (
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	groups, _, ratelimitData, err := c.ListGroups(
 		ctx,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName)),
 	)
 
 	if err != nil {
-		return "", err
+		return "", ratelimitData, err
 	}
 
 	if len(groups) == 0 {
-		return "", err
+		return "", ratelimitData, err
 	}
 
-	return groups[0].ID, nil
+	return groups[0].ID, ratelimitData, nil
 }
 
-func (c *Client) FindGroupDisplayName(ctx context.Context, groupID string) (string, error) {
-	groups, _, err := c.ListGroups(
+func (c *Client) FindGroupDisplayName(
+	ctx context.Context,
+	groupID string,
+) (
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	groups, _, ratelimitData, err := c.ListGroups(
 		ctx,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("id eq '%s'", groupID)),
 	)
 
 	if err != nil {
-		return "", err
+		return "", ratelimitData, err
 	}
 
 	if len(groups) == 0 {
-		return "", err
+		return "", ratelimitData, err
 	}
 
-	return groups[0].DisplayName, nil
+	return groups[0].DisplayName, ratelimitData, nil
 }
 
-func (c *Client) ListServicePrincipals(ctx context.Context, vars ...Vars) ([]ServicePrincipal, uint, error) {
+func (c *Client) ListServicePrincipals(
+	ctx context.Context,
+	vars ...Vars,
+) (
+	[]ServicePrincipal,
+	uint,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res ListResponse[ServicePrincipal]
 	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
 
-	err = c.Get(ctx, u, &res, vars...)
+	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, ratelimitData, err
 	}
 
-	return res.Resources, res.Total, nil
+	return res.Resources, res.Total, ratelimitData, nil
 }
 
-func (c *Client) GetServicePrincipal(ctx context.Context, servicePrincipalID string) (*ServicePrincipal, error) {
+func (c *Client) GetServicePrincipal(
+	ctx context.Context,
+	servicePrincipalID string,
+) (
+	*ServicePrincipal,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res *ServicePrincipal
 	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipalID)
 
-	err = c.Get(ctx, u, &res)
+	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
-		return nil, err
+		return nil, ratelimitData, err
 	}
 
-	return res, nil
+	return res, ratelimitData, nil
 }
 
-func (c *Client) UpdateServicePrincipal(ctx context.Context, servicePrincipal *ServicePrincipal) error {
+func (c *Client) UpdateServicePrincipal(
+	ctx context.Context,
+	servicePrincipal *ServicePrincipal,
+) (
+	*v2.RateLimitDescription,
+	error,
+) {
 	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
 	if err != nil {
-		return fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
 
 	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipal.ID)
@@ -328,79 +405,107 @@ func (c *Client) UpdateServicePrincipal(ctx context.Context, servicePrincipal *S
 	return c.Put(ctx, u, servicePrincipal, nil)
 }
 
-func (c *Client) FindServicePrincipalID(ctx context.Context, appID string) (string, error) {
-	servicePrincipals, _, err := c.ListServicePrincipals(
+func (c *Client) FindServicePrincipalID(
+	ctx context.Context,
+	appID string,
+) (
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	servicePrincipals, _, ratelimitData, err := c.ListServicePrincipals(
 		ctx,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("applicationId eq '%s'", appID)),
 	)
 
 	if err != nil {
-		return "", err
+		return "", ratelimitData, err
 	}
 
 	if len(servicePrincipals) == 0 {
-		return "", err
+		return "", ratelimitData, err
 	}
 
-	return servicePrincipals[0].ID, nil
+	return servicePrincipals[0].ID, ratelimitData, nil
 }
 
-func (c *Client) FindServicePrincipalAppID(ctx context.Context, servicePrincipalID string) (string, error) {
-	servicePrincipals, _, err := c.ListServicePrincipals(
+func (c *Client) FindServicePrincipalAppID(
+	ctx context.Context,
+	servicePrincipalID string,
+) (
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	servicePrincipals, _, ratelimitData, err := c.ListServicePrincipals(
 		ctx,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("id eq '%s'", servicePrincipalID)),
 	)
 
 	if err != nil {
-		return "", err
+		return "", ratelimitData, err
 	}
 
 	if len(servicePrincipals) == 0 {
-		return "", err
+		return "", ratelimitData, err
 	}
 
-	return servicePrincipals[0].ApplicationID, nil
+	return servicePrincipals[0].ApplicationID, ratelimitData, nil
 }
 
-func (c *Client) ListRoles(ctx context.Context, resourceType, resourceId string) ([]Role, error) {
+func (c *Client) ListRoles(
+	ctx context.Context,
+	resourceType string,
+	resourceId string,
+) (
+	[]Role,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res struct {
 		Roles []Role `json:"roles"`
 	}
 
 	u, err := c.cfg.ResolvePath(c.baseUrl, RolesEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch roles: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch roles: %w", err)
 	}
 
 	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare resource payload: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
 
-	err = c.Get(ctx, u, &res, NewResourceVars(resourcePayload))
+	ratelimitData, err := c.Get(ctx, u, &res, NewResourceVars(resourcePayload))
 	if err != nil {
-		return nil, err
+		return nil, ratelimitData, err
 	}
 
-	return res.Roles, nil
+	return res.Roles, ratelimitData, nil
 }
 
-func (c *Client) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+func (c *Client) ListWorkspaces(
+	ctx context.Context,
+) (
+	[]Workspace,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res []Workspace
 
 	u, err := c.cfg.ResolvePath(c.baseUrl, WorkspacesEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch workspaces: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch workspaces: %w", err)
 	}
 
-	err = c.Get(ctx, u, &res)
+	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
-		return nil, err
+		return nil, ratelimitData, err
 	}
 
-	return res, nil
+	return res, ratelimitData, nil
 }
 
 func (c *Client) prepareURLForWorkspaceMembers(params ...string) (*url.URL, error) {
@@ -416,7 +521,14 @@ func (c *Client) prepareURLForWorkspaceMembers(params ...string) (*url.URL, erro
 	return &u, nil
 }
 
-func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID int) ([]WorkspaceAssignment, error) {
+func (c *Client) ListWorkspaceMembers(
+	ctx context.Context,
+	workspaceID int,
+) (
+	[]WorkspaceAssignment,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res struct {
 		Assignments []WorkspaceAssignment `json:"permission_assignments"`
 	}
@@ -424,22 +536,35 @@ func (c *Client) ListWorkspaceMembers(ctx context.Context, workspaceID int) ([]W
 	id := strconv.Itoa(workspaceID)
 	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch workspace members: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch workspace members: %w", err)
 	}
 
-	err = c.Get(ctx, u, &res)
+	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
-		return nil, err
+		return nil, ratelimitData, err
 	}
 
-	return res.Assignments, nil
+	return res.Assignments, ratelimitData, nil
 }
 
-func (c *Client) CreateOrUpdateWorkspaceMember(ctx context.Context, workspaceID int64, principalID string) error {
+func (c *Client) CreateOrUpdateWorkspaceMember(
+	ctx context.Context,
+	workspaceID int64,
+	principalID string,
+) (
+	*v2.RateLimitDescription,
+	error,
+) {
 	wID := strconv.Itoa(int(workspaceID))
-	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, wID, WorkspaceAssignmentsEndpoint, "principals", principalID)
+	u, err := c.prepareURLForWorkspaceMembers(
+		WorkspacesEndpoint,
+		wID,
+		WorkspaceAssignmentsEndpoint,
+		"principals",
+		principalID,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to prepare url to create workspace member: %w", err)
+		return nil, fmt.Errorf("failed to prepare url to create workspace member: %w", err)
 	}
 
 	payload := struct {
@@ -451,23 +576,69 @@ func (c *Client) CreateOrUpdateWorkspaceMember(ctx context.Context, workspaceID 
 	return c.Put(ctx, u, payload, nil)
 }
 
-func (c *Client) RemoveWorkspaceMember(ctx context.Context, workspaceID int64, principalID string) error {
+func (c *Client) RemoveWorkspaceMember(
+	ctx context.Context,
+	workspaceID int64,
+	principalID string,
+) (*v2.RateLimitDescription, error) {
 	wID := strconv.Itoa(int(workspaceID))
 
-	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, wID, WorkspaceAssignmentsEndpoint, "principals", principalID)
+	u, err := c.prepareURLForWorkspaceMembers(
+		WorkspacesEndpoint,
+		wID,
+		WorkspaceAssignmentsEndpoint,
+		"principals",
+		principalID,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to prepare url to create workspace member: %w", err)
+		return nil, fmt.Errorf("failed to prepare url to create workspace member: %w", err)
 	}
 
 	return c.Put(ctx, u, nil, nil)
 }
 
-func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId string) ([]RuleSet, error) {
+func (c *Client) ListRuleSets(
+	ctx context.Context,
+	resourceType string,
+	resourceId string,
+) (
+	[]RuleSet,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res struct {
 		RuleSets []RuleSet `json:"grant_rules"`
 		Etag     string    `json:"etag"`
 	}
 
+	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
+	}
+
+	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to prepare resource payload: %w", err)
+	}
+
+	ratelimitData, err := c.Get(ctx, u, &res, NewNameVars(resourcePayload, c.etag))
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	c.UpdateEtag(res.Etag)
+
+	return res.RuleSets, ratelimitData, nil
+}
+
+func (c *Client) UpdateRuleSets(
+	ctx context.Context,
+	resourceType, resourceId string,
+	ruleSets []RuleSet,
+) (
+	*v2.RateLimitDescription,
+	error,
+) {
 	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
@@ -476,27 +647,6 @@ func (c *Client) ListRuleSets(ctx context.Context, resourceType, resourceId stri
 	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare resource payload: %w", err)
-	}
-
-	err = c.Get(ctx, u, &res, NewNameVars(resourcePayload, c.etag))
-	if err != nil {
-		return nil, err
-	}
-
-	c.UpdateEtag(res.Etag)
-
-	return res.RuleSets, nil
-}
-
-func (c *Client) UpdateRuleSets(ctx context.Context, resourceType, resourceId string, ruleSets []RuleSet) error {
-	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
-	if err != nil {
-		return fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
-	}
-
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
-	if err != nil {
-		return fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
 
 	payload := struct {
@@ -520,97 +670,4 @@ func (c *Client) UpdateRuleSets(ctx context.Context, resourceType, resourceId st
 	}
 
 	return c.Put(ctx, u, payload, nil, NewNameVars(resourcePayload, c.etag))
-}
-
-func (c *Client) Get(ctx context.Context, urlAddress *url.URL, response interface{}, params ...Vars) error {
-	return c.doRequest(ctx, urlAddress, http.MethodGet, nil, response, params...)
-}
-
-func (c *Client) Put(ctx context.Context, urlAddress *url.URL, body interface{}, response interface{}, params ...Vars) error {
-	return c.doRequest(ctx, urlAddress, http.MethodPut, body, response, params...)
-}
-
-func parseJSON(body io.Reader, res interface{}) error {
-	// Databricks seems to return content-type text/plain even though it's json, so don't check content type
-	if err := json.NewDecoder(body).Decode(res); err != nil {
-		return fmt.Errorf("failed to decode response body: %w", err)
-	}
-
-	return nil
-}
-
-func WithJSONResponse(response interface{}) uhttp.DoOption {
-	return func(resp *uhttp.WrapperResponse) error {
-		return json.Unmarshal(resp.Body, response)
-	}
-}
-
-func (c *Client) doRequest(ctx context.Context, urlAddress *url.URL, method string, body interface{}, response interface{}, params ...Vars) error {
-	var (
-		req *http.Request
-		err error
-	)
-	u, err := url.PathUnescape(urlAddress.String())
-	if err != nil {
-		return err
-	}
-
-	uri, err := url.Parse(u)
-	if err != nil {
-		return err
-	}
-
-	switch method {
-	case http.MethodGet:
-		req, err = c.httpClient.NewRequest(ctx,
-			http.MethodGet,
-			uri,
-			uhttp.WithAcceptJSONHeader(),
-		)
-	case http.MethodPut:
-		req, err = c.httpClient.NewRequest(ctx,
-			http.MethodPut,
-			uri,
-			uhttp.WithAcceptJSONHeader(),
-			uhttp.WithContentTypeJSONHeader(),
-			uhttp.WithJSONBody(body),
-		)
-	default:
-		return fmt.Errorf("databricks-connector: invalid http method: %s", method)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if len(params) > 0 {
-		query := url.Values{}
-		for _, param := range params {
-			param.Apply(&query)
-		}
-
-		req.URL.RawQuery = query.Encode()
-	}
-
-	c.auth.Apply(req)
-	resp, err := c.httpClient.Do(req, WithJSONResponse(&response))
-	if err != nil {
-		return err
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var res struct {
-			Detail  string `json:"detail"`
-			Message string `json:"message"`
-		}
-		if err := parseJSON(resp.Body, &res); err != nil {
-			return err
-		}
-
-		message := strings.Join([]string{res.Detail, res.Message}, " ")
-		return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, message)
-	}
-
-	return nil
 }

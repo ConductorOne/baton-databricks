@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"context"
@@ -72,7 +72,7 @@ func TestConfigs(t *testing.T) {
 	)
 
 	extraValidationFunction := func(configs *viper.Viper) error {
-		return validateConfig(ctx, configs)
+		return ValidateConfig(ctx, configs)
 	}
 
 	test.ExerciseTestCasesFromExpressions(

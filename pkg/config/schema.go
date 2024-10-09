@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"context"
@@ -71,10 +71,14 @@ var (
 			[]field.SchemaField{WorkspacesField},
 		),
 	}
+	ConfigurationSchema = field.NewConfiguration(
+		configurationFields,
+		fieldRelationships...,
+	)
 )
 
-// validateConfig - additional validations that cannot be encoded in relationships (yet!)
-func validateConfig(ctx context.Context, cfg *viper.Viper) error {
+// ValidateConfig - additional validations that cannot be encoded in relationships (yet!)
+func ValidateConfig(ctx context.Context, cfg *viper.Viper) error {
 	workspaces := cfg.GetStringSlice(WorkspacesField.FieldName)
 	tokens := cfg.GetStringSlice(TokensField.FieldName)
 

@@ -52,7 +52,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	// Check if we can list users from Account API (unless we are using token auth specific to a single workspace).
 	if !d.client.IsTokenAuth() {
-		_, err := d.client.ListRoles(ctx, "", "")
+		_, _, err := d.client.ListRoles(ctx, "", "")
 		if err == nil {
 			isAccAPIAvailable = true
 		}
@@ -63,7 +63,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		for _, workspace := range d.workspaces {
 			d.client.SetWorkspaceConfig(workspace)
 
-			_, err := d.client.ListRoles(ctx, "", "")
+			_, _, err := d.client.ListRoles(ctx, "", "")
 			if err != nil && !isAccAPIAvailable {
 				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
 			}
@@ -74,7 +74,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	// Validate that credentials are valid for every workspace.
 	if len(d.workspaces) == 0 {
-		workspaces, err := d.client.ListWorkspaces(ctx)
+		workspaces, _, err := d.client.ListWorkspaces(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 		}
@@ -82,7 +82,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		for _, workspace := range workspaces {
 			d.client.SetWorkspaceConfig(workspace.Host)
 
-			_, err := d.client.ListRoles(ctx, "", "")
+			_, _, err := d.client.ListRoles(ctx, "", "")
 			if err != nil && !isAccAPIAvailable {
 				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace.Host, err)
 			}

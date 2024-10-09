@@ -3,11 +3,11 @@ module github.com/conductorone/baton-databricks
 go 1.21
 
 require (
-	github.com/conductorone/baton-sdk v0.2.23
+	github.com/conductorone/baton-sdk v0.2.35
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/spf13/viper v1.19.0
 	go.uber.org/zap v1.27.0
-	golang.org/x/oauth2 v0.22.0
+	golang.org/x/oauth2 v0.23.0
 	google.golang.org/protobuf v1.34.2
 )
 
