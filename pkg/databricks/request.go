@@ -103,7 +103,7 @@ func (c *Client) doRequest(
 
 	c.auth.Apply(req)
 
-	var ratelimitData *v2.RateLimitDescription
+	ratelimitData := &v2.RateLimitDescription{}
 	resp, err := c.httpClient.Do(
 		req,
 		WithJSONResponse(&response),
