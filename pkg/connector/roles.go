@@ -109,18 +109,25 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 }
 
 // Entitlements returns membership entitlements for a given role.
-func (r *roleBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
-	var rv []*v2.Entitlement
-
-	entitlementOptions := []ent.EntitlementOption{
-		ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
-		ent.WithDisplayName(fmt.Sprintf("%s role", resource.DisplayName)),
-		ent.WithDescription(fmt.Sprintf("%s Databricks role", resource.DisplayName)),
-	}
-
-	rv = append(rv, ent.NewAssignmentEntitlement(resource, RoleMemberEntitlement, entitlementOptions...))
-
-	return rv, "", nil, nil
+func (r *roleBuilder) Entitlements(
+	_ context.Context,
+	resource *v2.Resource,
+	_ *pagination.Token,
+) (
+	[]*v2.Entitlement,
+	string,
+	annotations.Annotations,
+	error,
+) {
+	return []*v2.Entitlement{
+		ent.NewAssignmentEntitlement(
+			resource,
+			RoleMemberEntitlement,
+			ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
+			ent.WithDisplayName(fmt.Sprintf("%s role", resource.DisplayName)),
+			ent.WithDescription(fmt.Sprintf("%s Databricks role", resource.DisplayName)),
+		),
+	}, "", nil, nil
 }
 
 // Grants returns all the grants for a given role.
@@ -172,7 +179,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		})
 
 	case userResourceType.Id:
-		users, total, err := r.client.ListUsers(
+		users, total, _, err := r.client.ListUsers(
 			ctx,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
 			databricks.NewUserRolesAttrVars(),
@@ -207,7 +214,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		}
 
 	case groupResourceType.Id:
-		groups, total, err := r.client.ListGroups(
+		groups, total, _, err := r.client.ListGroups(
 			ctx,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
 			databricks.NewGroupRolesAttrVars(),
@@ -239,7 +246,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		}
 
 	case servicePrincipalResourceType.Id:
-		servicePrincipals, total, err := r.client.ListServicePrincipals(
+		servicePrincipals, total, _, err := r.client.ListServicePrincipals(
 			ctx,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
 			databricks.NewServicePrincipalRolesAttrVars(),
@@ -319,40 +326,40 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 
 	switch principal.Id.ResourceType {
 	case userResourceType.Id:
-		u, err := r.client.GetUser(ctx, principal.Id.Resource)
+		u, _, err := r.client.GetUser(ctx, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
 		}
 
 		addPermissions(isWorkspaceRole, &u.Permissions, permissionName)
 
-		err = r.client.UpdateUser(ctx, u)
+		_, err = r.client.UpdateUser(ctx, u)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
 
 	case groupResourceType.Id:
-		g, err := r.client.GetGroup(ctx, principal.Id.Resource)
+		g, _, err := r.client.GetGroup(ctx, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
 
 		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
 
-		err = r.client.UpdateGroup(ctx, g)
+		_, err = r.client.UpdateGroup(ctx, g)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
 
 	case servicePrincipalResourceType.Id:
-		sp, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
+		sp, _, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
 		}
 
 		addPermissions(isWorkspaceRole, &sp.Permissions, permissionName)
 
-		err = r.client.UpdateServicePrincipal(ctx, sp)
+		_, err = r.client.UpdateServicePrincipal(ctx, sp)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
@@ -401,40 +408,40 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 
 	switch principal.Id.ResourceType {
 	case userResourceType.Id:
-		u, err := r.client.GetUser(ctx, principal.Id.Resource)
+		u, _, err := r.client.GetUser(ctx, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
 		}
 
 		removePermissions(isWorkspaceRole, &u.Permissions, permissionName)
 
-		err = r.client.UpdateUser(ctx, u)
+		_, err = r.client.UpdateUser(ctx, u)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}
 
 	case groupResourceType.Id:
-		g, err := r.client.GetGroup(ctx, principal.Id.Resource)
+		g, _, err := r.client.GetGroup(ctx, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
 
 		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
 
-		err = r.client.UpdateGroup(ctx, g)
+		_, err = r.client.UpdateGroup(ctx, g)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}
 
 	case servicePrincipalResourceType.Id:
-		sp, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
+		sp, _, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
 		}
 
 		removePermissions(isWorkspaceRole, &sp.Permissions, permissionName)
 
-		err = r.client.UpdateServicePrincipal(ctx, sp)
+		_, err = r.client.UpdateServicePrincipal(ctx, sp)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/conductorone/baton-databricks/pkg/config"
 	configSchema "github.com/conductorone/baton-sdk/pkg/config"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/conductorone/baton-sdk/pkg/field"
 	"github.com/conductorone/baton-sdk/pkg/types"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"github.com/spf13/viper"
@@ -17,17 +17,17 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-var version = "dev"
+var (
+	connectorName = "baton-databricks"
+	version       = "dev"
+)
 
 func main() {
 	ctx := context.Background()
 	_, cmd, err := configSchema.DefineConfiguration(ctx,
-		"baton-databricks",
+		connectorName,
 		getConnector,
-		field.NewConfiguration(
-			configurationFields,
-			fieldRelationships...,
-		),
+		config.ConfigurationSchema,
 	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
@@ -51,13 +51,13 @@ func AreTokensSet(workspaces []string, tokens []string) bool {
 func prepareClientAuth(ctx context.Context, cfg *viper.Viper) databricks.Auth {
 	l := ctxzap.Extract(ctx)
 
-	accountID := cfg.GetString(AccountIdField.FieldName)
-	databricksClientId := cfg.GetString(DatabricksClientIdField.FieldName)
-	databricksClientSecret := cfg.GetString(DatabricksClientSecretField.FieldName)
-	username := cfg.GetString(UsernameField.FieldName)
-	password := cfg.GetString(PasswordField.FieldName)
-	workspaces := cfg.GetStringSlice(WorkspacesField.FieldName)
-	tokens := cfg.GetStringSlice(TokensField.FieldName)
+	accountID := cfg.GetString(config.AccountIdField.FieldName)
+	databricksClientId := cfg.GetString(config.DatabricksClientIdField.FieldName)
+	databricksClientSecret := cfg.GetString(config.DatabricksClientSecretField.FieldName)
+	username := cfg.GetString(config.UsernameField.FieldName)
+	password := cfg.GetString(config.PasswordField.FieldName)
+	workspaces := cfg.GetStringSlice(config.WorkspacesField.FieldName)
+	tokens := cfg.GetStringSlice(config.TokensField.FieldName)
 
 	switch {
 	case username != "" && password != "":
@@ -101,7 +101,7 @@ func prepareClientAuth(ctx context.Context, cfg *viper.Viper) databricks.Auth {
 func getConnector(ctx context.Context, cfg *viper.Viper) (types.ConnectorServer, error) {
 	l := ctxzap.Extract(ctx)
 
-	err := validateConfig(ctx, cfg)
+	err := config.ValidateConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -109,9 +109,9 @@ func getConnector(ctx context.Context, cfg *viper.Viper) (types.ConnectorServer,
 	auth := prepareClientAuth(ctx, cfg)
 	cb, err := connector.New(
 		ctx,
-		cfg.GetString(AccountIdField.FieldName),
+		cfg.GetString(config.AccountIdField.FieldName),
 		auth,
-		cfg.GetStringSlice(WorkspacesField.FieldName),
+		cfg.GetStringSlice(config.WorkspacesField.FieldName),
 	)
 	if err != nil {
 		l.Error("error creating connector", zap.Error(err))

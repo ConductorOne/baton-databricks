@@ -77,21 +77,21 @@ func prepareResourceID(ctx context.Context, c *databricks.Client, principal stri
 
 	switch principalType {
 	case UsersType:
-		userID, err := c.FindUserID(ctx, principal)
+		userID, _, err := c.FindUserID(ctx, principal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find user %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: userID}
 	case GroupsType:
-		groupID, err := c.FindGroupID(ctx, principal)
+		groupID, _, err := c.FindGroupID(ctx, principal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find group %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: groupID}
 	case ServicePrincipalsType:
-		servicePrincipalID, err := c.FindServicePrincipalID(ctx, principal)
+		servicePrincipalID, _, err := c.FindServicePrincipalID(ctx, principal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find service principal %s: %w", principal, err)
 		}
@@ -126,21 +126,21 @@ func preparePrincipalID(ctx context.Context, c *databricks.Client, principalType
 
 	switch principalType {
 	case userResourceType.Id:
-		username, err := c.FindUsername(ctx, principalID)
+		username, _, err := c.FindUsername(ctx, principalID)
 		if err != nil {
 			return "", fmt.Errorf("failed to find user %s: %w", principalID, err)
 		}
 
 		result = fmt.Sprintf("%s/%s", UsersType, username)
 	case groupResourceType.Id:
-		displayName, err := c.FindGroupDisplayName(ctx, principalID)
+		displayName, _, err := c.FindGroupDisplayName(ctx, principalID)
 		if err != nil {
 			return "", fmt.Errorf("failed to find group %s: %w", principalID, err)
 		}
 
 		result = fmt.Sprintf("%s/%s", GroupsType, displayName)
 	case servicePrincipalResourceType.Id:
-		appID, err := c.FindServicePrincipalAppID(ctx, principalID)
+		appID, _, err := c.FindServicePrincipalAppID(ctx, principalID)
 		if err != nil {
 			return "", fmt.Errorf("failed to find service principal %s: %w", principalID, err)
 		}

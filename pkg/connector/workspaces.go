@@ -83,7 +83,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	var rv []*v2.Resource
 	if w.client.IsAccountAPIAvailable() {
-		workspaces, err := w.client.ListWorkspaces(ctx)
+		workspaces, _, err := w.client.ListWorkspaces(ctx)
 		if err != nil {
 			return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 		}
@@ -162,7 +162,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	assignments, err := w.client.ListWorkspaceMembers(ctx, int(workspaceID))
+	assignments, _, err := w.client.ListWorkspaceMembers(ctx, int(workspaceID))
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
@@ -218,7 +218,7 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	err = w.client.CreateOrUpdateWorkspaceMember(ctx, workspaceID, principal.Id.Resource)
+	_, err = w.client.CreateOrUpdateWorkspaceMember(ctx, workspaceID, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
 	}
@@ -252,7 +252,7 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	err = w.client.RemoveWorkspaceMember(ctx, workspaceID, principal.Id.Resource)
+	_, err = w.client.RemoveWorkspaceMember(ctx, workspaceID, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
 	}
