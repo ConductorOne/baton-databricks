@@ -109,12 +109,15 @@ func (c *Client) doRequest(
 		WithJSONResponse(&response),
 		uhttp.WithRatelimitData(ratelimitData),
 	)
+	if resp == nil {
+		return ratelimitData, err
+	}
+
+	defer resp.Body.Close()
 
 	if err == nil {
 		return ratelimitData, nil
 	}
-
-	defer resp.Body.Close()
 
 	var res struct {
 		Detail  string `json:"detail"`
