@@ -1,5 +1,5 @@
 {
-  "source": ["./dist/macos-arm64_darwin_arm64/baton-databricks"],
+  "source": ["./dist/macos-arm64_darwin_arm64_v8.0/baton-databricks"],
   "bundle_id": "com.conductorone.baton-databricks",
   "apple_id": {
     "username" : "justin.gallardo@conductorone.com"
