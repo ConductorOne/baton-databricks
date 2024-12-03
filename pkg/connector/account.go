@@ -43,12 +43,13 @@ func (a *accountBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return accountResourceType
 }
 
-func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*v2.Resource, error) {
+func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error) {
+	accountId := a.client.GetAccountId()
 	children := []protoreflect.ProtoMessage{
 		&v2.ChildResourceType{ResourceTypeId: workspaceResourceType.Id},
 	}
 
-	if accAPIAvailable {
+	if a.client.IsAccountAPIAvailable() {
 		children = append(children,
 			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
@@ -58,9 +59,9 @@ func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*
 	}
 
 	resource, err := rs.NewResource(
-		accID,
+		accountId,
 		accountResourceType,
-		accID,
+		accountId,
 		rs.WithAnnotation(children...),
 	)
 
@@ -72,16 +73,12 @@ func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*
 }
 
 func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
-	var rv []*v2.Resource
-
-	ur, err := accountResource(ctx, a.client.GetAccountId(), a.client.IsAccountAPIAvailable())
+	ur, err := a.accountResource(ctx)
 	if err != nil {
 		return nil, "", nil, err
 	}
 
-	rv = append(rv, ur)
-
-	return rv, "", nil, nil
+	return []*v2.Resource{ur}, "", nil, nil
 }
 
 // Entitlements returns slice of entitlements for marketplace admins under account.

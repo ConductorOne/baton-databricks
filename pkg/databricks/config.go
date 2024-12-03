@@ -18,7 +18,7 @@ type AccountConfig struct {
 
 func NewAccountConfig(accountHostname, accountId string) *AccountConfig {
 	if accountHostname == "" {
-		accountHostname = AccountBaseHost
+		accountHostname = accountBaseHost
 	}
 	return &AccountConfig{
 		accountId,
@@ -36,16 +36,16 @@ func (c *AccountConfig) BaseUrl() *url.URL {
 func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, error) {
 	u := *base
 
-	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.accountId)
+	baseEndpoint := fmt.Sprintf("%s/%s", accountsEndpoint, c.accountId)
 
 	var pathParts []string
 
 	switch endpoint {
-	case UsersEndpoint, GroupsEndpoint, ServicePrincipalsEndpoint:
-		pathParts = []string{baseEndpoint, SCIMEndpoint, endpoint}
-	case RolesEndpoint, RuleSetsEndpoint:
-		pathParts = []string{PreviewEndpoint, baseEndpoint, AccessControlEndpoint, endpoint}
-	case WorkspacesEndpoint:
+	case usersEndpoint, groupsEndpoint, servicePrincipalsEndpoint:
+		pathParts = []string{baseEndpoint, scimEndpoint, endpoint}
+	case rolesEndpoint, ruleSetsEndpoint:
+		pathParts = []string{previewEndpoint, baseEndpoint, accessControlEndpoint, endpoint}
+	case workspacesEndpoint:
 		pathParts = []string{baseEndpoint, endpoint}
 	default:
 		return nil, fmt.Errorf("unknown endpoint %s", endpoint)
@@ -69,7 +69,7 @@ type WorkspaceConfig struct {
 
 func NewWorkspaceConfig(hostname, accountId, workspace string) *WorkspaceConfig {
 	if hostname == "" {
-		hostname = WorkspaceBaseHost
+		hostname = workspaceBaseHost
 	}
 	return &WorkspaceConfig{
 		workspace,
@@ -94,10 +94,10 @@ func (c WorkspaceConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, 
 	var pathParts []string
 
 	switch endpoint {
-	case UsersEndpoint, GroupsEndpoint, ServicePrincipalsEndpoint:
-		pathParts = []string{SCIMEndpoint, endpoint}
-	case RolesEndpoint, RuleSetsEndpoint:
-		pathParts = []string{AccountsEndpoint, AccessControlEndpoint, endpoint}
+	case usersEndpoint, groupsEndpoint, servicePrincipalsEndpoint:
+		pathParts = []string{scimEndpoint, endpoint}
+	case rolesEndpoint, ruleSetsEndpoint:
+		pathParts = []string{accountsEndpoint, accessControlEndpoint, endpoint}
 	default:
 		return nil, fmt.Errorf("unknown endpoint %s", endpoint)
 	}

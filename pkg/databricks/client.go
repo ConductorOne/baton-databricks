@@ -12,28 +12,27 @@ import (
 )
 
 const (
-	Base            = "cloud.databricks.com"
-	APIEndpoint     = "/api/2.0"
-	JSONContentType = "application/json"
+	base        = "cloud.databricks.com"
+	apiEndpoint = "/api/2.0"
 
 	// Helper endpoints.
-	PreviewEndpoint       = "/preview"
-	AccessControlEndpoint = "/access-control"
-	SCIMEndpoint          = "/scim/v2"
-	AccountsEndpoint      = "/accounts"
+	previewEndpoint       = "/preview"
+	accessControlEndpoint = "/access-control"
+	scimEndpoint          = "/scim/v2"
+	accountsEndpoint      = "/accounts"
 
 	// Base hosts.
-	AccountBaseHost   = "accounts." + Base + APIEndpoint
-	WorkspaceBaseHost = "%s." + Base + APIEndpoint + PreviewEndpoint
+	accountBaseHost   = "accounts." + base + apiEndpoint
+	workspaceBaseHost = "%s." + base + apiEndpoint + previewEndpoint
 
 	// Resource endpoints.
-	UsersEndpoint                = "/Users"
-	GroupsEndpoint               = "/Groups"
-	ServicePrincipalsEndpoint    = "/ServicePrincipals"
-	RolesEndpoint                = "/assignable-roles"
-	RuleSetsEndpoint             = "/rule-sets"
-	WorkspacesEndpoint           = "/workspaces"
-	WorkspaceAssignmentsEndpoint = "/permissionassignments"
+	usersEndpoint                = "/Users"
+	groupsEndpoint               = "/Groups"
+	servicePrincipalsEndpoint    = "/ServicePrincipals"
+	rolesEndpoint                = "/assignable-roles"
+	ruleSetsEndpoint             = "/rule-sets"
+	workspacesEndpoint           = "/workspaces"
+	workspaceAssignmentsEndpoint = "/permissionassignments"
 )
 
 type Client struct {
@@ -135,7 +134,7 @@ func (c *Client) ListUsers(
 	error,
 ) {
 	var res ListResponse[User]
-	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, usersEndpoint)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
 	}
@@ -157,7 +156,7 @@ func (c *Client) GetUser(
 	error,
 ) {
 	var res *User
-	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, usersEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
 	}
@@ -173,7 +172,7 @@ func (c *Client) GetUser(
 }
 
 func (c *Client) UpdateUser(ctx context.Context, user *User) (*v2.RateLimitDescription, error) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, usersEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
 	}
@@ -243,7 +242,7 @@ func (c *Client) ListGroups(
 	error,
 ) {
 	var res ListResponse[Group]
-	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, groupsEndpoint)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
@@ -265,7 +264,7 @@ func (c *Client) GetGroup(
 	error,
 ) {
 	var res *Group
-	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, groupsEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
@@ -281,7 +280,7 @@ func (c *Client) GetGroup(
 }
 
 func (c *Client) UpdateGroup(ctx context.Context, group *Group) (*v2.RateLimitDescription, error) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, groupsEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
@@ -351,7 +350,7 @@ func (c *Client) ListServicePrincipals(
 	error,
 ) {
 	var res ListResponse[ServicePrincipal]
-	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, servicePrincipalsEndpoint)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
@@ -373,7 +372,7 @@ func (c *Client) GetServicePrincipal(
 	error,
 ) {
 	var res *ServicePrincipal
-	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, servicePrincipalsEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
@@ -395,7 +394,7 @@ func (c *Client) UpdateServicePrincipal(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, servicePrincipalsEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
 	}
@@ -468,7 +467,7 @@ func (c *Client) ListRoles(
 		Roles []Role `json:"roles"`
 	}
 
-	u, err := c.cfg.ResolvePath(c.baseUrl, RolesEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, rolesEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch roles: %w", err)
 	}
@@ -495,7 +494,7 @@ func (c *Client) ListWorkspaces(
 ) {
 	var res []Workspace
 
-	u, err := c.cfg.ResolvePath(c.baseUrl, WorkspacesEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, workspacesEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch workspaces: %w", err)
 	}
@@ -511,7 +510,7 @@ func (c *Client) ListWorkspaces(
 func (c *Client) prepareURLForWorkspaceMembers(params ...string) (*url.URL, error) {
 	u := *c.baseUrl
 
-	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.accountId)
+	baseEndpoint := fmt.Sprintf("%s/%s", accountsEndpoint, c.accountId)
 	path, err := url.JoinPath(baseEndpoint, params...)
 	if err != nil {
 		return nil, err
@@ -534,7 +533,7 @@ func (c *Client) ListWorkspaceMembers(
 	}
 
 	id := strconv.Itoa(workspaceID)
-	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
+	u, err := c.prepareURLForWorkspaceMembers(workspacesEndpoint, id, workspaceAssignmentsEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch workspace members: %w", err)
 	}
@@ -557,9 +556,9 @@ func (c *Client) CreateOrUpdateWorkspaceMember(
 ) {
 	wID := strconv.Itoa(int(workspaceID))
 	u, err := c.prepareURLForWorkspaceMembers(
-		WorkspacesEndpoint,
+		workspacesEndpoint,
 		wID,
-		WorkspaceAssignmentsEndpoint,
+		workspaceAssignmentsEndpoint,
 		"principals",
 		principalID,
 	)
@@ -584,9 +583,9 @@ func (c *Client) RemoveWorkspaceMember(
 	wID := strconv.Itoa(int(workspaceID))
 
 	u, err := c.prepareURLForWorkspaceMembers(
-		WorkspacesEndpoint,
+		workspacesEndpoint,
 		wID,
-		WorkspaceAssignmentsEndpoint,
+		workspaceAssignmentsEndpoint,
 		"principals",
 		principalID,
 	)
@@ -611,7 +610,7 @@ func (c *Client) ListRuleSets(
 		Etag     string    `json:"etag"`
 	}
 
-	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, ruleSetsEndpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
 	}
@@ -639,7 +638,7 @@ func (c *Client) UpdateRuleSets(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
+	u, err := c.cfg.ResolvePath(c.baseUrl, ruleSetsEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
 	}
