@@ -73,11 +73,6 @@ func (c *Client) GetCurrentConfig() Config {
 	return c.cfg
 }
 
-func (c *Client) IsAccountConfig() bool {
-	_, ok := c.cfg.(*AccountConfig)
-	return ok
-}
-
 func (c *Client) IsTokenAuth() bool {
 	_, ok := c.auth.(*TokenAuth)
 	return ok
