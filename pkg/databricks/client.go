@@ -25,7 +25,7 @@ const (
 	accountBaseHost   = "accounts." + base + apiEndpoint
 	workspaceBaseHost = "%s." + base + apiEndpoint + previewEndpoint
 
-	// Resource endpoints.
+	// Resource endpoints. Some of these are case sensitive.
 	usersEndpoint                = "/Users"
 	groupsEndpoint               = "/Groups"
 	servicePrincipalsEndpoint    = "/ServicePrincipals"
