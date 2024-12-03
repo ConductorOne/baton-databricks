@@ -9,10 +9,20 @@ import (
 )
 
 var (
+	AccountHostnameField = field.StringField(
+		"account-hostname",
+		field.WithDescription("The hostname used to connect to the Databricks account API"),
+		field.WithDefaultValue("accounts.cloud.databricks.com"),
+	)
 	AccountIdField = field.StringField(
 		"account-id",
 		field.WithDescription("The Databricks account ID used to connect to the Databricks Account and Workspace API"),
 		field.WithRequired(true),
+	)
+	HostnameField = field.StringField(
+		"hostname",
+		field.WithDescription("The Databricks hostname used to connect to the Databricks API"),
+		field.WithDefaultValue("cloud.databricks.com"),
 	)
 	DatabricksClientIdField = field.StringField(
 		"databricks-client-id",
@@ -39,9 +49,11 @@ var (
 		field.WithDescription("The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API"),
 	)
 	configurationFields = []field.SchemaField{
+		AccountHostnameField,
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
+		HostnameField,
 		PasswordField,
 		TokensField,
 		UsernameField,
