@@ -106,6 +106,8 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 // New returns a new instance of the connector.
 func New(
 	ctx context.Context,
+	hostname,
+	accountHostname,
 	accountID string,
 	auth databricks.Auth,
 	workspaces []string,
@@ -115,7 +117,10 @@ func New(
 		return nil, err
 	}
 
-	client := databricks.NewClient(httpClient, accountID, auth)
+	client, err := databricks.NewClient(ctx, httpClient, hostname, accountHostname, accountID, auth)
+	if err != nil {
+		return nil, err
+	}
 
 	if client.IsTokenAuth() {
 		client.SetWorkspaceConfig(workspaces[0])

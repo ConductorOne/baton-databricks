@@ -12,24 +12,31 @@ type Config interface {
 
 // Account Config for account API.
 type AccountConfig struct {
-	acc string
+	accountId       string
+	accountHostname string
 }
 
-func NewAccountConfig(acc string) *AccountConfig {
-	return &AccountConfig{acc}
+func NewAccountConfig(accountHostname, accountId string) *AccountConfig {
+	if accountHostname == "" {
+		accountHostname = AccountBaseHost
+	}
+	return &AccountConfig{
+		accountId,
+		accountHostname,
+	}
 }
 
 func (c *AccountConfig) BaseUrl() *url.URL {
 	return &url.URL{
 		Scheme: "https",
-		Host:   AccountBaseHost,
+		Host:   c.accountHostname,
 	}
 }
 
 func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, error) {
 	u := *base
 
-	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
+	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.accountId)
 
 	var pathParts []string
 
@@ -57,10 +64,17 @@ func (c AccountConfig) ResolvePath(base *url.URL, endpoint string) (*url.URL, er
 // Workspace Config for workspace API.
 type WorkspaceConfig struct {
 	workspace string
+	hostname  string
 }
 
-func NewWorkspaceConfig(acc, workspace string) *WorkspaceConfig {
-	return &WorkspaceConfig{workspace}
+func NewWorkspaceConfig(hostname, accountId, workspace string) *WorkspaceConfig {
+	if hostname == "" {
+		hostname = WorkspaceBaseHost
+	}
+	return &WorkspaceConfig{
+		workspace,
+		hostname,
+	}
 }
 
 func (c *WorkspaceConfig) Workspace() string {
@@ -70,7 +84,7 @@ func (c *WorkspaceConfig) Workspace() string {
 func (c *WorkspaceConfig) BaseUrl() *url.URL {
 	return &url.URL{
 		Scheme: "https",
-		Host:   fmt.Sprintf(WorkspaceBaseHost, c.workspace),
+		Host:   fmt.Sprintf(c.hostname, c.workspace),
 	}
 }
 

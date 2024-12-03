@@ -42,19 +42,19 @@ type Client struct {
 	cfg        Config
 	auth       Auth
 	etag       string
-	acc        string
+	accountId  string
 
 	isAccAPIAvailable bool
 	isWSAPIAvailable  bool
 }
 
-func NewClient(httpClient *http.Client, accountID string, auth Auth) *Client {
-	cli := uhttp.NewBaseHttpClient(httpClient)
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
+	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient)
 	return &Client{
 		httpClient: cli,
 		auth:       auth,
-		acc:        accountID,
-	}
+		accountId:  accountID,
+	}, err
 }
 
 func (c *Client) IsWorkspaceAPIAvailable() bool {
@@ -90,7 +90,7 @@ func (c *Client) SetWorkspaceConfig(workspace string) {
 		return
 	}
 
-	c.cfg = NewWorkspaceConfig(c.acc, workspace)
+	c.cfg = NewWorkspaceConfig("", c.accountId, workspace)
 	c.baseUrl = c.cfg.BaseUrl()
 
 	if tokenAuth, ok := c.auth.(*TokenAuth); ok {
@@ -103,7 +103,7 @@ func (c *Client) SetAccountConfig() {
 		return
 	}
 
-	c.cfg = NewAccountConfig(c.acc)
+	c.cfg = NewAccountConfig("", c.accountId)
 	c.baseUrl = c.cfg.BaseUrl()
 }
 
@@ -117,7 +117,7 @@ func (c *Client) UpdateEtag(etag string) {
 }
 
 func (c *Client) GetAccountId() string {
-	return c.acc
+	return c.accountId
 }
 
 type ListResponse[T any] struct {
@@ -473,7 +473,7 @@ func (c *Client) ListRoles(
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch roles: %w", err)
 	}
 
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId)
+	resourcePayload, err := url.JoinPath("accounts", c.accountId, resourceType, resourceId)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
@@ -511,7 +511,7 @@ func (c *Client) ListWorkspaces(
 func (c *Client) prepareURLForWorkspaceMembers(params ...string) (*url.URL, error) {
 	u := *c.baseUrl
 
-	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
+	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.accountId)
 	path, err := url.JoinPath(baseEndpoint, params...)
 	if err != nil {
 		return nil, err
@@ -616,7 +616,7 @@ func (c *Client) ListRuleSets(
 		return nil, nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
 	}
 
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
+	resourcePayload, err := url.JoinPath("accounts", c.accountId, resourceType, resourceId, "ruleSets", "default")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
@@ -644,7 +644,7 @@ func (c *Client) UpdateRuleSets(
 		return nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
 	}
 
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
+	resourcePayload, err := url.JoinPath("accounts", c.accountId, resourceType, resourceId, "ruleSets", "default")
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
