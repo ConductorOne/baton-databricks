@@ -30,9 +30,9 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 
 func minimalWorkspaceResource(ctx context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
 	resource, err := rs.NewGroupResource(
-		workspace.Host,
+		workspace.DeploymentName,
 		workspaceResourceType,
-		workspace.Host,
+		workspace.DeploymentName,
 		nil,
 		rs.WithParentResourceID(parent),
 		rs.WithAnnotation(
@@ -58,7 +58,7 @@ func workspaceResource(ctx context.Context, workspace *databricks.Workspace, par
 	resource, err := rs.NewGroupResource(
 		workspace.Name,
 		workspaceResourceType,
-		workspace.Host,
+		workspace.DeploymentName,
 		[]rs.GroupTraitOption{
 			rs.WithGroupProfile(profile),
 		},
@@ -90,7 +90,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 		for _, workspace := range workspaces {
 			// If workspaces are specified, skip all the workspaces that are not in the list.
-			if _, ok := w.workspaces[workspace.Host]; !ok && len(w.workspaces) > 0 {
+			if _, ok := w.workspaces[workspace.DeploymentName]; !ok && len(w.workspaces) > 0 {
 				continue
 			}
 
@@ -106,7 +106,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	} else {
 		for workspace := range w.workspaces {
 			ws := &databricks.Workspace{
-				Host: workspace,
+				DeploymentName: workspace,
 			}
 
 			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID)
