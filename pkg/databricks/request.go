@@ -55,12 +55,6 @@ func parseJSON(body io.Reader, res interface{}) error {
 	return nil
 }
 
-func WithJSONResponse(response interface{}) uhttp.DoOption {
-	return func(resp *uhttp.WrapperResponse) error {
-		return json.Unmarshal(resp.Body, response)
-	}
-}
-
 func (c *Client) doRequest(
 	ctx context.Context,
 	urlAddress *url.URL,
@@ -106,7 +100,7 @@ func (c *Client) doRequest(
 	ratelimitData := &v2.RateLimitDescription{}
 	resp, err := c.httpClient.Do(
 		req,
-		WithJSONResponse(&response),
+		uhttp.WithJSONResponse(&response),
 		uhttp.WithRatelimitData(ratelimitData),
 	)
 	if resp == nil {
