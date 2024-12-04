@@ -100,7 +100,7 @@ func (c *Client) doRequest(
 	ratelimitData := &v2.RateLimitDescription{}
 	resp, err := c.httpClient.Do(
 		req,
-		uhttp.WithJSONResponse(&response),
+		uhttp.WithAlwaysJSONResponse(&response),
 		uhttp.WithRatelimitData(ratelimitData),
 	)
 	if resp == nil {
@@ -113,18 +113,18 @@ func (c *Client) doRequest(
 		return ratelimitData, nil
 	}
 
-	var res struct {
+	var errorResponse struct {
 		Detail  string `json:"detail"`
 		Message string `json:"message"`
 	}
-	if err := parseJSON(resp.Body, &res); err != nil {
+	if err := parseJSON(resp.Body, &errorResponse); err != nil {
 		return nil, err
 	}
 
 	return ratelimitData, fmt.Errorf(
 		"unexpected status code %d: %s %s",
 		resp.StatusCode,
-		res.Detail,
-		res.Message,
+		errorResponse.Detail,
+		errorResponse.Message,
 	)
 }

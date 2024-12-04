@@ -148,11 +148,10 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 
 	isWorkspaceRole := parentType == workspaceResourceType.Id
 
+	var workspaceId string
 	// If the role is a workspace role, we need to update the client config to use the workspace API.
 	if isWorkspaceRole {
-		r.client.SetWorkspaceConfig(parentID)
-	} else {
-		r.client.SetAccountConfig()
+		workspaceId = parentID
 	}
 
 	roleName, ok := rs.GetProfileStringValue(roleTrait.Profile, "role_name")
@@ -181,6 +180,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 	case userResourceType.Id:
 		users, total, _, err := r.client.ListUsers(
 			ctx,
+			workspaceId,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
 			databricks.NewUserRolesAttrVars(),
 		)
@@ -216,6 +216,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 	case groupResourceType.Id:
 		groups, total, _, err := r.client.ListGroups(
 			ctx,
+			workspaceId,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
 			databricks.NewGroupRolesAttrVars(),
 		)
@@ -248,6 +249,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 	case servicePrincipalResourceType.Id:
 		servicePrincipals, total, _, err := r.client.ListServicePrincipals(
 			ctx,
+			workspaceId,
 			databricks.NewPaginationVars(page, ResourcesPageSize),
 			databricks.NewServicePrincipalRolesAttrVars(),
 		)
@@ -317,49 +319,48 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 
 	isWorkspaceRole := parentType == workspaceResourceType.Id
 	permissionName := entitlement.Resource.Id.Resource
+	var workspaceId string
 	if isWorkspaceRole {
-		r.client.SetWorkspaceConfig(parentID)
+		workspaceId = parentID
 		permissionName = prepareWorkspaceRole(permissionName)
-	} else {
-		r.client.SetAccountConfig()
 	}
 
 	switch principal.Id.ResourceType {
 	case userResourceType.Id:
-		u, _, err := r.client.GetUser(ctx, principal.Id.Resource)
+		u, _, err := r.client.GetUser(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
 		}
 
 		addPermissions(isWorkspaceRole, &u.Permissions, permissionName)
 
-		_, err = r.client.UpdateUser(ctx, u)
+		_, err = r.client.UpdateUser(ctx, workspaceId, u)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
 
 	case groupResourceType.Id:
-		g, _, err := r.client.GetGroup(ctx, principal.Id.Resource)
+		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
 
 		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
 
-		_, err = r.client.UpdateGroup(ctx, g)
+		_, err = r.client.UpdateGroup(ctx, workspaceId, g)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
 
 	case servicePrincipalResourceType.Id:
-		sp, _, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
+		sp, _, err := r.client.GetServicePrincipal(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
 		}
 
 		addPermissions(isWorkspaceRole, &sp.Permissions, permissionName)
 
-		_, err = r.client.UpdateServicePrincipal(ctx, sp)
+		_, err = r.client.UpdateServicePrincipal(ctx, workspaceId, sp)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
@@ -399,49 +400,48 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 
 	isWorkspaceRole := parentType == workspaceResourceType.Id
 	permissionName := entitlement.Resource.Id.Resource
+	var workspaceId string
 	if isWorkspaceRole {
-		r.client.SetWorkspaceConfig(parentID)
+		workspaceId = parentID
 		permissionName = prepareWorkspaceRole(permissionName)
-	} else {
-		r.client.SetAccountConfig()
 	}
 
 	switch principal.Id.ResourceType {
 	case userResourceType.Id:
-		u, _, err := r.client.GetUser(ctx, principal.Id.Resource)
+		u, _, err := r.client.GetUser(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
 		}
 
 		removePermissions(isWorkspaceRole, &u.Permissions, permissionName)
 
-		_, err = r.client.UpdateUser(ctx, u)
+		_, err = r.client.UpdateUser(ctx, workspaceId, u)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}
 
 	case groupResourceType.Id:
-		g, _, err := r.client.GetGroup(ctx, principal.Id.Resource)
+		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
 
 		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
 
-		_, err = r.client.UpdateGroup(ctx, g)
+		_, err = r.client.UpdateGroup(ctx, workspaceId, g)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}
 
 	case servicePrincipalResourceType.Id:
-		sp, _, err := r.client.GetServicePrincipal(ctx, principal.Id.Resource)
+		sp, _, err := r.client.GetServicePrincipal(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
 		}
 
 		removePermissions(isWorkspaceRole, &sp.Permissions, permissionName)
 
-		_, err = r.client.UpdateServicePrincipal(ctx, sp)
+		_, err = r.client.UpdateServicePrincipal(ctx, workspaceId, sp)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}

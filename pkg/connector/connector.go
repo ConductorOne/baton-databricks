@@ -46,13 +46,12 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 // to be sure that they are valid. Since this connector works with two APIs and can have different types of credentials
 // it is important to validate that the connector is properly configured before attempting to sync.
 func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, error) {
-	cfg := d.client.GetCurrentConfig()
 	isAccAPIAvailable := false
 	isWSAPIAvailable := false
 
 	// Check if we can list users from Account API (unless we are using token auth specific to a single workspace).
 	if !d.client.IsTokenAuth() {
-		_, _, err := d.client.ListRoles(ctx, "", "")
+		_, _, err := d.client.ListRoles(ctx, "", "", "")
 		if err == nil {
 			isAccAPIAvailable = true
 		}
@@ -61,9 +60,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// Validate that credentials are valid for each targeted workspace.
 	if len(d.workspaces) > 0 {
 		for _, workspace := range d.workspaces {
-			d.client.SetWorkspaceConfig(workspace)
-
-			_, _, err := d.client.ListRoles(ctx, "", "")
+			_, _, err := d.client.ListRoles(ctx, workspace, "", "")
 			if err != nil && !isAccAPIAvailable {
 				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
 			}
@@ -80,9 +77,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		}
 
 		for _, workspace := range workspaces {
-			d.client.SetWorkspaceConfig(workspace.DeploymentName)
-
-			_, _, err := d.client.ListRoles(ctx, "", "")
+			_, _, err := d.client.ListRoles(ctx, workspace.DeploymentName, "", "")
 			if err != nil && !isAccAPIAvailable {
 				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace.DeploymentName, err)
 			}
@@ -96,8 +91,6 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		return nil, fmt.Errorf("databricks-connector: failed to validate credentials")
 	}
 
-	// Restore the original config.
-	d.client.UpdateConfig(cfg)
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
 	return nil, nil
@@ -120,12 +113,6 @@ func New(
 	client, err := databricks.NewClient(ctx, httpClient, hostname, accountHostname, accountID, auth)
 	if err != nil {
 		return nil, err
-	}
-
-	if client.IsTokenAuth() {
-		client.SetWorkspaceConfig(workspaces[0])
-	} else {
-		client.SetAccountConfig()
 	}
 
 	return &Databricks{

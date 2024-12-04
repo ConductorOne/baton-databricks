@@ -113,12 +113,10 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		return nil, "", nil, nil
 	}
 
-	a.client.SetAccountConfig()
-
 	var rv []*v2.Grant
 
 	// list rule sets for the account
-	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "")
+	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", resource.Id.Resource, err)
 	}
@@ -164,7 +162,7 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	}
 
 	accID := entitlement.Resource.Id.Resource
-	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "")
+	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", accID, err)
 	}
@@ -205,7 +203,7 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 		})
 	}
 
-	_, err = a.client.UpdateRuleSets(ctx, "", "", ruleSets)
+	_, err = a.client.UpdateRuleSets(ctx, "", "", "", ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for account %s: %w", accID, err)
 	}
@@ -230,7 +228,7 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 	}
 
 	accID := entitlement.Resource.Id.Resource
-	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "")
+	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", accID, err)
 	}
@@ -275,7 +273,7 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 		}
 	}
 
-	_, err = a.client.UpdateRuleSets(ctx, "", "", ruleSets)
+	_, err = a.client.UpdateRuleSets(ctx, "", "", "", ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for account %s: %w", accID, err)
 	}

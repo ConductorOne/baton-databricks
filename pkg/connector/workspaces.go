@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -50,7 +51,7 @@ func minimalWorkspaceResource(ctx context.Context, workspace *databricks.Workspa
 	return resource, nil
 }
 
-func workspaceResource(ctx context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
+func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
 	profile := map[string]interface{}{
 		"workspace_id": workspace.ID,
 	}
@@ -128,8 +129,6 @@ func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource
 		return nil, "", nil, nil
 	}
 
-	w.client.SetAccountConfig()
-
 	var rv []*v2.Entitlement
 
 	memberAssignmentOptions := []ent.EntitlementOption{
@@ -150,8 +149,6 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 		return nil, "", nil, nil
 	}
 
-	w.client.SetAccountConfig()
-
 	groupTrait, err := rs.GetGroupTrait(resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
@@ -162,7 +159,8 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	assignments, _, err := w.client.ListWorkspaceMembers(ctx, int(workspaceID))
+	workspace := strconv.Itoa(int(workspaceID))
+	assignments, _, err := w.client.ListWorkspaceMembers(ctx, workspace)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
@@ -218,7 +216,8 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	_, err = w.client.CreateOrUpdateWorkspaceMember(ctx, workspaceID, principal.Id.Resource)
+	workspace := strconv.Itoa(int(workspaceID))
+	_, err = w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
 	}
@@ -252,7 +251,8 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	_, err = w.client.RemoveWorkspaceMember(ctx, workspaceID, principal.Id.Resource)
+	workspace := strconv.Itoa(int(workspaceID))
+	_, err = w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
 	}
