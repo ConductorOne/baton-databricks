@@ -171,6 +171,7 @@ func (c *Client) UpdateUser(ctx context.Context, workspaceId string, user *User)
 
 func (c *Client) FindUserID(
 	ctx context.Context,
+	workspaceId string,
 	username string,
 ) (
 	string,
@@ -179,7 +180,7 @@ func (c *Client) FindUserID(
 ) {
 	users, _, ratelimitData, err := c.ListUsers(
 		ctx,
-		"",
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("userName eq '%s'", username)),
 	)
@@ -282,6 +283,7 @@ func (c *Client) UpdateGroup(ctx context.Context, workspaceId string, group *Gro
 
 func (c *Client) FindGroupID(
 	ctx context.Context,
+	workspaceId string,
 	displayName string,
 ) (
 	string,
@@ -290,7 +292,7 @@ func (c *Client) FindGroupID(
 ) {
 	groups, _, ratelimitData, err := c.ListGroups(
 		ctx,
-		"",
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName)),
 	)
@@ -399,6 +401,7 @@ func (c *Client) UpdateServicePrincipal(
 
 func (c *Client) FindServicePrincipalID(
 	ctx context.Context,
+	workspaceId string,
 	appID string,
 ) (
 	string,
@@ -407,7 +410,7 @@ func (c *Client) FindServicePrincipalID(
 ) {
 	servicePrincipals, _, ratelimitData, err := c.ListServicePrincipals(
 		ctx,
-		"",
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("applicationId eq '%s'", appID)),
 	)

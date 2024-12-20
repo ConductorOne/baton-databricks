@@ -62,9 +62,9 @@ func annotationsForUserResourceType() annotations.Annotations {
 	return annos
 }
 
-// prepareResourceID prepares a resource ID for a user, group, or service principal.
+// prepareResourceId prepares a resource ID for a user, group, or service principal.
 // It's used when we need to parse results from listing rule sets.
-func prepareResourceID(ctx context.Context, c *databricks.Client, principal string) (*v2.ResourceId, error) {
+func prepareResourceId(ctx context.Context, c *databricks.Client, workspaceId string, principal string) (*v2.ResourceId, error) {
 	pp := strings.Split(principal, "/")
 	if len(pp) != 2 {
 		return nil, fmt.Errorf("invalid principal format: %s", principal)
@@ -77,21 +77,21 @@ func prepareResourceID(ctx context.Context, c *databricks.Client, principal stri
 
 	switch principalType {
 	case UsersType:
-		userID, _, err := c.FindUserID(ctx, principal)
+		userID, _, err := c.FindUserID(ctx, workspaceId, principal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find user %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: userID}
 	case GroupsType:
-		groupID, _, err := c.FindGroupID(ctx, principal)
+		groupID, _, err := c.FindGroupID(ctx, workspaceId, principal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find group %s: %w", principal, err)
 		}
 
 		resourceId = &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: groupID}
 	case ServicePrincipalsType:
-		servicePrincipalID, _, err := c.FindServicePrincipalID(ctx, principal)
+		servicePrincipalID, _, err := c.FindServicePrincipalID(ctx, workspaceId, principal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find service principal %s: %w", principal, err)
 		}
