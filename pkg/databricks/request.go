@@ -122,9 +122,10 @@ func (c *Client) doRequest(
 	}
 
 	return ratelimitData, fmt.Errorf(
-		"unexpected status code %d: %s %s",
+		"unexpected status code %d: %s %s %w",
 		resp.StatusCode,
 		errorResponse.Detail,
 		errorResponse.Message,
+		err,
 	)
 }
