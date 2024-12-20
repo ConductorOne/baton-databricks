@@ -115,10 +115,10 @@ func (s ServicePrincipal) HaveEntitlement(entitlement string) bool {
 }
 
 type Workspace struct {
-	ID     int    `json:"workspace_id"`
-	Name   string `json:"workspace_name"`
-	Status string `json:"workspace_status"`
-	Host   string `json:"deployment_name"`
+	ID             int    `json:"workspace_id"`
+	Name           string `json:"workspace_name"`
+	Status         string `json:"workspace_status"`
+	DeploymentName string `json:"deployment_name"`
 }
 
 type WorkspacePrincipal struct {

@@ -89,10 +89,9 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		return nil, "", nil, nil
 	}
 
+	var workspaceId string
 	if parentResourceID.ResourceType == workspaceResourceType.Id {
-		u.client.SetWorkspaceConfig(parentResourceID.Resource)
-	} else {
-		u.client.SetAccountConfig()
+		workspaceId = parentResourceID.Resource
 	}
 
 	bag, page, err := parsePageToken(pToken.Token, &v2.ResourceId{ResourceType: userResourceType.Id})
@@ -102,6 +101,7 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 
 	users, total, _, err := u.client.ListUsers(
 		ctx,
+		workspaceId,
 		databricks.NewPaginationVars(page, ResourcesPageSize),
 		databricks.NewUserAttrVars(),
 	)

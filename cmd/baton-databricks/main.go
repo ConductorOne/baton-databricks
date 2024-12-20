@@ -106,9 +106,14 @@ func getConnector(ctx context.Context, cfg *viper.Viper) (types.ConnectorServer,
 		return nil, err
 	}
 
+	hostname := cfg.GetString(config.HostnameField.FieldName)
+	accountHostname := cfg.GetString(config.AccountHostnameField.FieldName)
+
 	auth := prepareClientAuth(ctx, cfg)
 	cb, err := connector.New(
 		ctx,
+		hostname,
+		accountHostname,
 		cfg.GetString(config.AccountIdField.FieldName),
 		auth,
 		cfg.GetStringSlice(config.WorkspacesField.FieldName),

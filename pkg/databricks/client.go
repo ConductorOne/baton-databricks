@@ -5,55 +5,74 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
 
 const (
-	Base            = "cloud.databricks.com"
-	APIEndpoint     = "/api/2.0"
-	JSONContentType = "application/json"
+	defaultHost = "cloud.databricks.com"
 
-	// Helper endpoints.
-	PreviewEndpoint       = "/preview"
-	AccessControlEndpoint = "/access-control"
-	SCIMEndpoint          = "/scim/v2"
-	AccountsEndpoint      = "/accounts"
+	// Some of these are case sensitive.
+	usersEndpoint             = "/api/2.0/preview/scim/v2/Users"
+	groupsEndpoint            = "/api/2.0/preview/scim/v2/Groups"
+	servicePrincipalsEndpoint = "/api/2.0/preview/scim/v2/ServicePrincipals"
+	rolesEndpoint             = "/api/2.0/preview/accounts/access-control/assignable-roles"
+	ruleSetsEndpoint          = "/api/2.0/preview/accounts/access-control/rule-sets"
 
-	// Base hosts.
-	AccountBaseHost   = "accounts." + Base + APIEndpoint
-	WorkspaceBaseHost = "%s." + Base + APIEndpoint + PreviewEndpoint
+	accountUsersEndpoint             = "/api/2.0/accounts/%s/scim/v2/Users"
+	accountGroupsEndpoint            = "/api/2.0/accounts/%s/scim/v2/Groups"
+	accountServicePrincipalsEndpoint = "/api/2.0/accounts/%s/scim/v2/ServicePrincipals"
+	accountRolesEndpoint             = "/api/2.0/preview/accounts/%s/access-control/assignable-roles"
+	accountRuleSetsEndpoint          = "/api/2.0/preview/accounts/%s/access-control/rule-sets"
 
-	// Resource endpoints.
-	UsersEndpoint                = "/Users"
-	GroupsEndpoint               = "/Groups"
-	ServicePrincipalsEndpoint    = "/ServicePrincipals"
-	RolesEndpoint                = "/assignable-roles"
-	RuleSetsEndpoint             = "/rule-sets"
-	WorkspacesEndpoint           = "/workspaces"
-	WorkspaceAssignmentsEndpoint = "/permissionassignments"
+	accountWorkspacesEndpoint           = "/api/2.0/accounts/%s/workspaces"
+	accountWorkspaceAssignmentsEndpoint = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
 )
 
 type Client struct {
-	httpClient *uhttp.BaseHttpClient
-	baseUrl    *url.URL
-	cfg        Config
-	auth       Auth
-	etag       string
-	acc        string
+	httpClient     *uhttp.BaseHttpClient
+	baseUrl        *url.URL
+	accountBaseUrl *url.URL
+	auth           Auth
+	etag           string
+	accountId      string
 
 	isAccAPIAvailable bool
 	isWSAPIAvailable  bool
 }
 
-func NewClient(httpClient *http.Client, accountID string, auth Auth) *Client {
-	cli := uhttp.NewBaseHttpClient(httpClient)
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
+	if hostname == "" {
+		hostname = defaultHost
+	}
+	baseUrl := &url.URL{
+		Scheme: "https",
+		Host:   hostname,
+	}
+
+	if accountHostname == "" {
+		accountHostname = "accounts." + defaultHost
+	}
+	accountBaseUrl := &url.URL{
+		Scheme: "https",
+		Host:   accountHostname,
+	}
+
+	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient)
 	return &Client{
-		httpClient: cli,
-		auth:       auth,
-		acc:        accountID,
+		httpClient:     cli,
+		auth:           auth,
+		accountId:      accountID,
+		accountBaseUrl: accountBaseUrl,
+		baseUrl:        baseUrl,
+	}, err
+}
+
+func (c *Client) workspaceUrl(workspaceId string) *url.URL {
+	return &url.URL{
+		Scheme: "https",
+		Host:   workspaceId + "." + c.baseUrl.Host,
 	}
 }
 
@@ -70,46 +89,9 @@ func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {
 	c.isWSAPIAvailable = wsAPI
 }
 
-func (c *Client) GetCurrentConfig() Config {
-	return c.cfg
-}
-
-func (c *Client) IsAccountConfig() bool {
-	_, ok := c.cfg.(*AccountConfig)
-	return ok
-}
-
 func (c *Client) IsTokenAuth() bool {
 	_, ok := c.auth.(*TokenAuth)
 	return ok
-}
-
-func (c *Client) SetWorkspaceConfig(workspace string) {
-	wc, ok := c.cfg.(*WorkspaceConfig)
-	if ok && wc.Workspace() == workspace {
-		return
-	}
-
-	c.cfg = NewWorkspaceConfig(c.acc, workspace)
-	c.baseUrl = c.cfg.BaseUrl()
-
-	if tokenAuth, ok := c.auth.(*TokenAuth); ok {
-		tokenAuth.SetWorkspace(workspace)
-	}
-}
-
-func (c *Client) SetAccountConfig() {
-	if _, ok := c.cfg.(*AccountConfig); ok {
-		return
-	}
-
-	c.cfg = NewAccountConfig(c.acc)
-	c.baseUrl = c.cfg.BaseUrl()
-}
-
-func (c *Client) UpdateConfig(cfg Config) {
-	c.cfg = cfg
-	c.baseUrl = c.cfg.BaseUrl()
 }
 
 func (c *Client) UpdateEtag(etag string) {
@@ -117,7 +99,7 @@ func (c *Client) UpdateEtag(etag string) {
 }
 
 func (c *Client) GetAccountId() string {
-	return c.acc
+	return c.accountId
 }
 
 type ListResponse[T any] struct {
@@ -127,6 +109,7 @@ type ListResponse[T any] struct {
 
 func (c *Client) ListUsers(
 	ctx context.Context,
+	workspaceId string,
 	vars ...Vars,
 ) (
 	[]User,
@@ -134,12 +117,14 @@ func (c *Client) ListUsers(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res ListResponse[User]
-	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId))
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(usersEndpoint)
 	}
 
+	var res ListResponse[User]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
 		return nil, 0, ratelimitData, err
@@ -150,20 +135,21 @@ func (c *Client) ListUsers(
 
 func (c *Client) GetUser(
 	ctx context.Context,
-	userID string,
+	workspaceId string,
+	userId string,
 ) (
 	*User,
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res *User
-	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId), userId)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(usersEndpoint, userId)
 	}
 
-	u.Path = fmt.Sprintf("%s/%s", u.Path, userID)
-
+	var res *User
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, err
@@ -172,19 +158,20 @@ func (c *Client) GetUser(
 	return res, ratelimitData, nil
 }
 
-func (c *Client) UpdateUser(ctx context.Context, user *User) (*v2.RateLimitDescription, error) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, UsersEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch users: %w", err)
+func (c *Client) UpdateUser(ctx context.Context, workspaceId string, user *User) (*v2.RateLimitDescription, error) {
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId), user.ID)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(usersEndpoint, user.ID)
 	}
-
-	u.Path = fmt.Sprintf("%s/%s", u.Path, user.ID)
 
 	return c.Put(ctx, u, user, nil)
 }
 
 func (c *Client) FindUserID(
 	ctx context.Context,
+	workspaceId string,
 	username string,
 ) (
 	string,
@@ -193,6 +180,7 @@ func (c *Client) FindUserID(
 ) {
 	users, _, ratelimitData, err := c.ListUsers(
 		ctx,
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("userName eq '%s'", username)),
 	)
@@ -210,6 +198,7 @@ func (c *Client) FindUserID(
 
 func (c *Client) FindUsername(
 	ctx context.Context,
+	workspaceId string,
 	userID string,
 ) (
 	string,
@@ -218,6 +207,7 @@ func (c *Client) FindUsername(
 ) {
 	users, _, ratelimitData, err := c.ListUsers(
 		ctx,
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("id eq '%s'", userID)),
 	)
@@ -235,6 +225,7 @@ func (c *Client) FindUsername(
 
 func (c *Client) ListGroups(
 	ctx context.Context,
+	workspaceId string,
 	vars ...Vars,
 ) (
 	[]Group,
@@ -242,12 +233,14 @@ func (c *Client) ListGroups(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res ListResponse[Group]
-	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId))
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(groupsEndpoint)
 	}
 
+	var res ListResponse[Group]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
 		return nil, 0, ratelimitData, err
@@ -256,22 +249,19 @@ func (c *Client) ListGroups(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
-func (c *Client) GetGroup(
-	ctx context.Context,
-	groupID string,
-) (
+func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string) (
 	*Group,
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res *Group
-	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), groupId)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(groupsEndpoint, groupId)
 	}
 
-	u.Path = fmt.Sprintf("%s/%s", u.Path, groupID)
-
+	var res *Group
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, err
@@ -280,19 +270,20 @@ func (c *Client) GetGroup(
 	return res, ratelimitData, nil
 }
 
-func (c *Client) UpdateGroup(ctx context.Context, group *Group) (*v2.RateLimitDescription, error) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, GroupsEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+func (c *Client) UpdateGroup(ctx context.Context, workspaceId string, group *Group) (*v2.RateLimitDescription, error) {
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), group.ID)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(groupsEndpoint, group.ID)
 	}
-
-	u.Path = fmt.Sprintf("%s/%s", u.Path, group.ID)
 
 	return c.Put(ctx, u, group, nil)
 }
 
 func (c *Client) FindGroupID(
 	ctx context.Context,
+	workspaceId string,
 	displayName string,
 ) (
 	string,
@@ -301,6 +292,7 @@ func (c *Client) FindGroupID(
 ) {
 	groups, _, ratelimitData, err := c.ListGroups(
 		ctx,
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName)),
 	)
@@ -318,6 +310,7 @@ func (c *Client) FindGroupID(
 
 func (c *Client) FindGroupDisplayName(
 	ctx context.Context,
+	workspaceId,
 	groupID string,
 ) (
 	string,
@@ -326,6 +319,7 @@ func (c *Client) FindGroupDisplayName(
 ) {
 	groups, _, ratelimitData, err := c.ListGroups(
 		ctx,
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("id eq '%s'", groupID)),
 	)
@@ -343,6 +337,7 @@ func (c *Client) FindGroupDisplayName(
 
 func (c *Client) ListServicePrincipals(
 	ctx context.Context,
+	workspaceId string,
 	vars ...Vars,
 ) (
 	[]ServicePrincipal,
@@ -350,12 +345,14 @@ func (c *Client) ListServicePrincipals(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res ListResponse[ServicePrincipal]
-	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountServicePrincipalsEndpoint, c.accountId))
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(servicePrincipalsEndpoint)
 	}
 
+	var res ListResponse[ServicePrincipal]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
 		return nil, 0, ratelimitData, err
@@ -366,47 +363,45 @@ func (c *Client) ListServicePrincipals(
 
 func (c *Client) GetServicePrincipal(
 	ctx context.Context,
+	workspaceId string,
 	servicePrincipalID string,
 ) (
 	*ServicePrincipal,
 	*v2.RateLimitDescription,
 	error,
 ) {
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountServicePrincipalsEndpoint, c.accountId), servicePrincipalID)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(servicePrincipalsEndpoint, servicePrincipalID)
+	}
+
 	var res *ServicePrincipal
-	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
-	}
-
-	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipalID)
-
 	ratelimitData, err := c.Get(ctx, u, &res)
-	if err != nil {
-		return nil, ratelimitData, err
-	}
-
-	return res, ratelimitData, nil
+	return res, ratelimitData, err
 }
 
 func (c *Client) UpdateServicePrincipal(
 	ctx context.Context,
+	workspaceId string,
 	servicePrincipal *ServicePrincipal,
 ) (
 	*v2.RateLimitDescription,
 	error,
 ) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, ServicePrincipalsEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch groups: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountServicePrincipalsEndpoint, c.accountId), servicePrincipal.ID)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(servicePrincipalsEndpoint, servicePrincipal.ID)
 	}
-
-	u.Path = fmt.Sprintf("%s/%s", u.Path, servicePrincipal.ID)
-
 	return c.Put(ctx, u, servicePrincipal, nil)
 }
 
 func (c *Client) FindServicePrincipalID(
 	ctx context.Context,
+	workspaceId string,
 	appID string,
 ) (
 	string,
@@ -415,6 +410,7 @@ func (c *Client) FindServicePrincipalID(
 ) {
 	servicePrincipals, _, ratelimitData, err := c.ListServicePrincipals(
 		ctx,
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("applicationId eq '%s'", appID)),
 	)
@@ -432,6 +428,7 @@ func (c *Client) FindServicePrincipalID(
 
 func (c *Client) FindServicePrincipalAppID(
 	ctx context.Context,
+	workspaceId string,
 	servicePrincipalID string,
 ) (
 	string,
@@ -440,6 +437,7 @@ func (c *Client) FindServicePrincipalAppID(
 ) {
 	servicePrincipals, _, ratelimitData, err := c.ListServicePrincipals(
 		ctx,
+		workspaceId,
 		&PaginationVars{Count: 1},
 		NewFilterVars(fmt.Sprintf("id eq '%s'", servicePrincipalID)),
 	)
@@ -457,6 +455,7 @@ func (c *Client) FindServicePrincipalAppID(
 
 func (c *Client) ListRoles(
 	ctx context.Context,
+	workspaceId string,
 	resourceType string,
 	resourceId string,
 ) (
@@ -468,12 +467,14 @@ func (c *Client) ListRoles(
 		Roles []Role `json:"roles"`
 	}
 
-	u, err := c.cfg.ResolvePath(c.baseUrl, RolesEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch roles: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountRolesEndpoint, c.accountId))
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(rolesEndpoint)
 	}
 
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId)
+	resourcePayload, err := url.JoinPath("accounts", c.accountId, resourceType, resourceId)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
@@ -495,11 +496,7 @@ func (c *Client) ListWorkspaces(
 ) {
 	var res []Workspace
 
-	u, err := c.cfg.ResolvePath(c.baseUrl, WorkspacesEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch workspaces: %w", err)
-	}
-
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspacesEndpoint, c.accountId))
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, err
@@ -508,22 +505,9 @@ func (c *Client) ListWorkspaces(
 	return res, ratelimitData, nil
 }
 
-func (c *Client) prepareURLForWorkspaceMembers(params ...string) (*url.URL, error) {
-	u := *c.baseUrl
-
-	baseEndpoint := fmt.Sprintf("%s/%s", AccountsEndpoint, c.acc)
-	path, err := url.JoinPath(baseEndpoint, params...)
-	if err != nil {
-		return nil, err
-	}
-	u.Path = path
-
-	return &u, nil
-}
-
 func (c *Client) ListWorkspaceMembers(
 	ctx context.Context,
-	workspaceID int,
+	workspaceId string,
 ) (
 	[]WorkspaceAssignment,
 	*v2.RateLimitDescription,
@@ -533,12 +517,7 @@ func (c *Client) ListWorkspaceMembers(
 		Assignments []WorkspaceAssignment `json:"permission_assignments"`
 	}
 
-	id := strconv.Itoa(workspaceID)
-	u, err := c.prepareURLForWorkspaceMembers(WorkspacesEndpoint, id, WorkspaceAssignmentsEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch workspace members: %w", err)
-	}
-
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId))
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, err
@@ -549,24 +528,13 @@ func (c *Client) ListWorkspaceMembers(
 
 func (c *Client) CreateOrUpdateWorkspaceMember(
 	ctx context.Context,
-	workspaceID int64,
-	principalID string,
+	workspaceId string,
+	principalId string,
 ) (
 	*v2.RateLimitDescription,
 	error,
 ) {
-	wID := strconv.Itoa(int(workspaceID))
-	u, err := c.prepareURLForWorkspaceMembers(
-		WorkspacesEndpoint,
-		wID,
-		WorkspaceAssignmentsEndpoint,
-		"principals",
-		principalID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to create workspace member: %w", err)
-	}
-
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
 	payload := struct {
 		Permission []string `json:"permissions"`
 	}{
@@ -578,27 +546,16 @@ func (c *Client) CreateOrUpdateWorkspaceMember(
 
 func (c *Client) RemoveWorkspaceMember(
 	ctx context.Context,
-	workspaceID int64,
-	principalID string,
+	workspaceId string,
+	principalId string,
 ) (*v2.RateLimitDescription, error) {
-	wID := strconv.Itoa(int(workspaceID))
-
-	u, err := c.prepareURLForWorkspaceMembers(
-		WorkspacesEndpoint,
-		wID,
-		WorkspaceAssignmentsEndpoint,
-		"principals",
-		principalID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to create workspace member: %w", err)
-	}
-
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
 	return c.Put(ctx, u, nil, nil)
 }
 
 func (c *Client) ListRuleSets(
 	ctx context.Context,
+	workspaceId string,
 	resourceType string,
 	resourceId string,
 ) (
@@ -606,21 +563,22 @@ func (c *Client) ListRuleSets(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res struct {
-		RuleSets []RuleSet `json:"grant_rules"`
-		Etag     string    `json:"etag"`
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountRuleSetsEndpoint, c.accountId))
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(ruleSetsEndpoint)
 	}
 
-	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
-	}
-
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
+	resourcePayload, err := url.JoinPath("accounts", c.accountId, resourceType, resourceId, "ruleSets", "default")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}
 
+	var res struct {
+		RuleSets []RuleSet `json:"grant_rules"`
+		Etag     string    `json:"etag"`
+	}
 	ratelimitData, err := c.Get(ctx, u, &res, NewNameVars(resourcePayload, c.etag))
 	if err != nil {
 		return nil, ratelimitData, err
@@ -633,18 +591,20 @@ func (c *Client) ListRuleSets(
 
 func (c *Client) UpdateRuleSets(
 	ctx context.Context,
-	resourceType, resourceId string,
+	workspaceId, resourceType, resourceId string,
 	ruleSets []RuleSet,
 ) (
 	*v2.RateLimitDescription,
 	error,
 ) {
-	u, err := c.cfg.ResolvePath(c.baseUrl, RuleSetsEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare url to fetch rule sets: %w", err)
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountRuleSetsEndpoint, c.accountId))
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(ruleSetsEndpoint)
 	}
 
-	resourcePayload, err := url.JoinPath("accounts", c.acc, resourceType, resourceId, "ruleSets", "default")
+	resourcePayload, err := url.JoinPath("accounts", c.accountId, resourceType, resourceId, "ruleSets", "default")
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare resource payload: %w", err)
 	}

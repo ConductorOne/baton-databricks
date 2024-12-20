@@ -43,12 +43,13 @@ func (a *accountBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return accountResourceType
 }
 
-func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*v2.Resource, error) {
+func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error) {
+	accountId := a.client.GetAccountId()
 	children := []protoreflect.ProtoMessage{
 		&v2.ChildResourceType{ResourceTypeId: workspaceResourceType.Id},
 	}
 
-	if accAPIAvailable {
+	if a.client.IsAccountAPIAvailable() {
 		children = append(children,
 			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
@@ -58,9 +59,9 @@ func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*
 	}
 
 	resource, err := rs.NewResource(
-		accID,
+		accountId,
 		accountResourceType,
-		accID,
+		accountId,
 		rs.WithAnnotation(children...),
 	)
 
@@ -72,16 +73,12 @@ func accountResource(ctx context.Context, accID string, accAPIAvailable bool) (*
 }
 
 func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
-	var rv []*v2.Resource
-
-	ur, err := accountResource(ctx, a.client.GetAccountId(), a.client.IsAccountAPIAvailable())
+	ur, err := a.accountResource(ctx)
 	if err != nil {
 		return nil, "", nil, err
 	}
 
-	rv = append(rv, ur)
-
-	return rv, "", nil, nil
+	return []*v2.Resource{ur}, "", nil, nil
 }
 
 // Entitlements returns slice of entitlements for marketplace admins under account.
@@ -116,12 +113,10 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		return nil, "", nil, nil
 	}
 
-	a.client.SetAccountConfig()
-
 	var rv []*v2.Grant
 
 	// list rule sets for the account
-	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "")
+	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", resource.Id.Resource, err)
 	}
@@ -130,7 +125,7 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		// rule set contains role and its principals, each one with resource type and resource id seperated by "/"
 		if strings.Contains(ruleSet.Role, MarketplaceAdminRole) {
 			for _, p := range ruleSet.Principals {
-				resourceId, err := prepareResourceID(ctx, a.client, p)
+				resourceId, err := prepareResourceId(ctx, a.client, "", p)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 				}
@@ -167,12 +162,12 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	}
 
 	accID := entitlement.Resource.Id.Resource
-	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "")
+	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", accID, err)
 	}
 
-	principalID, err := preparePrincipalID(ctx, a.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, a.client, "", principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id for principal %s: %w", principal.Id.Resource, err)
 	}
@@ -208,7 +203,7 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 		})
 	}
 
-	_, err = a.client.UpdateRuleSets(ctx, "", "", ruleSets)
+	_, err = a.client.UpdateRuleSets(ctx, "", "", "", ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for account %s: %w", accID, err)
 	}
@@ -233,7 +228,7 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 	}
 
 	accID := entitlement.Resource.Id.Resource
-	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "")
+	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", accID, err)
 	}
@@ -248,7 +243,7 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 		return nil, nil
 	}
 
-	principalID, err := preparePrincipalID(ctx, a.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, a.client, "", principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
@@ -278,7 +273,7 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 		}
 	}
 
-	_, err = a.client.UpdateRuleSets(ctx, "", "", ruleSets)
+	_, err = a.client.UpdateRuleSets(ctx, "", "", "", ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for account %s: %w", accID, err)
 	}

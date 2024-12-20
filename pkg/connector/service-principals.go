@@ -66,10 +66,9 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		return nil, "", nil, nil
 	}
 
+	var workspaceId string
 	if parentResourceID.ResourceType == workspaceResourceType.Id {
-		s.client.SetWorkspaceConfig(parentResourceID.Resource)
-	} else {
-		s.client.SetAccountConfig()
+		workspaceId = parentResourceID.Resource
 	}
 
 	bag, page, err := parsePageToken(pToken.Token, &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id})
@@ -79,6 +78,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 
 	servicePrincipals, total, _, err := s.client.ListServicePrincipals(
 		ctx,
+		workspaceId,
 		databricks.NewPaginationVars(page, ResourcesPageSize),
 		databricks.NewServicePrincipalAttrVars(),
 	)
@@ -121,10 +121,9 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
 
+	var workspaceId string
 	if parentType == workspaceResourceType.Id {
-		s.client.SetWorkspaceConfig(parentID)
-	} else {
-		s.client.SetAccountConfig()
+		workspaceId = parentID
 	}
 
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
@@ -134,7 +133,7 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 
 	// role permissions entitlements
 	// get all assignable roles for this specific service principal resource
-	roles, _, err := s.client.ListRoles(context.Background(), ServicePrincipalsType, applicationId)
+	roles, _, err := s.client.ListRoles(context.Background(), workspaceId, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list roles for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
 	}
@@ -165,10 +164,9 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
 
+	var workspaceId string
 	if parentType == workspaceResourceType.Id {
-		s.client.SetWorkspaceConfig(parentID)
-	} else {
-		s.client.SetAccountConfig()
+		workspaceId = parentID
 	}
 
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
@@ -176,7 +174,7 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	ruleSets, _, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
+	ruleSets, _, err := s.client.ListRuleSets(ctx, workspaceId, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", resource.Id.Resource, applicationId, err)
 	}
@@ -184,7 +182,7 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 	var rv []*v2.Grant
 	for _, ruleSet := range ruleSets {
 		for _, p := range ruleSet.Principals {
-			resourceId, err := prepareResourceID(ctx, s.client, p)
+			resourceId, err := prepareResourceId(ctx, s.client, workspaceId, p)
 			if err != nil {
 				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
@@ -229,10 +227,9 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
 
+	var workspaceId string
 	if parentType == workspaceResourceType.Id {
-		s.client.SetWorkspaceConfig(parentID)
-	} else {
-		s.client.SetAccountConfig()
+		workspaceId = parentID
 	}
 
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
@@ -240,12 +237,12 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		return nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	ruleSets, _, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
+	ruleSets, _, err := s.client.ListRuleSets(ctx, workspaceId, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
 
-	principalID, err := preparePrincipalID(ctx, s.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, s.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
@@ -279,7 +276,7 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		})
 	}
 
-	_, err = s.client.UpdateRuleSets(ctx, ServicePrincipalsType, applicationId, ruleSets)
+	_, err = s.client.UpdateRuleSets(ctx, workspaceId, ServicePrincipalsType, applicationId, ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
@@ -313,10 +310,9 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
 
+	var workspaceId string
 	if parentType == workspaceResourceType.Id {
-		s.client.SetWorkspaceConfig(parentID)
-	} else {
-		s.client.SetAccountConfig()
+		workspaceId = parentID
 	}
 
 	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
@@ -324,7 +320,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
 
-	ruleSets, _, err := s.client.ListRuleSets(ctx, ServicePrincipalsType, applicationId)
+	ruleSets, _, err := s.client.ListRuleSets(ctx, workspaceId, ServicePrincipalsType, applicationId)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
@@ -339,7 +335,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, nil
 	}
 
-	principalID, err := preparePrincipalID(ctx, s.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, s.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
@@ -371,7 +367,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, nil
 	}
 
-	_, err = s.client.UpdateRuleSets(ctx, ServicePrincipalsType, applicationId, ruleSets)
+	_, err = s.client.UpdateRuleSets(ctx, workspaceId, ServicePrincipalsType, applicationId, ruleSets)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
