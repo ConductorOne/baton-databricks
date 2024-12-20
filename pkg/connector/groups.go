@@ -323,7 +323,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
 	}
 
-	principalID, err := preparePrincipalID(ctx, g.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
@@ -430,7 +430,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			return nil, nil
 		}
 
-		principalID, err := preparePrincipalID(ctx, g.client, principal.Id.ResourceType, principal.Id.Resource)
+		principalID, err := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 		}

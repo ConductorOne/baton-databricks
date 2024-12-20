@@ -167,7 +167,7 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", accID, err)
 	}
 
-	principalID, err := preparePrincipalID(ctx, a.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, a.client, "", principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id for principal %s: %w", principal.Id.Resource, err)
 	}
@@ -243,7 +243,7 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 		return nil, nil
 	}
 
-	principalID, err := preparePrincipalID(ctx, a.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, a.client, "", principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}

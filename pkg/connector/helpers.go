@@ -119,30 +119,30 @@ func prepareResourceType(principal *databricks.WorkspacePrincipal) (*v2.Resource
 	}
 }
 
-// preparePrincipalID prepares a principal ID for a user, group, or service principal.
+// preparePrincipalId prepares a principal ID for a user, group, or service principal.
 // It's used when we need edit rule sets with new principals.
-func preparePrincipalID(ctx context.Context, c *databricks.Client, principalType, principalID string) (string, error) {
+func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, principalType, principalId string) (string, error) {
 	var result string
 
 	switch principalType {
 	case userResourceType.Id:
-		username, _, err := c.FindUsername(ctx, principalID)
+		username, _, err := c.FindUsername(ctx, workspaceId, principalId)
 		if err != nil {
-			return "", fmt.Errorf("failed to find user %s: %w", principalID, err)
+			return "", fmt.Errorf("failed to find user %s/%s: %w", workspaceId, principalId, err)
 		}
 
 		result = fmt.Sprintf("%s/%s", UsersType, username)
 	case groupResourceType.Id:
-		displayName, _, err := c.FindGroupDisplayName(ctx, principalID)
+		displayName, _, err := c.FindGroupDisplayName(ctx, workspaceId, principalId)
 		if err != nil {
-			return "", fmt.Errorf("failed to find group %s: %w", principalID, err)
+			return "", fmt.Errorf("failed to find group %s/%s: %w", workspaceId, principalId, err)
 		}
 
 		result = fmt.Sprintf("%s/%s", GroupsType, displayName)
 	case servicePrincipalResourceType.Id:
-		appID, _, err := c.FindServicePrincipalAppID(ctx, principalID)
+		appID, _, err := c.FindServicePrincipalAppID(ctx, workspaceId, principalId)
 		if err != nil {
-			return "", fmt.Errorf("failed to find service principal %s: %w", principalID, err)
+			return "", fmt.Errorf("failed to find service principal %s/%s: %w", workspaceId, principalId, err)
 		}
 
 		result = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)

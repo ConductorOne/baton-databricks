@@ -242,7 +242,7 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for service principal %s (%s): %w", principal.Id.Resource, applicationId, err)
 	}
 
-	principalID, err := preparePrincipalID(ctx, s.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, s.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
@@ -335,7 +335,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, nil
 	}
 
-	principalID, err := preparePrincipalID(ctx, s.client, principal.Id.ResourceType, principal.Id.Resource)
+	principalID, err := preparePrincipalId(ctx, s.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
