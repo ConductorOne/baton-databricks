@@ -52,7 +52,7 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 	}
 
 	if accountHostname == "" {
-		accountHostname = "accounts." + defaultHost
+		accountHostname = "accounts." + hostname
 	}
 	accountBaseUrl := &url.URL{
 		Scheme: "https",

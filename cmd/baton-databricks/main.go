@@ -58,6 +58,7 @@ func prepareClientAuth(ctx context.Context, cfg *viper.Viper) databricks.Auth {
 	password := cfg.GetString(config.PasswordField.FieldName)
 	workspaces := cfg.GetStringSlice(config.WorkspacesField.FieldName)
 	tokens := cfg.GetStringSlice(config.TokensField.FieldName)
+	hostname := cfg.GetString(config.HostnameField.FieldName)
 
 	switch {
 	case username != "" && password != "":
@@ -81,6 +82,7 @@ func prepareClientAuth(ctx context.Context, cfg *viper.Viper) databricks.Auth {
 			accountID,
 			databricksClientId,
 			databricksClientSecret,
+			hostname,
 		)
 		return cAuth
 	case AreTokensSet(workspaces, tokens):

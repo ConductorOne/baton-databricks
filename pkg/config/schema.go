@@ -12,7 +12,6 @@ var (
 	AccountHostnameField = field.StringField(
 		"account-hostname",
 		field.WithDescription("The hostname used to connect to the Databricks account API"),
-		field.WithDefaultValue("accounts.cloud.databricks.com"),
 	)
 	AccountIdField = field.StringField(
 		"account-id",
