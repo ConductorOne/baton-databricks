@@ -121,6 +121,7 @@ Available Commands:
   help               Help about any command
 
 Flags:
+      --account-hostname string           The hostname used to connect to the Databricks account API ($BATON_ACCOUNT_HOSTNAME)
       --account-id string                 required: The Databricks account ID used to connect to the Databricks Account and Workspace API ($BATON_ACCOUNT_ID)
       --client-id string                  The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string              The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
@@ -128,7 +129,7 @@ Flags:
       --databricks-client-secret string   The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
   -f, --file string                       The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")
   -h, --help                              help for baton-databricks
-      --hostname                          The Databricks hostname used to connect to the Databricks API ($BATON_HOSTNAME) (default "cloud.databricks.com")
+      --hostname string                   The Databricks hostname used to connect to the Databricks API ($BATON_HOSTNAME) (default "cloud.databricks.com")
       --log-format string                 The output format for logs: json, console ($BATON_LOG_FORMAT) (default "json")
       --log-level string                  The log level: debug, info, warn, error ($BATON_LOG_LEVEL) (default "info")
       --password string                   The Databricks password used to connect to the Databricks API ($BATON_PASSWORD)

@@ -93,12 +93,12 @@ type OAuth2 struct {
 	cfg *clientcredentials.Config
 }
 
-func NewOAuth2(accId, clientId, clientSecret, hostname string) *OAuth2 {
+func NewOAuth2(accId, clientId, clientSecret, accountHostname string) *OAuth2 {
 	return &OAuth2{
 		cfg: &clientcredentials.Config{
 			ClientID:     clientId,
 			ClientSecret: clientSecret,
-			TokenURL:     fmt.Sprintf("https://accounts.%s/oidc/accounts/%s/v1/token", hostname, accId),
+			TokenURL:     fmt.Sprintf("https://%s/oidc/accounts/%s/v1/token", accountHostname, accId),
 			Scopes:       []string{"all-apis"},
 		},
 	}

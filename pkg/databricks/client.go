@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/conductorone/baton-databricks/pkg/config"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/spf13/viper"
 )
 
 const (
@@ -42,17 +44,24 @@ type Client struct {
 	isWSAPIAvailable  bool
 }
 
-func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
-	if hostname == "" {
-		hostname = defaultHost
+func GetHostname(cfg *viper.Viper) string {
+	if cfg.GetString(config.HostnameField.FieldName) == "" {
+		return defaultHost
 	}
+	return cfg.GetString(config.HostnameField.FieldName)
+}
+
+func GetAccountHostname(cfg *viper.Viper) string {
+	if cfg.GetString(config.AccountHostnameField.FieldName) == "" {
+		return "accounts." + GetHostname(cfg)
+	}
+	return cfg.GetString(config.AccountHostnameField.FieldName)
+}
+
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
 	baseUrl := &url.URL{
 		Scheme: "https",
 		Host:   hostname,
-	}
-
-	if accountHostname == "" {
-		accountHostname = "accounts." + hostname
 	}
 	accountBaseUrl := &url.URL{
 		Scheme: "https",
