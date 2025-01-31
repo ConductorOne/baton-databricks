@@ -127,7 +127,7 @@ Available Commands:
   help               Help about any command
 
 Flags:
-      --account-hostname string           The hostname used to connect to the Databricks account API ($BATON_ACCOUNT_HOSTNAME)
+      --account-hostname string           The hostname used to connect to the Databricks account API ($BATON_ACCOUNT_HOSTNAME) (default "accounts.cloud.databricks.com")
       --account-id string                 required: The Databricks account ID used to connect to the Databricks Account and Workspace API ($BATON_ACCOUNT_ID)
       --client-id string                  The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string              The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
