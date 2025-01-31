@@ -5,13 +5,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
+	"github.com/conductorone/baton-databricks/pkg/config"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/spf13/viper"
 )
 
 const (
 	defaultHost = "cloud.databricks.com"
+	azureHost   = "azuredatabricks.net"
+	gcpHost     = "gcp.databricks.net"
 
 	// Some of these are case sensitive.
 	usersEndpoint             = "/api/2.0/preview/scim/v2/Users"
@@ -42,17 +47,26 @@ type Client struct {
 	isWSAPIAvailable  bool
 }
 
-func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
-	if hostname == "" {
-		hostname = defaultHost
+func GetHostname(cfg *viper.Viper) string {
+	if cfg.GetString(config.HostnameField.FieldName) == "" {
+		return defaultHost
 	}
+	return cfg.GetString(config.HostnameField.FieldName)
+}
+
+func GetAccountHostname(cfg *viper.Viper) string {
+	if strings.HasSuffix(GetHostname(cfg), azureHost) {
+		return "accounts." + azureHost
+	} else if strings.HasSuffix(GetHostname(cfg), gcpHost) {
+		return "accounts." + gcpHost
+	}
+	return "accounts." + GetHostname(cfg)
+}
+
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
 	baseUrl := &url.URL{
 		Scheme: "https",
 		Host:   hostname,
-	}
-
-	if accountHostname == "" {
-		accountHostname = "accounts." + defaultHost
 	}
 	accountBaseUrl := &url.URL{
 		Scheme: "https",
