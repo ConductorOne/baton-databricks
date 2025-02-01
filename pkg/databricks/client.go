@@ -54,13 +54,13 @@ func GetHostname(cfg *viper.Viper) string {
 	return cfg.GetString(config.HostnameField.FieldName)
 }
 
-func GetAccountHostname(cfg *viper.Viper) string {
-	if strings.HasSuffix(GetHostname(cfg), azureHost) {
+func GetAccountHostname(hostname string) string {
+	if strings.HasSuffix(hostname, azureHost) {
 		return "accounts." + azureHost
-	} else if strings.HasSuffix(GetHostname(cfg), gcpHost) {
+	} else if strings.HasSuffix(hostname, gcpHost) {
 		return "accounts." + gcpHost
 	}
-	return "accounts." + GetHostname(cfg)
+	return "accounts." + hostname
 }
 
 func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
