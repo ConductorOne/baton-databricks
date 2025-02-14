@@ -30,7 +30,7 @@ func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return groupResourceType
 }
 
-func (g *groupBuilder) groupResource(_ context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
+func groupResource(_ context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
 	members := make([]string, len(group.Members))
 
 	for i, member := range group.Members {
@@ -72,7 +72,6 @@ func (g *groupBuilder) groupResource(_ context.Context, group *databricks.Group,
 		return nil, err
 	}
 
-	g.resourceCache.Set(group.ID, resource)
 	return resource, nil
 }
 
@@ -107,10 +106,11 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 	for _, group := range groups {
 		gCopy := group
 
-		gr, err := g.groupResource(ctx, &gCopy, parentResourceID)
+		gr, err := groupResource(ctx, &gCopy, parentResourceID)
 		if err != nil {
 			return nil, "", nil, err
 		}
+		g.resourceCache.Set(group.ID, gr)
 
 		rv = append(rv, gr)
 	}
@@ -210,7 +210,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			case "Users":
 				resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: memberID}
 			case "Groups":
-				memberResource, annotation, err := g.resourceCache.ExpandGrantForGroup(memberID)
+				memberResource, annotation, err := g.resourceCache.ExpandGrantForGroup(ctx, workspaceId, memberID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", memberID, err)
 				}
@@ -240,7 +240,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			}
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				memberResource, annotation, err := g.resourceCache.ExpandGrantForGroup(resourceId.Resource)
+				memberResource, annotation, err := g.resourceCache.ExpandGrantForGroup(ctx, workspaceId, resourceId.Resource)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
 				}

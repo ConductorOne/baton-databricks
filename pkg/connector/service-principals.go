@@ -190,7 +190,7 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				memberResource, annotation, err := s.resourceCache.ExpandGrantForGroup(resourceId.Resource)
+				memberResource, annotation, err := s.resourceCache.ExpandGrantForGroup(ctx, workspaceId, resourceId.Resource)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
 				}

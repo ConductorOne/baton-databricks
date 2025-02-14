@@ -119,6 +119,6 @@ func New(
 	return &Databricks{
 		client:        client,
 		workspaces:    workspaces,
-		resourceCache: NewResourceCache(),
+		resourceCache: NewResourceCache(client),
 	}, nil
 }

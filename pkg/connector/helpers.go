@@ -38,6 +38,7 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 type ResourceCache struct {
 	// Map of API IDs to resources
 	resources map[string]*v2.Resource
+	client    *databricks.Client
 }
 
 func (c *ResourceCache) Get(resourceId string) *v2.Resource {
@@ -48,16 +49,25 @@ func (c *ResourceCache) Set(resourceId string, resource *v2.Resource) {
 	c.resources[resourceId] = resource
 }
 
-func NewResourceCache() *ResourceCache {
+func NewResourceCache(client *databricks.Client) *ResourceCache {
 	return &ResourceCache{
 		resources: make(map[string]*v2.Resource),
+		client:    client,
 	}
 }
 
-func (c *ResourceCache) ExpandGrantForGroup(id string) (*v2.Resource, *v2.GrantExpandable, error) {
-	memberResource := c.Get(id)
+func (c *ResourceCache) ExpandGrantForGroup(ctx context.Context, workspaceId, groupId string) (*v2.Resource, *v2.GrantExpandable, error) {
+	memberResource := c.Get(groupId)
 	if memberResource == nil {
-		return nil, nil, fmt.Errorf("databricks-connector: group %s not found in cache", id)
+		group, _, err := c.client.GetGroup(context.Background(), workspaceId, groupId)
+		if err != nil {
+			return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId, err)
+		}
+		memberResource, err = groupResource(ctx, group, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId, err)
+		}
+		c.Set(groupId, memberResource)
 	}
 
 	return memberResource, &v2.GrantExpandable{

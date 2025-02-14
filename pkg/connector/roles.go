@@ -233,7 +233,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
-				memberResource, annotation, err := r.resourceCache.ExpandGrantForGroup(g.ID)
+				memberResource, annotation, err := r.resourceCache.ExpandGrantForGroup(ctx, workspaceId, g.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", g.ID, err)
 				}
