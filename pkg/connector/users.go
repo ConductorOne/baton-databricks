@@ -12,15 +12,16 @@ import (
 )
 
 type userBuilder struct {
-	client       *databricks.Client
-	resourceType *v2.ResourceType
+	client        *databricks.Client
+	resourceType  *v2.ResourceType
+	resourceCache *ResourceCache
 }
 
 func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return userResourceType
 }
 
-func userResource(ctx context.Context, user *databricks.User, parent *v2.ResourceId) (*v2.Resource, error) {
+func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, parent *v2.ResourceId) (*v2.Resource, error) {
 	var emailOptions []rs.UserTraitOption
 	var primaryEmail string
 	for _, email := range user.Emails {
@@ -77,7 +78,7 @@ func userResource(ctx context.Context, user *databricks.User, parent *v2.Resourc
 		return nil, err
 	}
 
-	resourceCache.Set(user.ID, resource)
+	u.resourceCache.Set(user.ID, resource)
 
 	return resource, nil
 }
@@ -113,7 +114,7 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 	for _, user := range users {
 		uCopy := user
 
-		ur, err := userResource(ctx, &uCopy, parentResourceID)
+		ur, err := u.userResource(ctx, &uCopy, parentResourceID)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -158,9 +159,10 @@ func (u *userBuilder) Grants(
 	return nil, "", nil, nil
 }
 
-func newUserBuilder(client *databricks.Client) *userBuilder {
+func newUserBuilder(client *databricks.Client, resourceCache *ResourceCache) *userBuilder {
 	return &userBuilder{
-		client:       client,
-		resourceType: userResourceType,
+		client:        client,
+		resourceType:  userResourceType,
+		resourceCache: resourceCache,
 	}
 }

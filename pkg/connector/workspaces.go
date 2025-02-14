@@ -20,9 +20,10 @@ import (
 const workspaceMemberEntitlement = "member"
 
 type workspaceBuilder struct {
-	client       *databricks.Client
-	resourceType *v2.ResourceType
-	workspaces   map[string]struct{}
+	client        *databricks.Client
+	resourceType  *v2.ResourceType
+	workspaces    map[string]struct{}
+	resourceCache *ResourceCache
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -179,7 +180,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 
 		var annotations []protoreflect.ProtoMessage
 		if resourceType == groupResourceType {
-			memberResource, annotation, err := expandGrantForGroup(resourceID.Resource)
+			memberResource, annotation, err := w.resourceCache.ExpandGrantForGroup(ctx, workspace, resourceID.Resource)
 			if err != nil {
 				return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceID.Resource, err)
 			}
@@ -260,15 +261,16 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	return nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
+func newWorkspaceBuilder(client *databricks.Client, resourceCache *ResourceCache, workspaces []string) *workspaceBuilder {
 	wMap := make(map[string]struct{}, len(workspaces))
 	for _, w := range workspaces {
 		wMap[w] = struct{}{}
 	}
 
 	return &workspaceBuilder{
-		client:       client,
-		resourceType: workspaceResourceType,
-		workspaces:   wMap,
+		client:        client,
+		resourceType:  workspaceResourceType,
+		workspaces:    wMap,
+		resourceCache: resourceCache,
 	}
 }

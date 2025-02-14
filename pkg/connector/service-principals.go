@@ -18,15 +18,16 @@ import (
 )
 
 type servicePrincipalBuilder struct {
-	client       *databricks.Client
-	resourceType *v2.ResourceType
+	client        *databricks.Client
+	resourceType  *v2.ResourceType
+	resourceCache *ResourceCache
 }
 
 func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return servicePrincipalResourceType
 }
 
-func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.ServicePrincipal, parent *v2.ResourceId) (*v2.Resource, error) {
+func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.ServicePrincipal, parent *v2.ResourceId) (*v2.Resource, error) {
 	profile := map[string]interface{}{
 		"application_id": servicePrincipal.ApplicationID,
 		"display_name":   servicePrincipal.DisplayName,
@@ -56,7 +57,7 @@ func servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.
 		return nil, err
 	}
 
-	resourceCache.Set(servicePrincipal.ID, resource)
+	s.resourceCache.Set(servicePrincipal.ID, resource)
 	return resource, nil
 }
 
@@ -90,7 +91,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 	for _, servicePrincipal := range servicePrincipals {
 		gCopy := servicePrincipal
 
-		gr, err := servicePrincipalResource(ctx, &gCopy, parentResourceID)
+		gr, err := s.servicePrincipalResource(ctx, &gCopy, parentResourceID)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -189,7 +190,7 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				memberResource, annotation, err := expandGrantForGroup(resourceId.Resource)
+				memberResource, annotation, err := s.resourceCache.ExpandGrantForGroup(ctx, workspaceId, resourceId.Resource)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
 				}
@@ -375,9 +376,10 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 	return nil, nil
 }
 
-func newServicePrincipalBuilder(client *databricks.Client) *servicePrincipalBuilder {
+func newServicePrincipalBuilder(client *databricks.Client, resourceCache *ResourceCache) *servicePrincipalBuilder {
 	return &servicePrincipalBuilder{
-		client:       client,
-		resourceType: servicePrincipalResourceType,
+		client:        client,
+		resourceType:  servicePrincipalResourceType,
+		resourceCache: resourceCache,
 	}
 }
