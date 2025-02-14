@@ -30,7 +30,7 @@ func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return groupResourceType
 }
 
-func (g *groupBuilder) groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
+func (g *groupBuilder) groupResource(_ context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
 	members := make([]string, len(group.Members))
 
 	for i, member := range group.Members {
