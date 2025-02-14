@@ -33,8 +33,9 @@ var entitlements = []string{
 }
 
 type roleBuilder struct {
-	client       *databricks.Client
-	resourceType *v2.ResourceType
+	client        *databricks.Client
+	resourceType  *v2.ResourceType
+	resourceCache *ResourceCache
 }
 
 func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -232,7 +233,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
-				memberResource, annotation, err := expandGrantForGroup(g.ID)
+				memberResource, annotation, err := r.resourceCache.ExpandGrantForGroup(g.ID)
 				if err != nil {
 					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", g.ID, err)
 				}
@@ -453,9 +454,10 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 	return nil, nil
 }
 
-func newRoleBuilder(client *databricks.Client) *roleBuilder {
+func newRoleBuilder(client *databricks.Client, resourceCache *ResourceCache) *roleBuilder {
 	return &roleBuilder{
-		client:       client,
-		resourceType: roleResourceType,
+		client:        client,
+		resourceType:  roleResourceType,
+		resourceCache: resourceCache,
 	}
 }

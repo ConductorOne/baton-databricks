@@ -12,19 +12,20 @@ import (
 )
 
 type Databricks struct {
-	client     *databricks.Client
-	workspaces []string
+	client        *databricks.Client
+	workspaces    []string
+	resourceCache *ResourceCache
 }
 
 // ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
 	return []connectorbuilder.ResourceSyncer{
-		newAccountBuilder(d.client),
-		newGroupBuilder(d.client),
-		newServicePrincipalBuilder(d.client),
-		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client, d.workspaces),
-		newRoleBuilder(d.client),
+		newAccountBuilder(d.client, d.resourceCache),
+		newGroupBuilder(d.client, d.resourceCache),
+		newServicePrincipalBuilder(d.client, d.resourceCache),
+		newUserBuilder(d.client, d.resourceCache),
+		newWorkspaceBuilder(d.client, d.resourceCache, d.workspaces),
+		newRoleBuilder(d.client, d.resourceCache),
 	}
 }
 
@@ -116,7 +117,8 @@ func New(
 	}
 
 	return &Databricks{
-		client,
-		workspaces,
+		client:        client,
+		workspaces:    workspaces,
+		resourceCache: NewResourceCache(),
 	}, nil
 }

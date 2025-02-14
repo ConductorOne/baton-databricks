@@ -54,7 +54,16 @@ func NewResourceCache() *ResourceCache {
 	}
 }
 
-var resourceCache = NewResourceCache()
+func (c *ResourceCache) ExpandGrantForGroup(id string) (*v2.Resource, *v2.GrantExpandable, error) {
+	memberResource := c.Get(id)
+	if memberResource == nil {
+		return nil, nil, fmt.Errorf("databricks-connector: group %s not found in cache", id)
+	}
+
+	return memberResource, &v2.GrantExpandable{
+		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", memberResource.Id.Resource, groupMemberEntitlement)},
+	}, nil
+}
 
 func annotationsForUserResourceType() annotations.Annotations {
 	annos := annotations.Annotations{}
@@ -151,17 +160,6 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	}
 
 	return result, nil
-}
-
-func expandGrantForGroup(id string) (*v2.Resource, *v2.GrantExpandable, error) {
-	memberResource := resourceCache.Get(id)
-	if memberResource == nil {
-		return nil, nil, fmt.Errorf("databricks-connector: group %s not found in cache", id)
-	}
-
-	return memberResource, &v2.GrantExpandable{
-		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", memberResource.Id.Resource, groupMemberEntitlement)},
-	}, nil
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {
