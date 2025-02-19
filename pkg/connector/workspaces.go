@@ -20,10 +20,9 @@ import (
 const workspaceMemberEntitlement = "member"
 
 type workspaceBuilder struct {
-	client        *databricks.Client
-	resourceType  *v2.ResourceType
-	workspaces    map[string]struct{}
-	resourceCache *ResourceCache
+	client       *databricks.Client
+	resourceType *v2.ResourceType
+	workspaces   map[string]struct{}
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -155,12 +154,12 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
 	}
 
-	workspaceID, ok := rs.GetProfileInt64Value(groupTrait.Profile, "workspace_id")
+	workspaceId, ok := rs.GetProfileInt64Value(groupTrait.Profile, "workspace_id")
 	if !ok {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
 	}
 
-	workspace := strconv.Itoa(int(workspaceID))
+	workspace := strconv.Itoa(int(workspaceId))
 	assignments, _, err := w.client.ListWorkspaceMembers(ctx, workspace)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
@@ -180,12 +179,12 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 
 		var annotations []protoreflect.ProtoMessage
 		if resourceType == groupResourceType {
-			memberResource, annotation, err := w.resourceCache.ExpandGrantForGroup(ctx, workspace, resourceID.Resource)
+			rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceID.Resource, resource.ParentResourceId)
 			if err != nil {
-				return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceID.Resource, err)
+				return rv, "", nil, err
 			}
-			annotations = append(annotations, annotation)
-			resourceID = memberResource.Id
+			resourceID = rid
+			annotations = append(annotations, expandAnnotation)
 		}
 
 		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
@@ -261,16 +260,15 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	return nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client, resourceCache *ResourceCache, workspaces []string) *workspaceBuilder {
+func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
 	wMap := make(map[string]struct{}, len(workspaces))
 	for _, w := range workspaces {
 		wMap[w] = struct{}{}
 	}
 
 	return &workspaceBuilder{
-		client:        client,
-		resourceType:  workspaceResourceType,
-		workspaces:    wMap,
-		resourceCache: resourceCache,
+		client:       client,
+		resourceType: workspaceResourceType,
+		workspaces:   wMap,
 	}
 }
