@@ -21,16 +21,23 @@ import (
 const groupMemberEntitlement = "member"
 
 type groupBuilder struct {
-	client        *databricks.Client
-	resourceType  *v2.ResourceType
-	resourceCache *ResourceCache
+	client       *databricks.Client
+	resourceType *v2.ResourceType
 }
 
 func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return groupResourceType
 }
 
-func groupResource(_ context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
+func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.ResourceId) string {
+	if parentResourceId == nil {
+		return strings.Join([]string{groupResourceType.Id, groupId}, "/")
+	}
+
+	return strings.Join([]string{parentResourceId.ResourceType, parentResourceId.Resource, groupResourceType.Id, groupId}, "/")
+}
+
+func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
 	members := make([]string, len(group.Members))
 
 	for i, member := range group.Members {
@@ -54,11 +61,10 @@ func groupResource(_ context.Context, group *databricks.Group, parent *v2.Resour
 	}
 
 	var options []rs.ResourceOption
-	groupId := strings.Join([]string{groupResourceType.Id, group.ID}, "/")
 	if parent != nil {
-		groupId = strings.Join([]string{parent.ResourceType, parent.Resource, groupResourceType.Id, group.ID}, "/")
 		options = append(options, rs.WithParentResourceID(parent))
 	}
+	groupId := groupResourceId(ctx, group.ID, parent)
 
 	resource, err := rs.NewGroupResource(
 		group.DisplayName,
@@ -110,7 +116,6 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		if err != nil {
 			return nil, "", nil, err
 		}
-		g.resourceCache.Set(group.ID, gr)
 
 		rv = append(rv, gr)
 	}
@@ -210,12 +215,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			case "Users":
 				resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: memberID}
 			case "Groups":
-				memberResource, annotation, err := g.resourceCache.ExpandGrantForGroup(ctx, workspaceId, memberID)
+				rid, expandAnnotation, err := groupGrantExpansion(ctx, memberID, parentId)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", memberID, err)
+					return rv, "", nil, err
 				}
-				anns = append(anns, annotation)
-				resourceId = memberResource.Id
+				resourceId = rid
+				anns = append(anns, expandAnnotation)
 			case "ServicePrincipals":
 				resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: memberID}
 			default:
@@ -240,12 +245,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 			}
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				memberResource, annotation, err := g.resourceCache.ExpandGrantForGroup(ctx, workspaceId, resourceId.Resource)
+				rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, resource.ParentResourceId)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
+					return rv, "", nil, err
 				}
-				annotations = append(annotations, annotation)
-				resourceId = memberResource.Id
+				resourceId = rid
+				annotations = append(annotations, expandAnnotation)
 			}
 
 			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))
@@ -471,10 +476,9 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	return nil, nil
 }
 
-func newGroupBuilder(client *databricks.Client, resourceCache *ResourceCache) *groupBuilder {
+func newGroupBuilder(client *databricks.Client) *groupBuilder {
 	return &groupBuilder{
-		client:        client,
-		resourceType:  groupResourceType,
-		resourceCache: resourceCache,
+		client:       client,
+		resourceType: groupResourceType,
 	}
 }

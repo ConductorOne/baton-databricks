@@ -12,9 +12,8 @@ import (
 )
 
 type userBuilder struct {
-	client        *databricks.Client
-	resourceType  *v2.ResourceType
-	resourceCache *ResourceCache
+	client       *databricks.Client
+	resourceType *v2.ResourceType
 }
 
 func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -77,8 +76,6 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 	if err != nil {
 		return nil, err
 	}
-
-	u.resourceCache.Set(user.ID, resource)
 
 	return resource, nil
 }
@@ -159,10 +156,9 @@ func (u *userBuilder) Grants(
 	return nil, "", nil, nil
 }
 
-func newUserBuilder(client *databricks.Client, resourceCache *ResourceCache) *userBuilder {
+func newUserBuilder(client *databricks.Client) *userBuilder {
 	return &userBuilder{
-		client:        client,
-		resourceType:  userResourceType,
-		resourceCache: resourceCache,
+		client:       client,
+		resourceType: userResourceType,
 	}
 }

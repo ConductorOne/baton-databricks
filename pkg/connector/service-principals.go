@@ -18,9 +18,8 @@ import (
 )
 
 type servicePrincipalBuilder struct {
-	client        *databricks.Client
-	resourceType  *v2.ResourceType
-	resourceCache *ResourceCache
+	client       *databricks.Client
+	resourceType *v2.ResourceType
 }
 
 func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -57,7 +56,6 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 		return nil, err
 	}
 
-	s.resourceCache.Set(servicePrincipal.ID, resource)
 	return resource, nil
 }
 
@@ -190,12 +188,14 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				memberResource, annotation, err := s.resourceCache.ExpandGrantForGroup(ctx, workspaceId, resourceId.Resource)
+				groupResourceStr := groupResourceId(ctx, resourceId.Resource, resource.ParentResourceId)
+				annotations = append(annotations, &v2.GrantExpandable{
+					EntitlementIds: []string{fmt.Sprintf("group:%s:%s", groupResourceStr, groupMemberEntitlement)},
+				})
+				resourceId, err = rs.NewResourceID(groupResourceType, groupResourceStr)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
+					return rv, "", nil, err
 				}
-				annotations = append(annotations, annotation)
-				resourceId = memberResource.Id
 			}
 
 			rv = append(rv, grant.NewGrant(resource, ruleSet.Role, resourceId, grant.WithAnnotation(annotations...)))
@@ -376,10 +376,9 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 	return nil, nil
 }
 
-func newServicePrincipalBuilder(client *databricks.Client, resourceCache *ResourceCache) *servicePrincipalBuilder {
+func newServicePrincipalBuilder(client *databricks.Client) *servicePrincipalBuilder {
 	return &servicePrincipalBuilder{
-		client:        client,
-		resourceType:  servicePrincipalResourceType,
-		resourceCache: resourceCache,
+		client:       client,
+		resourceType: servicePrincipalResourceType,
 	}
 }

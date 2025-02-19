@@ -35,9 +35,8 @@ const (
 )
 
 type accountBuilder struct {
-	client        *databricks.Client
-	resourceType  *v2.ResourceType
-	resourceCache *ResourceCache
+	client       *databricks.Client
+	resourceType *v2.ResourceType
 }
 
 func (a *accountBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -133,12 +132,12 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 
 				var annotations []protoreflect.ProtoMessage
 				if resourceId.ResourceType == groupResourceType.Id {
-					memberResource, annotation, err := a.resourceCache.ExpandGrantForGroup(ctx, "", resourceId.Resource)
+					rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, resource.ParentResourceId)
 					if err != nil {
-						return nil, "", nil, fmt.Errorf("databricks-connector: failed to expand grant for group %s: %w", resourceId.Resource, err)
+						return rv, "", nil, err
 					}
-					annotations = append(annotations, annotation)
-					resourceId = memberResource.Id
+					resourceId = rid
+					annotations = append(annotations, expandAnnotation)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, MarketplaceAdminRole, resourceId, grant.WithAnnotation(annotations...)))
@@ -282,10 +281,9 @@ func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotatio
 	return nil, nil
 }
 
-func newAccountBuilder(client *databricks.Client, resourceCache *ResourceCache) *accountBuilder {
+func newAccountBuilder(client *databricks.Client) *accountBuilder {
 	return &accountBuilder{
-		client:        client,
-		resourceType:  accountResourceType,
-		resourceCache: resourceCache,
+		client:       client,
+		resourceType: accountResourceType,
 	}
 }

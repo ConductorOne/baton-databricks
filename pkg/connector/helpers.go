@@ -35,43 +35,15 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
 }
 
-type ResourceCache struct {
-	// Map of API IDs to resources
-	resources map[string]*v2.Resource
-	client    *databricks.Client
-}
-
-func (c *ResourceCache) Get(resourceId string) *v2.Resource {
-	return c.resources[resourceId]
-}
-
-func (c *ResourceCache) Set(resourceId string, resource *v2.Resource) {
-	c.resources[resourceId] = resource
-}
-
-func NewResourceCache(client *databricks.Client) *ResourceCache {
-	return &ResourceCache{
-		resources: make(map[string]*v2.Resource),
-		client:    client,
-	}
-}
-
-func (c *ResourceCache) ExpandGrantForGroup(ctx context.Context, workspaceId, groupId string) (*v2.Resource, *v2.GrantExpandable, error) {
-	memberResource := c.Get(groupId)
-	if memberResource == nil {
-		group, _, err := c.client.GetGroup(context.Background(), workspaceId, groupId)
-		if err != nil {
-			return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId, err)
-		}
-		memberResource, err = groupResource(ctx, group, nil)
-		if err != nil {
-			return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId, err)
-		}
-		c.Set(groupId, memberResource)
+func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {
+	groupResourceStr := groupResourceId(ctx, groupId, parentResource)
+	resourceId, err := rs.NewResourceID(groupResourceType, groupResourceStr)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return memberResource, &v2.GrantExpandable{
-		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", memberResource.Id.Resource, groupMemberEntitlement)},
+	return resourceId, &v2.GrantExpandable{
+		EntitlementIds: []string{fmt.Sprintf("group:%s:%s", groupResourceStr, groupMemberEntitlement)},
 	}, nil
 }
 
