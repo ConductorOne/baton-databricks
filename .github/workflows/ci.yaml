@@ -48,8 +48,8 @@ jobs:
       BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
       BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
       # The following parameters are passed to grant/revoke commands
-      CONNECTOR_GRANT: 'group:778441812670942:member:user:5346803201281760'
-      CONNECTOR_ENTITLEMENT: 'group:778441812670942:member'
+      # CONNECTOR_GRANT: 'group:778441812670942:member:user:5346803201281760'
+      CONNECTOR_ENTITLEMENT: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/778441812670942:member'
       CONNECTOR_PRINCIPAL_TYPE: 'user'
       CONNECTOR_PRINCIPAL: '5346803201281760'
     steps:
@@ -63,5 +63,8 @@ jobs:
         run: ./scripts/get-baton.sh && mv baton /usr/local/bin
       - name: Build baton-databricks
         run: go build ./cmd/baton-databricks
-      - name: Run baton-databricks
-        run: ./baton-databricks
+      - name: Test grant/revoking entitlements
+        env:
+          BATON: baton
+          BATON_DATABRICKS: ./baton-databricks
+        run: ./scripts/grant-revoke.sh
