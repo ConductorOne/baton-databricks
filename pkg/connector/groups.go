@@ -273,13 +273,21 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted group permissions")
 	}
 
-	parentId, principalId, err := parseResourceId(principal.Id.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
+	var parentId *v2.ResourceId
+	var principalId *v2.ResourceId
+	var err error
+	if principal.Id.ResourceType == groupResourceType.Id {
+		parentId, principalId, err = parseResourceId(principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
+		}
+	} else {
+		parentId = principal.ParentResourceId
+		principalId = principal.Id
 	}
 
 	var workspaceId string
-	if parentId.ResourceType == workspaceResourceType.Id {
+	if parentId != nil && parentId.ResourceType == workspaceResourceType.Id {
 		workspaceId = parentId.Resource
 	}
 
