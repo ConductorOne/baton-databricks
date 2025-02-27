@@ -17,6 +17,12 @@ set -u
 # Sync
 $BATON_DATABRICKS
 
+$BATON resources
+
+$BATON entitlements
+
+$BATON grants
+
 # Grant entitlement
 $BATON_DATABRICKS --grant-entitlement="$CONNECTOR_ENTITLEMENT" --grant-principal="$CONNECTOR_PRINCIPAL" --grant-principal-type="$CONNECTOR_PRINCIPAL_TYPE"
 

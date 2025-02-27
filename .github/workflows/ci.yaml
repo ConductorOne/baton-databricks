@@ -47,11 +47,6 @@ jobs:
       BATON_ACCOUNT_ID: ${{ secrets.BATON_ACCOUNT_ID }}
       BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
       BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
-      # The following parameters are passed to grant/revoke commands
-      # CONNECTOR_GRANT: 'group:778441812670942:member:user:5346803201281760'
-      CONNECTOR_ENTITLEMENT: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/778441812670942:member'
-      CONNECTOR_PRINCIPAL_TYPE: 'user'
-      CONNECTOR_PRINCIPAL: '5346803201281760'
     steps:
       - name: Install Go
         uses: actions/setup-go@v5
@@ -67,4 +62,7 @@ jobs:
         env:
           BATON: baton
           BATON_DATABRICKS: ./baton-databricks
+          CONNECTOR_ENTITLEMENT: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/66271399072731:member'
+          CONNECTOR_PRINCIPAL_TYPE: 'user'
+          CONNECTOR_PRINCIPAL: '5346803201281760'
         run: ./scripts/grant-revoke.sh
