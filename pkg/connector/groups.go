@@ -395,6 +395,17 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have group permissions revoked")
 	}
 
+	principalId := principal.Id.Resource
+
+	var err error
+	if principal.Id.ResourceType == groupResourceType.Id {
+		_, principal, err := parseResourceId(principal.Id.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
+		}
+		principalId = principal.Resource
+	}
+
 	parentResourceId, groupId, err := parseResourceId(entitlement.Resource.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to parse entitlement resource id: %w", err)
@@ -418,7 +429,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		}
 
 		for i, member := range group.Members {
-			if member.ID == principal.Id.Resource {
+			if member.ID == principalId {
 				group.Members = slices.Delete(group.Members, i, i+1)
 				break
 			}
@@ -444,7 +455,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			return nil, nil
 		}
 
-		principalID, err := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
+		principalId, err := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 		}
@@ -455,12 +466,12 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			}
 
 			// check if it contains the principals and remove the principal to the rule set
-			if slices.Contains(ruleSet.Principals, principalID) {
+			if slices.Contains(ruleSet.Principals, principalId) {
 				// if there is only one principal, remove the whole rule set
 				if len(ruleSet.Principals) == 1 {
 					ruleSets = slices.Delete(ruleSets, i, i+1)
 				} else {
-					pI := slices.Index(ruleSet.Principals, principalID)
+					pI := slices.Index(ruleSet.Principals, principalId)
 					ruleSets[i].Principals = slices.Delete(ruleSet.Principals, pI, pI+1)
 				}
 				break
@@ -468,7 +479,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 
 			l.Info(
 				"databricks-connector: group already does not have the entitlement",
-				zap.String("principal_id", principalID),
+				zap.String("principal_id", principalId),
 				zap.String("entitlement", entitlement.Slug),
 			)
 
