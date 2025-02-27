@@ -42,11 +42,11 @@ jobs:
     env:
       BATON_LOG_LEVEL: debug
       # Add any environment variables needed to run baton-bitbucket-datacenter
-      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      BATON_DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      BATON_DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       BATON_ACCOUNT_ID: ${{ secrets.BATON_ACCOUNT_ID }}
-      BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
-      BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
+      # BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
+      # BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
     steps:
       - name: Install Go
         uses: actions/setup-go@v5
