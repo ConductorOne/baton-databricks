@@ -95,7 +95,13 @@ workspace access tokens to the `--workspace-tokens` flag. This will limit the
 sync to only workspaces that are associated with those tokens. You can also use 
 both flags at the same time. If you do that, connector will sync with all 
 workspaces that are associated with provided tokens and all workspaces that are 
-in the list of workspaces.
+in the list of workspaces.  
+
+## Group povisioning limitations
+provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
+this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.  
+[here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.) are the different types of groups in Databricks 
+
 
 # Contributing, Support and Issues
 
