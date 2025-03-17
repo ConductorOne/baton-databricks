@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -386,6 +387,13 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 
 	_, err = g.client.UpdateRuleSets(ctx, workspaceId, GroupsType, groupId.Resource, ruleSets)
 	if err != nil {
+		if apiErr, ok := err.(*databricks.APIError); ok {
+			if apiErr.StatusCode == http.StatusConflict {
+				if apiErr.Detail == databricks.AlreadyExists {
+					return nil, nil
+				}
+			}
+		}
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
 	}
 
@@ -516,6 +524,13 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 
 	_, err = g.client.UpdateRuleSets(ctx, workspaceId, GroupsType, groupId.Resource, ruleSets)
 	if err != nil {
+		if apiErr, ok := err.(*databricks.APIError); ok {
+			if apiErr.StatusCode == http.StatusConflict {
+				if apiErr.Detail == databricks.AlreadyExists {
+					return nil, nil
+				}
+			}
+		}
 		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
 	}
 
