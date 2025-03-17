@@ -493,7 +493,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 
 	principalId, prepareErr := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
 	if prepareErr != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", prepareErr)
 	}
 
 	for i, ruleSet := range ruleSets {
