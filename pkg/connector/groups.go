@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"errors"
+
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
@@ -387,7 +389,8 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 
 	_, err = g.client.UpdateRuleSets(ctx, workspaceId, GroupsType, groupId.Resource, ruleSets)
 	if err != nil {
-		if apiErr, ok := err.(*databricks.APIError); ok {
+		var apiErr *databricks.APIError
+		if errors.As(err, &apiErr) {
 			if apiErr.StatusCode == http.StatusConflict {
 				if apiErr.Detail == databricks.AlreadyExists {
 					return nil, nil
@@ -524,7 +527,8 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 
 	_, err = g.client.UpdateRuleSets(ctx, workspaceId, GroupsType, groupId.Resource, ruleSets)
 	if err != nil {
-		if apiErr, ok := err.(*databricks.APIError); ok {
+		var apiErr *databricks.APIError
+		if errors.As(err, &apiErr) {
 			if apiErr.StatusCode == http.StatusConflict {
 				if apiErr.Detail == databricks.AlreadyExists {
 					return nil, nil
