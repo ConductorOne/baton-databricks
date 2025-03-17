@@ -19,6 +19,7 @@ import (
 )
 
 const groupMemberEntitlement = "member"
+const groupManagerEntitlement = "roles/group.manager"
 
 type groupBuilder struct {
 	client       *databricks.Client
@@ -133,7 +134,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 // Group can have members, which represent membership entitlements,
 // it can have permissions assigned to it, which represent role permissions entitlements,
 // and it can also have entitlements assigned to it, which are represented in role resource type.
-func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
+func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
 	var rv []*v2.Entitlement
 
 	var workspaceId string
@@ -157,7 +158,7 @@ func (g *groupBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 
 	// role permissions entitlements
 	// get all assignable roles for this specific group resource
-	roles, _, err := g.client.ListRoles(context.Background(), workspaceId, GroupsType, groupId.Resource)
+	roles, _, err := g.client.ListRoles(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list roles for group %s: %w", groupId.Resource, err)
 	}
@@ -299,8 +300,9 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 		workspaceId = parentGroupId.Resource
 	}
 
-	// If the entitlement is a member entitlement
-	if entitlement.Slug == groupMemberEntitlement {
+	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
+	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
+	if entitlement.Id == membershipEntitlementID {
 		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
@@ -311,7 +313,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 				l.Info(
 					"databricks-connector: group already has the member added",
 					zap.String("principal_id", principal.Id.Resource),
-					zap.String("entitlement", entitlement.Slug),
+					zap.String("entitlement", groupMemberEntitlement),
 				)
 
 				return nil, nil
@@ -342,10 +344,21 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}
 
+	role := groupManagerEntitlement
+	if workspaceId == "" && entitlement.Id != managerEntitlementID {
+		return nil, fmt.Errorf("databricks-connector: only group manager entitlement is supported for role permissions for group %s", groupId.Resource)
+	} else if workspaceId != "" {
+		role = entitlement.Slug
+	}
+
+	if role == "" {
+		return nil, fmt.Errorf("databricks-connector: role is empty")
+	}
+
 	found := false
 
 	for i, ruleSet := range ruleSets {
-		if ruleSet.Role == entitlement.Slug {
+		if ruleSet.Role == role {
 			found = true
 
 			// check if it contains the principals and add principal to the rule set
@@ -353,7 +366,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 				l.Info(
 					"databricks-connector: group already has the entitlement",
 					zap.String("principal_id", principalID),
-					zap.String("entitlement", entitlement.Slug),
+					zap.String("entitlement", role),
 				)
 
 				return nil, nil
@@ -366,7 +379,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 
 	if !found {
 		ruleSets = append(ruleSets, databricks.RuleSet{
-			Role:       entitlement.Slug,
+			Role:       role,
 			Principals: []string{principalID},
 		})
 	}
@@ -422,7 +435,9 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		workspaceId = parentID
 	}
 
-	if entitlement.Slug == groupMemberEntitlement {
+	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
+	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
+	if entitlement.Id == membershipEntitlementID {
 		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
@@ -439,57 +454,69 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupId.Resource, err)
 		}
-	} else {
-		ruleSets, _, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
-		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to list rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
+		return nil, nil
+	}
+
+	role := groupManagerEntitlement
+	if workspaceId == "" && entitlement.Id != managerEntitlementID {
+		return nil, fmt.Errorf("databricks-connector: only group manager entitlement is supported for role permissions for group %s", groupId.Resource)
+	} else if workspaceId != "" {
+		role = entitlement.Slug
+	}
+
+	if role == "" {
+		return nil, fmt.Errorf("databricks-connector: role is empty")
+	}
+
+	ruleSets, _, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to list rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
+	}
+
+	if len(ruleSets) == 0 {
+		l.Info(
+			"databricks-connector: group already does not have the entitlement",
+			zap.String("principal_id", principal.Id.Resource),
+			zap.String("entitlement", role),
+		)
+
+		return nil, nil
+	}
+
+	principalId, prepareErr := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
+	if prepareErr != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
+	}
+
+	for i, ruleSet := range ruleSets {
+		if ruleSet.Role != role {
+			continue
 		}
 
-		if len(ruleSets) == 0 {
-			l.Info(
-				"databricks-connector: group already does not have the entitlement",
-				zap.String("principal_id", principal.Id.Resource),
-				zap.String("entitlement", entitlement.Slug),
-			)
-
-			return nil, nil
-		}
-
-		principalId, err := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
-		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
-		}
-
-		for i, ruleSet := range ruleSets {
-			if ruleSet.Role != entitlement.Slug {
-				continue
+		// check if it contains the principals and remove the principal to the rule set
+		if slices.Contains(ruleSet.Principals, principalId) {
+			// if there is only one principal, remove the whole rule set
+			if len(ruleSet.Principals) == 1 {
+				ruleSets = slices.Delete(ruleSets, i, i+1)
+			} else {
+				pI := slices.Index(ruleSet.Principals, principalId)
+				ruleSets[i].Principals = slices.Delete(ruleSet.Principals, pI, pI+1)
 			}
-
-			// check if it contains the principals and remove the principal to the rule set
-			if slices.Contains(ruleSet.Principals, principalId) {
-				// if there is only one principal, remove the whole rule set
-				if len(ruleSet.Principals) == 1 {
-					ruleSets = slices.Delete(ruleSets, i, i+1)
-				} else {
-					pI := slices.Index(ruleSet.Principals, principalId)
-					ruleSets[i].Principals = slices.Delete(ruleSet.Principals, pI, pI+1)
-				}
-				break
-			}
-
-			l.Info(
-				"databricks-connector: group already does not have the entitlement",
-				zap.String("principal_id", principalId),
-				zap.String("entitlement", entitlement.Slug),
-			)
-
-			return nil, nil
+			break
 		}
 
-		_, err = g.client.UpdateRuleSets(ctx, workspaceId, GroupsType, groupId.Resource, ruleSets)
-		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to update rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
-		}
+		l.Info(
+			"databricks-connector: group already does not have the entitlement",
+			zap.String("principal_id", principalId),
+			zap.String("entitlement", role),
+		)
+
+		return nil, nil
+	}
+
+	_, err = g.client.UpdateRuleSets(ctx, workspaceId, GroupsType, groupId.Resource, ruleSets)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to update rule sets for group %s (%s): %w", principal.Id.Resource, groupId.Resource, err)
 	}
 
 	return nil, nil

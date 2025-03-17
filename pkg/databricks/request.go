@@ -10,6 +10,8 @@ import (
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
 
 func (c *Client) Get(
@@ -110,6 +112,8 @@ func (c *Client) doRequest(
 	defer resp.Body.Close()
 
 	if err == nil {
+		l := ctxzap.Extract(ctx)
+		l.Debug("do request response", zap.Any("response", response))
 		return ratelimitData, nil
 	}
 
