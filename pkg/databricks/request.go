@@ -10,7 +10,35 @@ import (
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
+
+const (
+	AlreadyExists = "AlreadyExists"
+)
+
+// APIError represents an error response from the Databricks API.
+type APIError struct {
+	StatusCode int
+	Detail     string
+	Message    string
+	Err        error
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf(
+		"unexpected status code %d: %s %s %v",
+		e.StatusCode,
+		e.Detail,
+		e.Message,
+		e.Err,
+	)
+}
+
+func (e *APIError) Unwrap() error {
+	return e.Err
+}
 
 func (c *Client) Get(
 	ctx context.Context,
@@ -110,6 +138,8 @@ func (c *Client) doRequest(
 	defer resp.Body.Close()
 
 	if err == nil {
+		l := ctxzap.Extract(ctx)
+		l.Debug("do request response", zap.Any("response", response))
 		return ratelimitData, nil
 	}
 
@@ -121,11 +151,10 @@ func (c *Client) doRequest(
 		return nil, err
 	}
 
-	return ratelimitData, fmt.Errorf(
-		"unexpected status code %d: %s %s %w",
-		resp.StatusCode,
-		errorResponse.Detail,
-		errorResponse.Message,
-		err,
-	)
+	return ratelimitData, &APIError{
+		StatusCode: resp.StatusCode,
+		Detail:     errorResponse.Detail,
+		Message:    errorResponse.Message,
+		Err:        err,
+	}
 }
