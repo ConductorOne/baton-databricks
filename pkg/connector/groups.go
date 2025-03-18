@@ -454,11 +454,16 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
+		indexToDelete := -1
 		for i, member := range group.Members {
 			if member.ID == principalId {
-				group.Members = slices.Delete(group.Members, i, i+1)
+				indexToDelete = i
 				break
 			}
+		}
+
+		if indexToDelete != -1 {
+			group.Members = slices.Delete(group.Members, indexToDelete, indexToDelete+1)
 		}
 
 		_, err = g.client.UpdateGroup(ctx, workspaceId, group)
