@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultHost = "cloud.databricks.com"
+	defaultHost = "cloud.databricks.com" // aws
 	azureHost   = "azuredatabricks.net"
 	gcpHost     = "gcp.databricks.net"
 
@@ -644,4 +644,49 @@ func (c *Client) UpdateRuleSets(
 	}
 
 	return c.Put(ctx, u, payload, nil, NewNameVars(resourcePayload, c.etag))
+}
+
+type Name struct {
+	GivenName  string `json:"givenName"`
+	FamilyName string `json:"familyName"`
+}
+
+type CreateUserBody struct {
+	// this is actually the email:
+	//	https://docs.databricks.com/api/account/accountusers/create#userName
+	UserName    string `json:"userName"`
+	Name        Name   `json:"name"`
+	Id          string `json:"id,omitempty"` // Not currently supported, reserved for future use.
+	Active      bool   `json:"active"`
+	DisplayName string `json:"displayName"`
+
+	// Not currently supported, reserved for future use.
+	externalId string
+}
+
+type CreateUserResponse CreateUserBody
+
+// https://docs.databricks.com/api/account/accountusers/create
+func (c *Client) CreateUser(
+	ctx context.Context,
+	workspaceId string,
+	body *CreateUserBody,
+) (
+	*CreateUserResponse,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId))
+	} else {
+		return nil, nil, fmt.Errorf("creating users is not implemented yet for workspaces")
+	}
+
+	var res CreateUserResponse
+	ratelimitData, err := c.Post(ctx, u, body, &res)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+	return &res, ratelimitData, nil
 }

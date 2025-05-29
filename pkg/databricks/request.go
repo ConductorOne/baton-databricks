@@ -73,6 +73,23 @@ func (c *Client) Put(
 	)
 }
 
+func (c *Client) Post(
+	ctx context.Context,
+	urlAddress *url.URL,
+	body interface{},
+	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequest(
+		ctx,
+		urlAddress,
+		http.MethodPost,
+		body,
+		response,
+		params...,
+	)
+}
+
 func parseJSON(body io.Reader, res interface{}) error {
 	// Databricks seems to return content-type text/plain even though it's json,
 	// so don't check content type.
