@@ -230,6 +230,14 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	}, nil, nil, nil
 }
 
+func (o *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (annotations.Annotations, error) {
+	_, err := o.client.DeleteUser(ctx, "", resourceId.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("baton-databricks: failed to delete user: %w", err)
+	}
+	return nil, nil
+}
+
 func newUserBuilder(client *databricks.Client) *userBuilder {
 	return &userBuilder{
 		client:       client,

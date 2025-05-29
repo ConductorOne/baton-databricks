@@ -27,9 +27,12 @@ type fullSyncHelpers interface {
 }
 
 type fullSyncTaskHandler struct {
-	task         *v1.Task
-	helpers      fullSyncHelpers
-	skipFullSync bool
+	task                                *v1.Task
+	helpers                             fullSyncHelpers
+	skipFullSync                        bool
+	externalResourceC1ZPath             string
+	externalResourceEntitlementIdFilter string
+	targetedSyncResourceIDs             []string
 }
 
 func (c *fullSyncTaskHandler) sync(ctx context.Context, c1zPath string) error {
@@ -43,8 +46,20 @@ func (c *fullSyncTaskHandler) sync(ctx context.Context, c1zPath string) error {
 		sdkSync.WithTmpDir(c.helpers.TempDir()),
 	}
 
+	if c.externalResourceC1ZPath != "" {
+		syncOpts = append(syncOpts, sdkSync.WithExternalResourceC1ZPath(c.externalResourceC1ZPath))
+	}
+
+	if c.externalResourceEntitlementIdFilter != "" {
+		syncOpts = append(syncOpts, sdkSync.WithExternalResourceEntitlementIdFilter(c.externalResourceEntitlementIdFilter))
+	}
+
 	if c.skipFullSync {
 		syncOpts = append(syncOpts, sdkSync.WithSkipFullSync())
+	}
+
+	if len(c.targetedSyncResourceIDs) > 0 {
+		syncOpts = append(syncOpts, sdkSync.WithTargetedSyncResourceIDs(c.targetedSyncResourceIDs))
 	}
 
 	syncer, err := sdkSync.NewSyncer(ctx, c.helpers.ConnectorClient(), syncOpts...)
@@ -146,11 +161,21 @@ func (c *fullSyncTaskHandler) HandleTask(ctx context.Context) error {
 	return c.helpers.FinishTask(ctx, nil, nil, nil)
 }
 
-func newFullSyncTaskHandler(task *v1.Task, helpers fullSyncHelpers, skipFullSync bool) tasks.TaskHandler {
+func newFullSyncTaskHandler(
+	task *v1.Task,
+	helpers fullSyncHelpers,
+	skipFullSync bool,
+	externalResourceC1ZPath string,
+	externalResourceEntitlementIdFilter string,
+	targetedSyncResourceIDs []string,
+) tasks.TaskHandler {
 	return &fullSyncTaskHandler{
-		task:         task,
-		helpers:      helpers,
-		skipFullSync: skipFullSync,
+		task:                                task,
+		helpers:                             helpers,
+		skipFullSync:                        skipFullSync,
+		externalResourceC1ZPath:             externalResourceC1ZPath,
+		externalResourceEntitlementIdFilter: externalResourceEntitlementIdFilter,
+		targetedSyncResourceIDs:             targetedSyncResourceIDs,
 	}
 }
 
@@ -160,15 +185,33 @@ func uploadDebugLogs(ctx context.Context, helper fullSyncHelpers) error {
 
 	l := ctxzap.Extract(ctx)
 
-	debugfilelocation := filepath.Join(helper.TempDir(), "debug.log")
+	tempDir := helper.TempDir()
+	if tempDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			l.Warn("unable to get the current working directory", zap.Error(err))
+		}
+		if wd != "" {
+			l.Warn("no temporal folder found on this system according to our sync helper,"+
+				" we may create files in the current working directory by mistake as a result",
+				zap.String("current working directory", wd))
+		} else {
+			l.Warn("no temporal folder found on this system according to our sync helper")
+		}
+	}
+	debugfilelocation := filepath.Join(tempDir, "debug.log")
 
 	_, err := os.Stat(debugfilelocation)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
 			l.Warn("debug log file does not exists", zap.Error(err))
-			return nil
+		case errors.Is(err, os.ErrPermission):
+			l.Warn("debug log file cannot be stat'd due to lack of permissions", zap.Error(err))
+		default:
+			l.Warn("cannot stat debug log file", zap.Error(err))
 		}
-		return err
+		return nil
 	} else {
 		debugfile, err := os.Open(debugfilelocation)
 		if err != nil {
@@ -178,7 +221,6 @@ func uploadDebugLogs(ctx context.Context, helper fullSyncHelpers) error {
 
 		l.Info("uploading debug logs", zap.String("file", debugfilelocation))
 		err = helper.Upload(ctx, debugfile)
-
 		if err != nil {
 			return err
 		}

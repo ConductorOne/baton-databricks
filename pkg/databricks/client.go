@@ -690,3 +690,26 @@ func (c *Client) CreateUser(
 	}
 	return &res, ratelimitData, nil
 }
+
+// https://docs.databricks.com/api/account/accountusers/delete
+func (c *Client) DeleteUser(
+	ctx context.Context,
+	workspaceId string,
+	userId string,
+) (
+	*v2.RateLimitDescription,
+	error,
+) {
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint+"/%s", c.accountId, userId))
+	} else {
+		return nil, fmt.Errorf("deleting users is not implemented yet for workspaces")
+	}
+
+	ratelimitData, err := c.Delete(ctx, u)
+	if err != nil {
+		return ratelimitData, err
+	}
+	return ratelimitData, nil
+}
