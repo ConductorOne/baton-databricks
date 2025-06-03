@@ -9,7 +9,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
-	resourceSdk "github.com/conductorone/baton-sdk/pkg/types/resource"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
@@ -211,12 +210,12 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user: %w", err)
 	}
 
-	user, _, err := o.client.GetUser(ctx, "", fmt.Sprintf("%d", res.Id))
+	user, _, err := o.client.GetUser(ctx, "", res.Id)
 	if err != nil {
-		return &v2.CreateAccountResponse_ActionRequiredResult{}, nil, nil, nil
+		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to get user after creation: %w", err)
 	}
 
-	parentResourceId, err := resourceSdk.NewResourceID(accountResourceType, o.client.GetAccountId())
+	parentResourceId, err := rs.NewResourceID(accountResourceType, o.client.GetAccountId())
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create resource ID for account: %w", err)
 	}

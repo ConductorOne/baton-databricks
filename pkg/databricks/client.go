@@ -659,9 +659,6 @@ type CreateUserBody struct {
 	Id          string `json:"id,omitempty"` // Not currently supported, reserved for future use.
 	Active      bool   `json:"active"`
 	DisplayName string `json:"displayName"`
-
-	// Not currently supported, reserved for future use.
-	externalId string
 }
 
 type CreateUserResponse CreateUserBody
