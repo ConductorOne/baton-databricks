@@ -27,6 +27,10 @@ type State interface {
 	Unmarshal(input string) error
 	NeedsExpansion() bool
 	SetNeedsExpansion()
+	HasExternalResourcesGrants() bool
+	SetHasExternalResourcesGrants()
+	ShouldFetchRelatedResources() bool
+	SetShouldFetchRelatedResources()
 }
 
 // ActionOp represents a sync operation.
@@ -45,10 +49,14 @@ func (s ActionOp) String() string {
 		return "list-entitlements"
 	case SyncGrantsOp:
 		return "list-grants"
+	case SyncExternalResourcesOp:
+		return "list-external-resources"
 	case SyncAssetsOp:
 		return "fetch-assets"
 	case SyncGrantExpansionOp:
 		return "grant-expansion"
+	case SyncTargetedResourceOp:
+		return "targeted-resource-sync"
 	default:
 		return "unknown"
 	}
@@ -88,6 +96,10 @@ func newActionOp(str string) ActionOp {
 		return SyncAssetsOp
 	case SyncGrantExpansionOp.String():
 		return SyncGrantExpansionOp
+	case SyncExternalResourcesOp.String():
+		return SyncExternalResourcesOp
+	case SyncTargetedResourceOp.String():
+		return SyncTargetedResourceOp
 	default:
 		return UnknownOp
 	}
@@ -101,8 +113,10 @@ const (
 	SyncEntitlementsOp
 	ListResourcesForEntitlementsOp
 	SyncGrantsOp
+	SyncExternalResourcesOp
 	SyncAssetsOp
 	SyncGrantExpansionOp
+	SyncTargetedResourceOp
 )
 
 // Action stores the current operation, page token, and optional fields for which resource is being worked with.
@@ -117,20 +131,24 @@ type Action struct {
 
 // state is an object used for tracking the current status of a connector sync. It operates like a stack.
 type state struct {
-	mtx              sync.RWMutex
-	actions          []Action
-	currentAction    *Action
-	entitlementGraph *expand.EntitlementGraph
-	needsExpansion   bool
+	mtx                         sync.RWMutex
+	actions                     []Action
+	currentAction               *Action
+	entitlementGraph            *expand.EntitlementGraph
+	needsExpansion              bool
+	hasExternalResourceGrants   bool
+	shouldFetchRelatedResources bool
 }
 
 // serializedToken is used to serialize the token to JSON. This separate object is used to avoid having exported fields
 // on the object used externally. We should interface this, probably.
 type serializedToken struct {
-	Actions          []Action                 `json:"actions"`
-	CurrentAction    *Action                  `json:"current_action"`
-	NeedsExpansion   bool                     `json:"needs_expansion"`
-	EntitlementGraph *expand.EntitlementGraph `json:"entitlement_graph"`
+	Actions                     []Action                 `json:"actions"`
+	CurrentAction               *Action                  `json:"current_action"`
+	NeedsExpansion              bool                     `json:"needs_expansion"`
+	EntitlementGraph            *expand.EntitlementGraph `json:"entitlement_graph"`
+	HasExternalResourceGrants   bool                     `json:"has_external_resource_grants"`
+	ShouldFetchRelatedResources bool                     `json:"should_fetch_related_resources"`
 }
 
 // push adds a new action to the stack. If there is no current state, the action is directly set to current, else
@@ -199,6 +217,7 @@ func (st *state) Unmarshal(input string) error {
 		st.actions = token.Actions
 		st.currentAction = token.CurrentAction
 		st.needsExpansion = token.NeedsExpansion
+		st.hasExternalResourceGrants = token.HasExternalResourceGrants
 	} else {
 		st.actions = nil
 		st.entitlementGraph = nil
@@ -214,10 +233,11 @@ func (st *state) Marshal() (string, error) {
 	defer st.mtx.RUnlock()
 
 	data, err := json.Marshal(serializedToken{
-		Actions:          st.actions,
-		CurrentAction:    st.currentAction,
-		NeedsExpansion:   st.needsExpansion,
-		EntitlementGraph: st.entitlementGraph,
+		Actions:                   st.actions,
+		CurrentAction:             st.currentAction,
+		NeedsExpansion:            st.needsExpansion,
+		EntitlementGraph:          st.entitlementGraph,
+		HasExternalResourceGrants: st.hasExternalResourceGrants,
 	})
 	if err != nil {
 		return "", err
@@ -260,6 +280,22 @@ func (st *state) NeedsExpansion() bool {
 
 func (st *state) SetNeedsExpansion() {
 	st.needsExpansion = true
+}
+
+func (st *state) HasExternalResourcesGrants() bool {
+	return st.hasExternalResourceGrants
+}
+
+func (st *state) SetHasExternalResourcesGrants() {
+	st.hasExternalResourceGrants = true
+}
+
+func (st *state) ShouldFetchRelatedResources() bool {
+	return st.shouldFetchRelatedResources
+}
+
+func (st *state) SetShouldFetchRelatedResources() {
+	st.shouldFetchRelatedResources = true
 }
 
 // PageToken returns the page token for the current action.
