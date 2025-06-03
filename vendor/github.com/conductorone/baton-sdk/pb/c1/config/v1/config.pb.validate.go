@@ -135,10 +135,6 @@ func (m *Configuration) validate(all bool) error {
 
 	// no validation rules for CatalogId
 
-	// no validation rules for SupportsExternalResources
-
-	// no validation rules for RequiresExternalConnector
-
 	if len(errors) > 0 {
 		return ConfigurationMultiError(errors)
 	}
