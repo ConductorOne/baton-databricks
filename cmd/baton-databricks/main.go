@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/conductorone/baton-databricks/pkg/config"
+	"github.com/conductorone/baton-databricks/cmd/baton-databricks/config"
 	configSchema "github.com/conductorone/baton-sdk/pkg/config"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/types"

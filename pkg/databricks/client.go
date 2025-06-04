@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/conductorone/baton-databricks/pkg/config"
+	"github.com/conductorone/baton-databricks/cmd/baton-databricks/config"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/spf13/viper"
