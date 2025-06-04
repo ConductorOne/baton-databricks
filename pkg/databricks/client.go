@@ -7,16 +7,13 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/conductorone/baton-databricks/cmd/baton-databricks/config"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
-	"github.com/spf13/viper"
 )
 
 const (
-	defaultHost = "cloud.databricks.com"
-	azureHost   = "azuredatabricks.net"
-	gcpHost     = "gcp.databricks.net"
+	azureHost = "azuredatabricks.net"
+	gcpHost   = "gcp.databricks.net"
 
 	// Some of these are case sensitive.
 	usersEndpoint             = "/api/2.0/preview/scim/v2/Users"
@@ -45,13 +42,6 @@ type Client struct {
 
 	isAccAPIAvailable bool
 	isWSAPIAvailable  bool
-}
-
-func GetHostname(cfg *viper.Viper) string {
-	if cfg.GetString(config.HostnameField.FieldName) == "" {
-		return defaultHost
-	}
-	return cfg.GetString(config.HostnameField.FieldName)
 }
 
 func GetAccountHostname(hostname string) string {

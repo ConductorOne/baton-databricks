@@ -20,6 +20,7 @@ import (
 var (
 	connectorName = "baton-databricks"
 	version       = "dev"
+	defaultHost   = "cloud.databricks.com"
 )
 
 func main() {
@@ -58,7 +59,7 @@ func prepareClientAuth(ctx context.Context, cfg *viper.Viper) databricks.Auth {
 	password := cfg.GetString(config.PasswordField.FieldName)
 	workspaces := cfg.GetStringSlice(config.WorkspacesField.FieldName)
 	tokens := cfg.GetStringSlice(config.TokensField.FieldName)
-	accountHostname := databricks.GetAccountHostname(databricks.GetHostname(cfg))
+	accountHostname := databricks.GetAccountHostname(getHostname(cfg))
 
 	switch {
 	case username != "" && password != "":
@@ -108,8 +109,8 @@ func getConnector(ctx context.Context, cfg *viper.Viper) (types.ConnectorServer,
 		return nil, err
 	}
 
-	hostname := databricks.GetHostname(cfg)
-	accountHostname := databricks.GetAccountHostname(databricks.GetHostname(cfg))
+	hostname := getHostname(cfg)
+	accountHostname := databricks.GetAccountHostname(getHostname(cfg))
 	auth := prepareClientAuth(ctx, cfg)
 	cb, err := connector.New(
 		ctx,
@@ -131,4 +132,11 @@ func getConnector(ctx context.Context, cfg *viper.Viper) (types.ConnectorServer,
 	}
 
 	return c, nil
+}
+
+func getHostname(cfg *viper.Viper) string {
+	if cfg.GetString(config.HostnameField.FieldName) == "" {
+		return defaultHost
+	}
+	return cfg.GetString(config.HostnameField.FieldName)
 }
