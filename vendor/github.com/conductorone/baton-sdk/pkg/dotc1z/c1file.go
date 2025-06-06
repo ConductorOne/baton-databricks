@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/doug-martin/goqu/v9"
 	// NOTE: required to register the dialect for goqu.
@@ -36,6 +38,12 @@ type C1File struct {
 	dbUpdated      bool
 	tempDir        string
 	pragmas        []pragma
+
+	// Slow query tracking
+	slowQueryLogTimes     map[string]time.Time
+	slowQueryLogTimesMu   sync.Mutex
+	slowQueryThreshold    time.Duration
+	slowQueryLogFrequency time.Duration
 }
 
 var _ connectorstore.Writer = (*C1File)(nil)
@@ -67,9 +75,13 @@ func NewC1File(ctx context.Context, dbFilePath string, opts ...C1FOption) (*C1Fi
 	db := goqu.New("sqlite3", rawDB)
 
 	c1File := &C1File{
-		rawDb:      rawDB,
-		db:         db,
-		dbFilePath: dbFilePath,
+		rawDb:                 rawDB,
+		db:                    db,
+		dbFilePath:            dbFilePath,
+		pragmas:               []pragma{},
+		slowQueryLogTimes:     make(map[string]time.Time),
+		slowQueryThreshold:    5 * time.Second,
+		slowQueryLogFrequency: 1 * time.Minute,
 	}
 
 	for _, opt := range opts {
@@ -77,6 +89,11 @@ func NewC1File(ctx context.Context, dbFilePath string, opts ...C1FOption) (*C1Fi
 	}
 
 	err = c1File.validateDb(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c1File.init(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -129,11 +146,6 @@ func NewC1ZFile(ctx context.Context, outputFilePath string, opts ...C1ZOption) (
 
 	c1File.outputFilePath = outputFilePath
 
-	err = c1File.init(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	return c1File, nil
 }
 
@@ -180,8 +192,11 @@ func (c *C1File) init(ctx context.Context) error {
 
 	for _, t := range allTableDescriptors {
 		query, args := t.Schema()
-
 		_, err = c.db.ExecContext(ctx, fmt.Sprintf(query, args...))
+		if err != nil {
+			return err
+		}
+		err = t.Migrations(ctx, c.db)
 		if err != nil {
 			return err
 		}
@@ -275,4 +290,11 @@ func (c *C1File) validateSyncDb(ctx context.Context) error {
 	}
 
 	return c.validateDb(ctx)
+}
+
+func (c *C1File) OutputFilepath() (string, error) {
+	if c.outputFilePath == "" {
+		return "", fmt.Errorf("c1file: output file path is empty")
+	}
+	return c.outputFilePath, nil
 }
