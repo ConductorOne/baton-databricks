@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"syscall"
 	"time"
 
@@ -249,6 +250,50 @@ func WithResponse(response interface{}) DoOption {
 	}
 }
 
+// Handle anything that can be marshaled into JSON or XML.
+// If the response is a list, its values will be put into the "items" field.
+func WithGenericResponse(response *map[string]any) DoOption {
+	return func(resp *WrapperResponse) error {
+		if response == nil {
+			return status.Error(codes.InvalidArgument, "response is nil")
+		}
+		var v any
+		var err error
+
+		if IsJSONContentType(resp.Header.Get(ContentType)) {
+			err = WithJSONResponse(&v)(resp)
+			if err != nil {
+				return err
+			}
+			if list, ok := v.([]any); ok {
+				(*response)["items"] = list
+			} else if vMap, ok := v.(map[string]any); ok {
+				*response = vMap
+			} else {
+				return status.Errorf(codes.Internal, "unsupported content type: %s", reflect.TypeOf(v))
+			}
+			return nil
+		}
+
+		if IsXMLContentType(resp.Header.Get(ContentType)) {
+			err = WithXMLResponse(response)(resp)
+			if err != nil {
+				return err
+			}
+			if list, ok := v.([]any); ok {
+				(*response)["items"] = list
+			} else if vMap, ok := v.(map[string]any); ok {
+				*response = vMap
+			} else {
+				return status.Errorf(codes.Internal, "unsupported content type: %s", reflect.TypeOf(v))
+			}
+			return nil
+		}
+
+		return status.Error(codes.Unknown, "unsupported content type")
+	}
+}
+
 func WrapErrors(preferredCode codes.Code, statusMsg string, errs ...error) error {
 	st := status.New(preferredCode, statusMsg)
 
@@ -402,6 +447,12 @@ func WithHeader(key, value string) RequestOption {
 	}
 }
 
+func WithBody(body []byte) RequestOption {
+	return func() (io.ReadWriter, map[string]string, error) {
+		return bytes.NewBuffer(body), nil, nil
+	}
+}
+
 func WithJSONBody(body interface{}) RequestOption {
 	return func() (io.ReadWriter, map[string]string, error) {
 		buffer := new(bytes.Buffer)
@@ -436,6 +487,24 @@ func WithFormBody(body string) RequestOption {
 	}
 }
 
+func WithXMLBody(body interface{}) RequestOption {
+	return func() (io.ReadWriter, map[string]string, error) {
+		var buffer bytes.Buffer
+
+		err := xml.NewEncoder(&buffer).Encode(body)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		_, headers, err := WithContentTypeXMLHeader()()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return &buffer, headers, nil
+	}
+}
+
 func WithAcceptJSONHeader() RequestOption {
 	return WithAccept(applicationJSON)
 }
@@ -446,6 +515,10 @@ func WithContentTypeJSONHeader() RequestOption {
 
 func WithAcceptXMLHeader() RequestOption {
 	return WithAccept(applicationXML)
+}
+
+func WithContentTypeXMLHeader() RequestOption {
+	return WithContentType(applicationXML)
 }
 
 func WithContentTypeFormHeader() RequestOption {

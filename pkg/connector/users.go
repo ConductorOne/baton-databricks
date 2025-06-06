@@ -7,6 +7,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
@@ -154,6 +155,86 @@ func (u *userBuilder) Grants(
 	error,
 ) {
 	return nil, "", nil, nil
+}
+
+func (o *userBuilder) CreateAccountCapabilityDetails(ctx context.Context) (*v2.CredentialDetailsAccountProvisioning, annotations.Annotations, error) {
+	return &v2.CredentialDetailsAccountProvisioning{
+		SupportedCredentialOptions: []v2.CapabilityDetailCredentialOption{
+			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_NO_PASSWORD,
+		},
+		PreferredCredentialOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_NO_PASSWORD,
+	}, nil, nil
+}
+
+func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.AccountInfo, credentialOptions *v2.CredentialOptions) (
+	connectorbuilder.CreateAccountResponse,
+	[]*v2.PlaintextData,
+	annotations.Annotations,
+	error,
+) {
+	pMap := accountInfo.Profile.AsMap()
+	body := &databricks.CreateUserBody{}
+
+	if username, ok := pMap["userName"]; ok {
+		if username == "" {
+			return nil, nil, nil, fmt.Errorf("baton-databricks: username is required to create a user")
+		}
+		body.UserName = username.(string)
+	}
+
+	if displayName, ok := pMap["displayName"]; ok {
+		if displayName == "" {
+			return nil, nil, nil, fmt.Errorf("baton-databricks: displayName is required to create a user")
+		}
+		body.DisplayName = displayName.(string)
+	}
+
+	if name, ok := pMap["familyName"]; ok {
+		body.Name.FamilyName = name.(string)
+	}
+
+	if name, ok := pMap["givenName"]; ok {
+		body.Name.GivenName = name.(string)
+	}
+
+	if id, ok := pMap["id"]; ok {
+		body.Id = id.(string)
+	}
+
+	if active, ok := pMap["active"]; ok {
+		body.Active = active.(bool)
+	}
+
+	res, _, err := o.client.CreateUser(ctx, "", body)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user: %w", err)
+	}
+
+	user, _, err := o.client.GetUser(ctx, "", res.Id)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to get user after creation: %w", err)
+	}
+
+	parentResourceId, err := rs.NewResourceID(accountResourceType, o.client.GetAccountId())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create resource ID for account: %w", err)
+	}
+	resource, err := o.userResource(ctx, user, parentResourceId)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user resource: %w", err)
+	}
+
+	return &v2.CreateAccountResponse_ActionRequiredResult{
+		Resource: resource,
+	}, nil, nil, nil
+}
+
+func (o *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (annotations.Annotations, error) {
+	_, err := o.client.DeleteUser(ctx, "", resourceId.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("baton-databricks: failed to delete user: %w", err)
+	}
+	return nil, nil
 }
 
 func newUserBuilder(client *databricks.Client) *userBuilder {

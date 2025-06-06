@@ -73,6 +73,37 @@ func (c *Client) Put(
 	)
 }
 
+func (c *Client) Post(
+	ctx context.Context,
+	urlAddress *url.URL,
+	body interface{},
+	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequest(
+		ctx,
+		urlAddress,
+		http.MethodPost,
+		body,
+		response,
+		params...,
+	)
+}
+
+func (c *Client) Delete(
+	ctx context.Context,
+	urlAddress *url.URL,
+) (*v2.RateLimitDescription, error) {
+	response := struct{}{}
+	return c.doRequestNoResponse(
+		ctx,
+		urlAddress,
+		http.MethodDelete,
+		nil,
+		response,
+	)
+}
+
 func parseJSON(body io.Reader, res interface{}) error {
 	// Databricks seems to return content-type text/plain even though it's json,
 	// so don't check content type.
@@ -155,6 +186,70 @@ func (c *Client) doRequest(
 		StatusCode: resp.StatusCode,
 		Detail:     errorResponse.Detail,
 		Message:    errorResponse.Message,
+		Err:        err,
+	}
+}
+
+func (c *Client) doRequestNoResponse(
+	ctx context.Context,
+	urlAddress *url.URL,
+	method string,
+	body interface{},
+	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	u, err := url.PathUnescape(urlAddress.String())
+	if err != nil {
+		return nil, err
+	}
+
+	uri, err := url.Parse(u)
+	if err != nil {
+		return nil, err
+	}
+
+	options := []uhttp.RequestOption{
+		uhttp.WithAcceptJSONHeader(),
+	}
+	if body != nil {
+		options = append(options, uhttp.WithJSONBody(body))
+	}
+
+	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(params) > 0 {
+		query := url.Values{}
+		for _, param := range params {
+			param.Apply(&query)
+		}
+
+		req.URL.RawQuery = query.Encode()
+	}
+
+	c.auth.Apply(req)
+
+	ratelimitData := &v2.RateLimitDescription{}
+	resp, err := c.httpClient.Do(
+		req,
+		uhttp.WithRatelimitData(ratelimitData),
+	)
+	if resp == nil {
+		return ratelimitData, err
+	}
+
+	defer resp.Body.Close()
+
+	if err == nil {
+		l := ctxzap.Extract(ctx)
+		l.Debug("do request response", zap.Any("response", response))
+		return ratelimitData, nil
+	}
+
+	return ratelimitData, &APIError{
+		StatusCode: resp.StatusCode,
 		Err:        err,
 	}
 }

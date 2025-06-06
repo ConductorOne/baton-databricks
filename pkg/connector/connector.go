@@ -39,6 +39,60 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton",
+		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
+			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
+				"userName": {
+					DisplayName: "Email",
+					Required:    true,
+					Description: "The email address of the user.",
+					Field: &v2.ConnectorAccountCreationSchema_Field_StringField{
+						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
+					},
+					Placeholder: "Email",
+					Order:       1,
+				},
+				"displayName": {
+					DisplayName: "Display Name",
+					Required:    true,
+					Description: "User's display name",
+					Field: &v2.ConnectorAccountCreationSchema_Field_StringField{
+						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
+					},
+					Placeholder: "Display Name",
+					Order:       4,
+				},
+				"givenName": {
+					DisplayName: "Given Name",
+					Required:    false,
+					Description: "User's given name",
+					Field: &v2.ConnectorAccountCreationSchema_Field_StringField{
+						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
+					},
+					Placeholder: "Given Name",
+					Order:       2,
+				},
+				"familyName": {
+					DisplayName: "Family Name",
+					Required:    false,
+					Description: "User's family name",
+					Field: &v2.ConnectorAccountCreationSchema_Field_StringField{
+						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
+					},
+					Placeholder: "Family Name",
+					Order:       3,
+				},
+				"active": {
+					DisplayName: "Active",
+					Required:    false,
+					Description: "if the user is active",
+					Field: &v2.ConnectorAccountCreationSchema_Field_BoolField{
+						BoolField: &v2.ConnectorAccountCreationSchema_BoolField{},
+					},
+					Placeholder: "active",
+					Order:       4,
+				},
+			},
+		},
 	}, nil
 }
 
