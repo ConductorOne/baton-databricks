@@ -12,10 +12,9 @@ import (
 )
 
 const (
-
 	defaultHost = "cloud.databricks.com" // aws
-	azureHost = "azuredatabricks.net"
-	gcpHost   = "gcp.databricks.net"
+	azureHost   = "azuredatabricks.net"
+	gcpHost     = "gcp.databricks.net"
 
 	// Some of these are case sensitive.
 	usersEndpoint             = "/api/2.0/preview/scim/v2/Users"
