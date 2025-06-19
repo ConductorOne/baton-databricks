@@ -41,7 +41,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
-				"userName": {
+				"email": {
 					DisplayName: "Email",
 					Required:    true,
 					Description: "The email address of the user.",
