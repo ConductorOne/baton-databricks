@@ -10,6 +10,7 @@ import (
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	reader_v2 "github.com/conductorone/baton-sdk/pb/c1/reader/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
 )
 
 const resourceTypesTableVersion = "1"
@@ -44,6 +45,10 @@ func (r *resourceTypesTable) Schema() (string, []interface{}) {
 	}
 }
 
+func (r *resourceTypesTable) Migrations(ctx context.Context, db *goqu.Database) error {
+	return nil
+}
+
 func (c *C1File) ListResourceTypes(ctx context.Context, request *v2.ResourceTypesServiceListResourceTypesRequest) (*v2.ResourceTypesServiceListResourceTypesResponse, error) {
 	ctx, span := tracer.Start(ctx, "C1File.ListResourceTypes")
 	defer span.End()
@@ -74,8 +79,11 @@ func (c *C1File) GetResourceType(ctx context.Context, request *reader_v2.Resourc
 	defer span.End()
 
 	ret := &v2.ResourceType{}
-
-	err := c.getConnectorObject(ctx, resourceTypes.Name(), request.ResourceTypeId, ret)
+	syncId, err := annotations.GetSyncIdFromAnnotations(request.GetAnnotations())
+	if err != nil {
+		return nil, fmt.Errorf("error getting sync id from annotations for resource type '%s': %w", request.ResourceTypeId, err)
+	}
+	err = c.getConnectorObject(ctx, resourceTypes.Name(), request.ResourceTypeId, syncId, ret)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching resource type '%s': %w", request.ResourceTypeId, err)
 	}
@@ -89,7 +97,20 @@ func (c *C1File) PutResourceTypes(ctx context.Context, resourceTypesObjs ...*v2.
 	ctx, span := tracer.Start(ctx, "C1File.PutResourceTypes")
 	defer span.End()
 
-	err := bulkPutConnectorObject(ctx, c, resourceTypes.Name(),
+	return c.putResourceTypesInternal(ctx, bulkPutConnectorObject, resourceTypesObjs...)
+}
+
+func (c *C1File) PutResourceTypesIfNewer(ctx context.Context, resourceTypesObjs ...*v2.ResourceType) error {
+	ctx, span := tracer.Start(ctx, "C1File.PutResourceTypesIfNewer")
+	defer span.End()
+
+	return c.putResourceTypesInternal(ctx, bulkPutConnectorObjectIfNewer, resourceTypesObjs...)
+}
+
+type resourceTypePutFunc func(context.Context, *C1File, string, func(m *v2.ResourceType) (goqu.Record, error), ...*v2.ResourceType) error
+
+func (c *C1File) putResourceTypesInternal(ctx context.Context, f resourceTypePutFunc, resourceTypesObjs ...*v2.ResourceType) error {
+	err := f(ctx, c, resourceTypes.Name(),
 		func(resource *v2.ResourceType) (goqu.Record, error) {
 			return nil, nil
 		},

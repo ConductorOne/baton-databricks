@@ -50,9 +50,10 @@ func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.
 	}
 
 	// To differentiate between what type of role does the resource represent.
-	if parent.ResourceType == workspaceResourceType.Id {
+	switch parent.ResourceType {
+	case workspaceResourceType.Id:
 		roleID = fmt.Sprintf("%s:%s", parent.Resource, role)
-	} else if parent.ResourceType == accountResourceType.Id {
+	case accountResourceType.Id:
 		roleID = role
 	}
 
