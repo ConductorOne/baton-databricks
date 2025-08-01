@@ -59,7 +59,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
 					},
 					Placeholder: "Display Name",
-					Order:       4,
+					Order:       2,
 				},
 				"givenName": {
 					DisplayName: "Given Name",
@@ -69,7 +69,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
 					},
 					Placeholder: "Given Name",
-					Order:       2,
+					Order:       3,
 				},
 				"familyName": {
 					DisplayName: "Family Name",
@@ -79,7 +79,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 						StringField: &v2.ConnectorAccountCreationSchema_StringField{},
 					},
 					Placeholder: "Family Name",
-					Order:       3,
+					Order:       4,
 				},
 				"active": {
 					DisplayName: "Active",
@@ -89,7 +89,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 						BoolField: &v2.ConnectorAccountCreationSchema_BoolField{},
 					},
 					Placeholder: "active",
-					Order:       4,
+					Order:       5,
 				},
 			},
 		},
