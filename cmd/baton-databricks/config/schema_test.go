@@ -68,7 +68,7 @@ func TestConfigs(t *testing.T) {
 
 	configurations := field.NewConfiguration(
 		configurationFields,
-		fieldRelationships...,
+		field.WithConstraints(fieldRelationships...),
 	)
 
 	extraValidationFunction := func(configs *viper.Viper) error {

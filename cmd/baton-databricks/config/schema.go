@@ -79,7 +79,7 @@ var (
 	}
 	ConfigurationSchema = field.NewConfiguration(
 		configurationFields,
-		fieldRelationships...,
+		field.WithConstraints(fieldRelationships...),
 	)
 )
 
