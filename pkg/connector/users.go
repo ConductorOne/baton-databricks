@@ -175,11 +175,14 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	pMap := accountInfo.Profile.AsMap()
 	body := &databricks.CreateUserBody{}
 
-	if username, ok := pMap["userName"]; ok {
-		if username == "" {
-			return nil, nil, nil, fmt.Errorf("baton-databricks: username is required to create a user")
+	// Use email as userName since Databricks API expects email in userName field
+	if email, ok := pMap["email"]; ok {
+		if email == "" {
+			return nil, nil, nil, fmt.Errorf("baton-databricks: email is required to create a user")
 		}
-		body.UserName = username.(string)
+		body.UserName = email.(string)
+	} else {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: email field is required in profile")
 	}
 
 	if displayName, ok := pMap["displayName"]; ok {
@@ -224,8 +227,9 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user resource: %w", err)
 	}
 
-	return &v2.CreateAccountResponse_ActionRequiredResult{
-		Resource: resource,
+	return &v2.CreateAccountResponse_SuccessResult{
+		Resource:              resource,
+		IsCreateAccountResult: true,
 	}, nil, nil, nil
 }
 
