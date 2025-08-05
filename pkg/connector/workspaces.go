@@ -162,6 +162,17 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 	workspace := strconv.Itoa(int(workspaceId))
 	assignments, _, err := w.client.ListWorkspaceMembers(ctx, workspace)
 	if err != nil {
+		// Check if this is the specific error for workspaces without permissions
+		if apiErr, ok := err.(*databricks.APIError); ok && apiErr.StatusCode == 400 {
+			l := ctxzap.Extract(ctx)
+			l.Info("Workspace does not have permissions API available",
+				zap.String("workspace_id", workspace),
+				zap.String("workspace_name", resource.DisplayName),
+				zap.String("error_message", apiErr.Message),
+			)
+			// Return empty grants instead of error for workspaces without permissions
+			return []*v2.Grant{}, "", nil, nil
+		}
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
 
