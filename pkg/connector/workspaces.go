@@ -168,18 +168,14 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 		// Check if this is the specific error for workspaces without permissions API
 		var apiErr *databricks.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
-			// Check for specific error messages that indicate permissions API is not available
-			if strings.Contains(strings.ToLower(apiErr.Message), "permissions api") ||
-				strings.Contains(strings.ToLower(apiErr.Message), "not available") ||
-				strings.Contains(strings.ToLower(apiErr.Message), "not enabled") ||
-				strings.Contains(strings.ToLower(apiErr.Message), "not supported") {
+			// Check for the specific error message that indicates permissions API is not available
+			if strings.Contains(apiErr.Message, "Permission assignment APIs are not available for this workspace") {
 				l := ctxzap.Extract(ctx)
-				l.Info("Workspace does not have permissions API available",
+				l.Info("Workspace does not have permissions API available - skipping",
 					zap.String("workspace_id", workspace),
 					zap.String("workspace_name", resource.DisplayName),
-					zap.String("error_message", apiErr.Message),
 				)
-				// Return empty grants instead of error for workspaces without permissions
+				// Return empty grants for workspaces without permissions API
 				return []*v2.Grant{}, "", nil, nil
 			}
 			// If it's a 400 but not the specific permissions API error, log it and return error
