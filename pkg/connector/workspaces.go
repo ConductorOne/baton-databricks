@@ -2,8 +2,11 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -162,16 +165,31 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, pT
 	workspace := strconv.Itoa(int(workspaceId))
 	assignments, _, err := w.client.ListWorkspaceMembers(ctx, workspace)
 	if err != nil {
-		// Check if this is the specific error for workspaces without permissions
-		if apiErr, ok := err.(*databricks.APIError); ok && apiErr.StatusCode == 400 {
+		// Check if this is the specific error for workspaces without permissions API
+		var apiErr *databricks.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+			// Check for specific error messages that indicate permissions API is not available
+			if strings.Contains(strings.ToLower(apiErr.Message), "permissions api") ||
+				strings.Contains(strings.ToLower(apiErr.Message), "not available") ||
+				strings.Contains(strings.ToLower(apiErr.Message), "not enabled") ||
+				strings.Contains(strings.ToLower(apiErr.Message), "not supported") {
+				l := ctxzap.Extract(ctx)
+				l.Info("Workspace does not have permissions API available",
+					zap.String("workspace_id", workspace),
+					zap.String("workspace_name", resource.DisplayName),
+					zap.String("error_message", apiErr.Message),
+				)
+				// Return empty grants instead of error for workspaces without permissions
+				return []*v2.Grant{}, "", nil, nil
+			}
+			// If it's a 400 but not the specific permissions API error, log it and return error
 			l := ctxzap.Extract(ctx)
-			l.Info("Workspace does not have permissions API available",
+			l.Warn("Received 400 error from workspace API, but not the expected permissions API error",
 				zap.String("workspace_id", workspace),
 				zap.String("workspace_name", resource.DisplayName),
 				zap.String("error_message", apiErr.Message),
+				zap.String("error_detail", apiErr.Detail),
 			)
-			// Return empty grants instead of error for workspaces without permissions
-			return []*v2.Grant{}, "", nil, nil
 		}
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
