@@ -166,7 +166,7 @@ func (o *userBuilder) CreateAccountCapabilityDetails(ctx context.Context) (*v2.C
 	}, nil, nil
 }
 
-func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.AccountInfo, credentialOptions *v2.CredentialOptions) (
+func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.AccountInfo, credentialOptions *v2.LocalCredentialOptions) (
 	connectorbuilder.CreateAccountResponse,
 	[]*v2.PlaintextData,
 	annotations.Annotations,

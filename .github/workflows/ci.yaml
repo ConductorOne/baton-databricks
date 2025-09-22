@@ -4,12 +4,12 @@ jobs:
   go-lint:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.23.x
-      - name: Checkout code
-        uses: actions/checkout@v4
+          go-version-file: go.mod
       - name: Run linters
         uses: golangci/golangci-lint-action@v8
         with:
@@ -18,17 +18,16 @@ jobs:
   go-test:
     strategy:
       matrix:
-        go-version: [1.23.x]
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Install Go
         if: success()
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
-      - name: Checkout code
-        uses: actions/checkout@v4
+          go-version-file: go.mod
       - name: go tests
         run: (set -o pipefail && go test -v -covermode=count -json ./... | tee test.json)
       - name: annotate go tests
@@ -48,21 +47,20 @@ jobs:
       # BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
       # BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.23.x
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install baton
-        run: ./scripts/get-baton.sh && mv baton /usr/local/bin
+          go-version-file: go.mod
       - name: Build baton-databricks
         run: go build ./cmd/baton-databricks
       - name: Test grant/revoking entitlements
         env:
-          BATON: baton
           BATON_DATABRICKS: ./baton-databricks
-          CONNECTOR_ENTITLEMENT: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/66271399072731:member'
-          CONNECTOR_PRINCIPAL_TYPE: 'user'
-          CONNECTOR_PRINCIPAL: '5346803201281760'
-        run: ./scripts/grant-revoke.sh
+        uses: ConductorOne/github-workflows/actions/sync-test@v2
+        with:
+          connector: ./baton-databricks
+          baton-entitlement: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/66271399072731:member'
+          baton-principal: '5346803201281760'
+          baton-principal-type: 'user'
