@@ -336,6 +336,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	case userResourceType.Id:
 		u, _, err := r.client.GetUser(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
 		}
 
@@ -349,6 +350,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	case groupResourceType.Id:
 		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
 
@@ -362,6 +364,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	case servicePrincipalResourceType.Id:
 		sp, _, err := r.client.GetServicePrincipal(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
 		}
 

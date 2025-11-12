@@ -9,6 +9,8 @@ import (
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -195,7 +197,7 @@ func (c *Client) FindUserID(
 	}
 
 	if len(users) == 0 {
-		return "", ratelimitData, err
+		return "", ratelimitData, status.Error(codes.NotFound, fmt.Sprintf("user not found: %s", username))
 	}
 
 	return users[0].ID, ratelimitData, nil
@@ -222,7 +224,7 @@ func (c *Client) FindUsername(
 	}
 
 	if len(users) == 0 {
-		return "", ratelimitData, err
+		return "", ratelimitData, status.Error(codes.NotFound, fmt.Sprintf("user not found: %s", userID))
 	}
 
 	return users[0].UserName, ratelimitData, nil
@@ -307,7 +309,7 @@ func (c *Client) FindGroupID(
 	}
 
 	if len(groups) == 0 {
-		return "", ratelimitData, err
+		return "", ratelimitData, status.Error(codes.NotFound, fmt.Sprintf("group not found: %s", displayName))
 	}
 
 	return groups[0].ID, ratelimitData, nil
@@ -334,7 +336,7 @@ func (c *Client) FindGroupDisplayName(
 	}
 
 	if len(groups) == 0 {
-		return "", ratelimitData, err
+		return "", ratelimitData, status.Error(codes.NotFound, fmt.Sprintf("group not found: %s", groupID))
 	}
 
 	return groups[0].DisplayName, ratelimitData, nil
@@ -425,7 +427,7 @@ func (c *Client) FindServicePrincipalID(
 	}
 
 	if len(servicePrincipals) == 0 {
-		return "", ratelimitData, err
+		return "", ratelimitData, status.Error(codes.NotFound, fmt.Sprintf("service principal not found: %s", appID))
 	}
 
 	return servicePrincipals[0].ID, ratelimitData, nil
@@ -452,7 +454,7 @@ func (c *Client) FindServicePrincipalAppID(
 	}
 
 	if len(servicePrincipals) == 0 {
-		return "", ratelimitData, err
+		return "", ratelimitData, status.Error(codes.NotFound, fmt.Sprintf("service principal not found: %s", servicePrincipalID))
 	}
 
 	return servicePrincipals[0].ApplicationID, ratelimitData, nil

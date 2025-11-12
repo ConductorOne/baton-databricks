@@ -308,6 +308,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	if entitlement.Id == membershipEntitlementID {
 		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
@@ -451,6 +452,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	if entitlement.Id == membershipEntitlementID {
 		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
