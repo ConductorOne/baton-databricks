@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -10,6 +12,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -70,6 +74,7 @@ func prepareResourceId(ctx context.Context, c *databricks.Client, workspaceId st
 	case UsersType:
 		userID, _, err := c.FindUserID(ctx, workspaceId, principal)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("failed to find user %s: %w", principal, err)
 		}
 
@@ -77,6 +82,7 @@ func prepareResourceId(ctx context.Context, c *databricks.Client, workspaceId st
 	case GroupsType:
 		groupID, _, err := c.FindGroupID(ctx, workspaceId, principal)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("failed to find group %s: %w", principal, err)
 		}
 
@@ -84,6 +90,7 @@ func prepareResourceId(ctx context.Context, c *databricks.Client, workspaceId st
 	case ServicePrincipalsType:
 		servicePrincipalID, _, err := c.FindServicePrincipalID(ctx, workspaceId, principal)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return nil, fmt.Errorf("failed to find service principal %s: %w", principal, err)
 		}
 
@@ -119,6 +126,7 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	case userResourceType.Id:
 		username, _, err := c.FindUsername(ctx, workspaceId, principalId)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return "", fmt.Errorf("failed to find user %s/%s: %w", workspaceId, principalId, err)
 		}
 
@@ -126,6 +134,7 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	case groupResourceType.Id:
 		displayName, _, err := c.FindGroupDisplayName(ctx, workspaceId, principalId)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return "", fmt.Errorf("failed to find group %s/%s: %w", workspaceId, principalId, err)
 		}
 
@@ -133,6 +142,7 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	case servicePrincipalResourceType.Id:
 		appID, _, err := c.FindServicePrincipalAppID(ctx, workspaceId, principalId)
 		if err != nil {
+			err = makeRetryableIfNotFound(err)
 			return "", fmt.Errorf("failed to find service principal %s/%s: %w", workspaceId, principalId, err)
 		}
 
@@ -201,4 +211,21 @@ func prepareWorkspaceRole(entitlement string) string {
 	}
 
 	return parts[1]
+}
+
+func makeRetryableIfNotFound(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var apiErr *databricks.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return status.Error(codes.Unavailable, fmt.Sprintf("resource not found yet, will retry: %v", err))
+	}
+
+	if status.Code(err) == codes.NotFound {
+		return status.Error(codes.Unavailable, fmt.Sprintf("resource not found yet, will retry: %v", err))
+	}
+
+	return err
 }

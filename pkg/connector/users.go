@@ -215,6 +215,7 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 
 	user, _, err := o.client.GetUser(ctx, "", res.Id)
 	if err != nil {
+		err = makeRetryableIfNotFound(err)
 		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to get user after creation: %w", err)
 	}
 
