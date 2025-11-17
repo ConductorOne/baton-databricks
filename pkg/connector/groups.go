@@ -198,9 +198,14 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	// membership grants
 	// Always fetch the group with members attribute to ensure we get the members
 	// regardless of authentication type (OAuth vs personal access token)
-	group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
+	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
+	}
+
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
 	}
 
 	for _, member := range group.Members {
@@ -234,9 +239,13 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	}
 
 	// role permissions grants
-	ruleSets, _, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
+	ruleSets, rateLimitDataRuleSets, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)
+	}
+
+	if rateLimitDataRuleSets != nil {
+		annos.WithRateLimiting(rateLimitDataRuleSets)
 	}
 
 	for _, ruleSet := range ruleSets {
@@ -259,7 +268,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		}
 	}
 
-	return rv, "", nil, nil
+	return rv, "", annos, nil
 }
 
 func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
