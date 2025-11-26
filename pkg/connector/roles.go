@@ -347,7 +347,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 		}
 
 	case groupResourceType.Id:
-		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource)
+		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource, databricks.NewGroupRolesAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
@@ -428,7 +428,7 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 		}
 
 	case groupResourceType.Id:
-		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource)
+		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource, databricks.NewGroupRolesAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
 		}
