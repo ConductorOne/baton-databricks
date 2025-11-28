@@ -254,7 +254,7 @@ func (c *Client) ListGroups(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
-func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string) (
+func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,
 	error,
@@ -267,7 +267,7 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string) (
 	}
 
 	var res *Group
-	ratelimitData, err := c.Get(ctx, u, &res)
+	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
 		return nil, ratelimitData, err
 	}
