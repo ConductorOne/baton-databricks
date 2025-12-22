@@ -294,6 +294,12 @@ func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger)
 		)
 		return cAuth
 	default:
+		l.Warn(
+			"no valid authentication method detected, falling back to NoAuth. " +
+				"This will likely cause API calls to fail. " +
+				"Please configure one of: OAuth (client-id + client-secret), " +
+				"username/password, or personal access token (workspace-tokens + workspaces)",
+		)
 		return &databricks.NoAuth{}
 	}
 }
