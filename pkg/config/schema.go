@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/conductorone/baton-sdk/pkg/field"
-	"github.com/spf13/viper"
 )
 
 var (
@@ -26,6 +25,7 @@ var (
 	DatabricksClientSecretField = field.StringField(
 		"databricks-client-secret",
 		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
+		field.WithIsSecret(true),
 	)
 	UsernameField = field.StringField(
 		"username",
@@ -34,6 +34,7 @@ var (
 	PasswordField = field.StringField(
 		"password",
 		field.WithDescription("The Databricks password used to connect to the Databricks API"),
+		field.WithIsSecret(true),
 	)
 	WorkspacesField = field.StringSliceField(
 		"workspaces",
@@ -42,8 +43,9 @@ var (
 	TokensField = field.StringSliceField(
 		"workspace-tokens",
 		field.WithDescription("The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API"),
+		field.WithIsSecret(true),
 	)
-	configurationFields = []field.SchemaField{
+	configFields = []field.SchemaField{
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
@@ -77,16 +79,58 @@ var (
 			[]field.SchemaField{WorkspacesField},
 		),
 	}
-	ConfigurationSchema = field.NewConfiguration(
-		configurationFields,
-		field.WithConstraints(fieldRelationships...),
-	)
+	fieldGroups = []field.SchemaFieldGroup{
+		{
+			Name:        "oauth_auth",
+			DisplayName: "OAuth Authentication",
+			HelpText: "Authenticate using OAuth to sync information from all Databricks workspaces. " +
+				"Requires OAuth client ID and secret created following the Databricks OAuth authentication documentation.",
+			Fields: []field.SchemaField{
+				AccountIdField,
+				DatabricksClientIdField,
+				DatabricksClientSecretField,
+				HostnameField,
+			},
+			Default: true,
+		},
+		{
+			Name:        "personal_access_token_auth",
+			DisplayName: "Personal Access Token Authentication",
+			HelpText:    "Authenticate using a personal access token to sync information from a single Databricks workspace. Requires a personal access token and the workspace ID.",
+			Fields: []field.SchemaField{
+				AccountIdField,
+				TokensField,
+				WorkspacesField,
+				HostnameField,
+			},
+			Default: false,
+		},
+		{
+			Name:        "username_password_auth",
+			DisplayName: "Username/Password Authentication",
+			HelpText:    "Authenticate using your Databricks username and password to sync information from all Databricks workspaces.",
+			Fields: []field.SchemaField{
+				AccountIdField,
+				UsernameField,
+				PasswordField,
+				HostnameField,
+			},
+			Default: false,
+		},
+	}
+)
+
+//go:generate go run ./gen
+var Config = field.NewConfiguration(
+	configFields,
+	field.WithConstraints(fieldRelationships...),
+	field.WithFieldGroups(fieldGroups),
 )
 
 // ValidateConfig - additional validations that cannot be encoded in relationships (yet!)
-func ValidateConfig(ctx context.Context, cfg *viper.Viper) error {
-	workspaces := cfg.GetStringSlice(WorkspacesField.FieldName)
-	tokens := cfg.GetStringSlice(TokensField.FieldName)
+func ValidateConfig(ctx context.Context, cfg *Databricks) error {
+	workspaces := cfg.Workspaces
+	tokens := cfg.WorkspaceTokens
 
 	// If there are tokens, there must be an equivalent number of workspaces.
 	if len(tokens) > 0 && len(workspaces) != len(tokens) {
