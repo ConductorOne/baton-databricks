@@ -224,7 +224,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	}
 
 	hostname := getHostname(cfg)
-	accountHostname := databricks.GetAccountHostname(hostname)
+	accountHostname := getAccountHostname(cfg, hostname)
 	auth := prepareClientAuth(ctx, cfg, l)
 
 	cb, err := New(
@@ -256,7 +256,7 @@ func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger)
 	password := cfg.Password
 	workspaces := cfg.Workspaces
 	tokens := cfg.WorkspaceTokens
-	accountHostname := databricks.GetAccountHostname(getHostname(cfg))
+	accountHostname := getAccountHostname(cfg, getHostname(cfg))
 
 	switch {
 	case username != "" && password != "":
@@ -310,4 +310,12 @@ func getHostname(cfg *config.Databricks) string {
 		return defaultHost
 	}
 	return cfg.Hostname
+}
+
+// getAccountHostname returns the account hostname from config if set, otherwise calculates it from hostname.
+func getAccountHostname(cfg *config.Databricks, hostname string) string {
+	if cfg.AccountHostname != "" {
+		return cfg.AccountHostname
+	}
+	return databricks.GetAccountHostname(hostname)
 }

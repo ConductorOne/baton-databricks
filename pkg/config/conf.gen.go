@@ -4,6 +4,7 @@ package config
 import "reflect" 
 
 type Databricks struct {
+	AccountHostname string `mapstructure:"account-hostname"`
 	AccountId string `mapstructure:"account-id"`
 	DatabricksClientId string `mapstructure:"databricks-client-id"`
 	DatabricksClientSecret string `mapstructure:"databricks-client-secret"`
