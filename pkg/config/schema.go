@@ -95,8 +95,8 @@ var (
 	}
 	fieldGroups = []field.SchemaFieldGroup{
 		{
-			Name:        "oauth_auth",
-			DisplayName: "OAuth Authentication",
+			Name:        "OAuth",
+			DisplayName: "OAuth",
 			HelpText: "Authenticate using OAuth to sync information from all Databricks workspaces. " +
 				"Requires OAuth client ID and secret created following the Databricks OAuth authentication documentation.",
 			Fields: []field.SchemaField{
@@ -109,8 +109,8 @@ var (
 			Default: true,
 		},
 		{
-			Name:        "personal_access_token_auth",
-			DisplayName: "Personal Access Token Authentication",
+			Name:        "Personal access token",
+			DisplayName: "Personal access token",
 			HelpText:    "Authenticate using a personal access token to sync information from a single Databricks workspace. Requires a personal access token and the workspace ID.",
 			Fields: []field.SchemaField{
 				AccountIdField,
@@ -122,8 +122,8 @@ var (
 			Default: false,
 		},
 		{
-			Name:        "username_password_auth",
-			DisplayName: "Username/Password Authentication",
+			Name:        "Username and password",
+			DisplayName: "Username and password",
 			HelpText:    "Authenticate using your Databricks username and password to sync information from all Databricks workspaces.",
 			Fields: []field.SchemaField{
 				AccountIdField,
