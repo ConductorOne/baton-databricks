@@ -5,10 +5,15 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/conductorone/baton-databricks/pkg/config"
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
 
 type Databricks struct {
@@ -16,9 +21,9 @@ type Databricks struct {
 	workspaces []string
 }
 
-// ResourceSyncers returns a ResourceSyncer for each resource type that should be synced from the upstream service.
-func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncer {
-	return []connectorbuilder.ResourceSyncer{
+// ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
+func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+	syncers := []connectorbuilder.ResourceSyncer{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
@@ -26,6 +31,40 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
 	}
+
+	// Convert ResourceSyncer to ResourceSyncerV2
+	v2Syncers := make([]connectorbuilder.ResourceSyncerV2, len(syncers))
+	for i, syncer := range syncers {
+		v2Syncers[i] = &resourceSyncerV1toV2Adapter{syncer: syncer}
+	}
+	return v2Syncers
+}
+
+// resourceSyncerV1toV2Adapter adapts a ResourceSyncer to ResourceSyncerV2.
+type resourceSyncerV1toV2Adapter struct {
+	syncer connectorbuilder.ResourceSyncer
+}
+
+func (a *resourceSyncerV1toV2Adapter) ResourceType(ctx context.Context) *v2.ResourceType {
+	return a.syncer.ResourceType(ctx)
+}
+
+func (a *resourceSyncerV1toV2Adapter) List(ctx context.Context, parentResourceID *v2.ResourceId, opts resource.SyncOpAttrs) ([]*v2.Resource, *resource.SyncOpResults, error) {
+	resources, pageToken, annos, err := a.syncer.List(ctx, parentResourceID, &opts.PageToken)
+	ret := &resource.SyncOpResults{NextPageToken: pageToken, Annotations: annos}
+	return resources, ret, err
+}
+
+func (a *resourceSyncerV1toV2Adapter) Entitlements(ctx context.Context, r *v2.Resource, opts resource.SyncOpAttrs) ([]*v2.Entitlement, *resource.SyncOpResults, error) {
+	ents, pageToken, annos, err := a.syncer.Entitlements(ctx, r, &opts.PageToken)
+	ret := &resource.SyncOpResults{NextPageToken: pageToken, Annotations: annos}
+	return ents, ret, err
+}
+
+func (a *resourceSyncerV1toV2Adapter) Grants(ctx context.Context, r *v2.Resource, opts resource.SyncOpAttrs) ([]*v2.Grant, *resource.SyncOpResults, error) {
+	grants, pageToken, annos, err := a.syncer.Grants(ctx, r, &opts.PageToken)
+	ret := &resource.SyncOpResults{NextPageToken: pageToken, Annotations: annos}
+	return grants, ret, err
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
@@ -173,4 +212,110 @@ func New(
 		client:     client,
 		workspaces: workspaces,
 	}, nil
+}
+
+// NewConnector returns a new connector builder from a configuration struct.
+func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+	l := ctxzap.Extract(ctx)
+
+	err := config.ValidateConfig(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hostname := getHostname(cfg)
+	accountHostname := getAccountHostname(cfg, hostname)
+	auth := prepareClientAuth(ctx, cfg, l)
+
+	cb, err := New(
+		ctx,
+		hostname,
+		accountHostname,
+		cfg.AccountId,
+		auth,
+		cfg.Workspaces,
+	)
+	if err != nil {
+		l.Error("error creating connector", zap.Error(err))
+		return nil, nil, err
+	}
+
+	return cb, nil, nil
+}
+
+func areTokensSet(workspaces []string, tokens []string) bool {
+	return len(tokens) > 0 &&
+		len(workspaces) == len(tokens)
+}
+
+func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
+	accountID := cfg.AccountId
+	databricksClientId := cfg.DatabricksClientId
+	databricksClientSecret := cfg.DatabricksClientSecret
+	username := cfg.Username
+	password := cfg.Password
+	workspaces := cfg.Workspaces
+	tokens := cfg.WorkspaceTokens
+	accountHostname := getAccountHostname(cfg, getHostname(cfg))
+
+	switch {
+	case username != "" && password != "":
+		l.Info(
+			"using basic auth",
+			zap.String("account-id", accountID),
+			zap.String("username", username),
+		)
+		cAuth := databricks.NewBasicAuth(
+			username,
+			password,
+		)
+		return cAuth
+	case databricksClientId != "" && databricksClientSecret != "":
+		l.Info(
+			"using oauth",
+			zap.String("account-id", accountID),
+			zap.String("client-id", databricksClientId),
+		)
+		cAuth := databricks.NewOAuth2(
+			accountID,
+			databricksClientId,
+			databricksClientSecret,
+			accountHostname,
+		)
+		return cAuth
+	case areTokensSet(workspaces, tokens):
+		l.Info(
+			"using access token",
+			zap.String("account-id", accountID),
+		)
+		cAuth := databricks.NewTokenAuth(
+			workspaces,
+			tokens,
+		)
+		return cAuth
+	default:
+		l.Warn(
+			"no valid authentication method detected, falling back to NoAuth. " +
+				"This will likely cause API calls to fail. " +
+				"Please configure one of: OAuth (client-id + client-secret), " +
+				"username/password, or personal access token (workspace-tokens + workspaces)",
+		)
+		return &databricks.NoAuth{}
+	}
+}
+
+func getHostname(cfg *config.Databricks) string {
+	const defaultHost = "cloud.databricks.com"
+	if cfg.Hostname == "" {
+		return defaultHost
+	}
+	return cfg.Hostname
+}
+
+// getAccountHostname returns the account hostname from config if set, otherwise calculates it from hostname.
+func getAccountHostname(cfg *config.Databricks, hostname string) string {
+	if cfg.AccountHostname != "" {
+		return cfg.AccountHostname
+	}
+	return databricks.GetAccountHostname(hostname)
 }
