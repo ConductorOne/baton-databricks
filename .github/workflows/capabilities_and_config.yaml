@@ -28,13 +28,12 @@ jobs:
         run: ./connector config > config_schema.json
 
       - name: Run and save capabilities output
-        env:
-          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          BATON_ACCOUNT_ID: ${{ secrets.BATON_ACCOUNT_ID }}
-          BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
-          BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
-        run: ./connector capabilities > baton_capabilities.json
+        run: |
+          ./connector capabilities \
+            --account-id=dummy-account-id \
+            --databricks-client-id=dummy-client-id \
+            --databricks-client-secret=dummy-client-secret \
+            > baton_capabilities.json
 
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
