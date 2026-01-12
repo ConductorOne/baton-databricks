@@ -10,8 +10,9 @@ import (
 var (
 	AccountHostnameField = field.StringField(
 		"account-hostname",
+		field.WithDefaultValue("accounts.cloud.databricks.com"),
 		field.WithDescription("The hostname used to connect to the Databricks account API. If not set, it will be calculated from the hostname field."),
-		field.WithDisplayName("Account Hostname"),
+		field.WithDisplayName("Account Hostname (optional)"),
 	)
 	AccountIdField = field.StringField(
 		"account-id",
@@ -23,18 +24,18 @@ var (
 		"hostname",
 		field.WithDescription("The Databricks hostname used to connect to the Databricks API"),
 		field.WithDefaultValue("cloud.databricks.com"),
-		field.WithDisplayName("Hostname"),
+		field.WithDisplayName("Hostname (optional)"),
 	)
 	DatabricksClientIdField = field.StringField(
 		"databricks-client-id",
 		field.WithDescription("The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API"),
-		field.WithDisplayName("Databricks Client ID"),
+		field.WithDisplayName("OAuth2 Client ID"),
 	)
 	DatabricksClientSecretField = field.StringField(
 		"databricks-client-secret",
 		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
 		field.WithIsSecret(true),
-		field.WithDisplayName("Databricks Client Secret"),
+		field.WithDisplayName("OAuth2 Client Secret"),
 	)
 	UsernameField = field.StringField(
 		"username",
@@ -47,16 +48,29 @@ var (
 		field.WithIsSecret(true),
 		field.WithDisplayName("Password"),
 	)
+	WorkspaceIDField = field.StringField(
+		"workspace-id",
+		field.WithDescription("The Databricks workspace ID used to connect to the Databricks Workspace API"),
+		field.WithDisplayName("Workspace ID"),
+	)
 	WorkspacesField = field.StringSliceField(
 		"workspaces",
 		field.WithDescription("Limit syncing to the specified workspaces"),
 		field.WithDisplayName("Workspaces"),
+		field.WithExportTarget(field.ExportTargetCLIOnly),
+	)
+	PersonalAccessTokenField = field.StringField(
+		"personal-access-token",
+		field.WithDescription("The Databricks personal access token used to connect to the Databricks Workspace API"),
+		field.WithIsSecret(true),
+		field.WithDisplayName("Personal access token"),
 	)
 	TokensField = field.StringSliceField(
 		"workspace-tokens",
 		field.WithDescription("The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API"),
 		field.WithIsSecret(true),
-		field.WithDisplayName("Workspace Tokens"),
+		field.WithDisplayName("Personal access tokens"),
+		field.WithExportTarget(field.ExportTargetCLIOnly),
 	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
@@ -66,19 +80,17 @@ var (
 		HostnameField,
 		PasswordField,
 		TokensField,
+		PersonalAccessTokenField,
 		UsernameField,
 		WorkspacesField,
+		WorkspaceIDField,
 	}
 	fieldRelationships = []field.SchemaFieldRelationship{
-		field.FieldsAtLeastOneUsed(
-			DatabricksClientIdField,
-			UsernameField,
-			TokensField,
-		),
 		field.FieldsMutuallyExclusive(
 			DatabricksClientIdField,
 			UsernameField,
 			TokensField,
+			PersonalAccessTokenField,
 		),
 		field.FieldsRequiredTogether(
 			DatabricksClientIdField,
@@ -92,6 +104,10 @@ var (
 			[]field.SchemaField{TokensField},
 			[]field.SchemaField{WorkspacesField},
 		),
+		field.FieldsDependentOn(
+			[]field.SchemaField{PersonalAccessTokenField},
+			[]field.SchemaField{WorkspaceIDField},
+		),
 	}
 	fieldGroups = []field.SchemaFieldGroup{
 		{
@@ -103,8 +119,8 @@ var (
 				AccountIdField,
 				DatabricksClientIdField,
 				DatabricksClientSecretField,
-				HostnameField,
 				AccountHostnameField,
+				HostnameField,
 			},
 			Default: true,
 		},
@@ -114,10 +130,10 @@ var (
 			HelpText:    "Authenticate using a personal access token to sync information from a single Databricks workspace. Requires a personal access token and the workspace ID.",
 			Fields: []field.SchemaField{
 				AccountIdField,
-				TokensField,
-				WorkspacesField,
-				HostnameField,
+				PersonalAccessTokenField,
+				WorkspaceIDField,
 				AccountHostnameField,
+				HostnameField,
 			},
 			Default: false,
 		},
@@ -129,8 +145,8 @@ var (
 				AccountIdField,
 				UsernameField,
 				PasswordField,
-				HostnameField,
 				AccountHostnameField,
+				HostnameField,
 			},
 			Default: false,
 		},

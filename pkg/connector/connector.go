@@ -226,6 +226,11 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	hostname := getHostname(cfg)
 	accountHostname := getAccountHostname(cfg, hostname)
 	auth := prepareClientAuth(ctx, cfg, l)
+	workspaces := cfg.Workspaces
+	workspaceID := cfg.WorkspaceId
+	if workspaceID != "" {
+		workspaces = []string{workspaceID}
+	}
 
 	cb, err := New(
 		ctx,
@@ -233,7 +238,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		accountHostname,
 		cfg.AccountId,
 		auth,
-		cfg.Workspaces,
+		workspaces,
 	)
 	if err != nil {
 		l.Error("error creating connector", zap.Error(err))
@@ -254,9 +259,18 @@ func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger)
 	databricksClientSecret := cfg.DatabricksClientSecret
 	username := cfg.Username
 	password := cfg.Password
-	workspaces := cfg.Workspaces
-	tokens := cfg.WorkspaceTokens
 	accountHostname := getAccountHostname(cfg, getHostname(cfg))
+
+	workspaces := cfg.Workspaces
+	workspaceID := cfg.WorkspaceId
+	if workspaceID != "" {
+		workspaces = []string{workspaceID}
+	}
+	tokens := cfg.WorkspaceTokens
+	personalAccessToken := cfg.PersonalAccessToken
+	if personalAccessToken != "" {
+		tokens = []string{personalAccessToken}
+	}
 
 	switch {
 	case username != "" && password != "":
