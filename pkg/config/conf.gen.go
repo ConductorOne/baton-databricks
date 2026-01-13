@@ -9,12 +9,6 @@ type Databricks struct {
 	DatabricksClientId string `mapstructure:"databricks-client-id"`
 	DatabricksClientSecret string `mapstructure:"databricks-client-secret"`
 	Hostname string `mapstructure:"hostname"`
-	Password string `mapstructure:"password"`
-	WorkspaceTokens []string `mapstructure:"workspace-tokens"`
-	PersonalAccessToken string `mapstructure:"personal-access-token"`
-	Username string `mapstructure:"username"`
-	Workspaces []string `mapstructure:"workspaces"`
-	WorkspaceId string `mapstructure:"workspace-id"`
 }
 
 func (c *Databricks) findFieldByTag(tagValue string) (any, bool) {
