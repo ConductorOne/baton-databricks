@@ -29,66 +29,6 @@ func (n *NoAuth) GetClient(ctx context.Context) (*http.Client, error) {
 	return httpClient, nil
 }
 
-type TokenAuth struct {
-	Tokens           map[string]string
-	CurrentWorkspace string
-}
-
-func NewTokenAuth(workspaces, tokens []string) *TokenAuth {
-	tokensMap := make(map[string]string)
-
-	for i, workspace := range workspaces {
-		tokensMap[workspace] = tokens[i]
-	}
-
-	return &TokenAuth{
-		Tokens:           tokensMap,
-		CurrentWorkspace: workspaces[0],
-	}
-}
-
-func (t *TokenAuth) Apply(req *http.Request) {
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.Tokens[t.CurrentWorkspace]))
-}
-
-func (t *TokenAuth) SetWorkspace(workspace string) {
-	t.CurrentWorkspace = workspace
-}
-
-func (t *TokenAuth) GetClient(ctx context.Context) (*http.Client, error) {
-	httpClient, err := uhttp.NewClient(ctx, uhttp.WithLogger(true, ctxzap.Extract(ctx)))
-	if err != nil {
-		return nil, err
-	}
-
-	return httpClient, nil
-}
-
-type BasicAuth struct {
-	Username string
-	Password string
-}
-
-func NewBasicAuth(username, password string) *BasicAuth {
-	return &BasicAuth{
-		Username: username,
-		Password: password,
-	}
-}
-
-func (b *BasicAuth) Apply(req *http.Request) {
-	req.SetBasicAuth(b.Username, b.Password)
-}
-
-func (b *BasicAuth) GetClient(ctx context.Context) (*http.Client, error) {
-	httpClient, err := uhttp.NewClient(ctx, uhttp.WithLogger(true, ctxzap.Extract(ctx)))
-	if err != nil {
-		return nil, err
-	}
-
-	return httpClient, nil
-}
-
 type OAuth2 struct {
 	cfg *clientcredentials.Config
 }
