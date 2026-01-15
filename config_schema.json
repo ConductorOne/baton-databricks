@@ -62,7 +62,9 @@
       "name": "account-hostname",
       "displayName": "Account Hostname",
       "description": "The hostname used to connect to the Databricks account API. If not set, it will be calculated from the hostname field.",
-      "stringField": {}
+      "stringField": {
+        "defaultValue": "accounts.cloud.databricks.com"
+      }
     },
     {
       "name": "account-id",
@@ -77,16 +79,26 @@
     },
     {
       "name": "databricks-client-id",
-      "displayName": "Databricks Client ID",
+      "displayName": "OAuth2 Client ID",
       "description": "The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API",
-      "stringField": {}
+      "isRequired": true,
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     },
     {
       "name": "databricks-client-secret",
-      "displayName": "Databricks Client Secret",
+      "displayName": "OAuth2 Client Secret",
       "description": "The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API",
+      "isRequired": true,
       "isSecret": true,
-      "stringField": {}
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     },
     {
       "name": "hostname",
@@ -95,115 +107,9 @@
       "stringField": {
         "defaultValue": "cloud.databricks.com"
       }
-    },
-    {
-      "name": "password",
-      "displayName": "Password",
-      "description": "The Databricks password used to connect to the Databricks API",
-      "isSecret": true,
-      "stringField": {}
-    },
-    {
-      "name": "workspace-tokens",
-      "displayName": "Workspace Tokens",
-      "description": "The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API",
-      "isSecret": true,
-      "stringSliceField": {}
-    },
-    {
-      "name": "username",
-      "displayName": "Username",
-      "description": "The Databricks username used to connect to the Databricks API",
-      "stringField": {}
-    },
-    {
-      "name": "workspaces",
-      "displayName": "Workspaces",
-      "description": "Limit syncing to the specified workspaces",
-      "stringSliceField": {}
-    }
-  ],
-  "constraints": [
-    {
-      "kind": "CONSTRAINT_KIND_AT_LEAST_ONE",
-      "fieldNames": [
-        "databricks-client-id",
-        "username",
-        "workspace-tokens"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
-      "fieldNames": [
-        "databricks-client-id",
-        "username",
-        "workspace-tokens"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_REQUIRED_TOGETHER",
-      "fieldNames": [
-        "databricks-client-id",
-        "databricks-client-secret"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_REQUIRED_TOGETHER",
-      "fieldNames": [
-        "username",
-        "password"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
-      "fieldNames": [
-        "workspace-tokens"
-      ],
-      "secondaryFieldNames": [
-        "workspaces"
-      ]
     }
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg",
-  "fieldGroups": [
-    {
-      "name": "oauth-group",
-      "displayName": "OAuth",
-      "helpText": "Authenticate using OAuth to sync information from all Databricks workspaces. Requires OAuth client ID and secret created following the Databricks OAuth authentication documentation.",
-      "fields": [
-        "account-id",
-        "databricks-client-id",
-        "databricks-client-secret",
-        "hostname",
-        "account-hostname"
-      ],
-      "default": true
-    },
-    {
-      "name": "personal-access-token-group",
-      "displayName": "Personal access token",
-      "helpText": "Authenticate using a personal access token to sync information from a single Databricks workspace. Requires a personal access token and the workspace ID.",
-      "fields": [
-        "account-id",
-        "workspace-tokens",
-        "workspaces",
-        "hostname",
-        "account-hostname"
-      ]
-    },
-    {
-      "name": "username-password-group",
-      "displayName": "Username and password",
-      "helpText": "Authenticate using your Databricks username and password to sync information from all Databricks workspaces.",
-      "fields": [
-        "account-id",
-        "username",
-        "password",
-        "hostname",
-        "account-hostname"
-      ]
-    }
-  ]
+  "iconUrl": "/static/app-icons/databricks.svg"
 }
