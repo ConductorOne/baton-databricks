@@ -170,7 +170,21 @@ func (c *Client) doRequest(
 
 	if err == nil {
 		l := ctxzap.Extract(ctx)
-		l.Debug("do request response", zap.Any("response", response))
+		var responseLen int
+		switch v := response.(type) {
+		case []byte:
+			responseLen = len(v)
+		case string:
+			responseLen = len(v)
+		case nil:
+			responseLen = 0
+		default:
+			// Try to marshal to get size, but ignore errors.
+			if b, err := json.Marshal(v); err == nil {
+				responseLen = len(b)
+			}
+		}
+		l.Debug("do request response size", zap.Int("response_size", responseLen))
 		return ratelimitData, nil
 	}
 
@@ -243,8 +257,6 @@ func (c *Client) doRequestNoResponse(
 	defer resp.Body.Close()
 
 	if err == nil {
-		l := ctxzap.Extract(ctx)
-		l.Debug("do request response", zap.Any("response", response))
 		return ratelimitData, nil
 	}
 
