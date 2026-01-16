@@ -105,6 +105,8 @@ func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource
 // Grants returns slice of grants representing workspace members.
 // To get workspace members, we can only use the account API.
 func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	l := ctxzap.Extract(ctx)
+
 	if !w.client.IsAccountAPIAvailable() {
 		return nil, nil, nil
 	}
@@ -120,8 +122,12 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	}
 
 	workspace := strconv.Itoa(int(workspaceId))
-	assignments, _, err := w.client.ListWorkspaceMembers(ctx, workspace)
+	assignments, rateLimitDesc, err := w.client.ListWorkspaceMembers(ctx, workspace)
+	annos := annotations.Annotations{}
 	if err != nil {
+		if rateLimitDesc != nil {
+			annos.WithRateLimiting(rateLimitDesc)
+		}
 		// Check if this is the specific error for workspaces without permissions API
 		var apiErr *databricks.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
@@ -133,7 +139,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 					zap.String("workspace_name", resource.DisplayName),
 				)
 				// Return empty grants for workspaces without permissions API
-				return []*v2.Grant{}, nil, nil
+				return []*v2.Grant{}, &rs.SyncOpResults{Annotations: annos}, nil
 			}
 			// If it's a 400 but not the specific permissions API error, log it and return error
 			l := ctxzap.Extract(ctx)
@@ -144,10 +150,11 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 				zap.String("error_detail", apiErr.Detail),
 			)
 		}
-		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
+		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
 
 	var rv []*v2.Grant
+	l.Debug("grants: workspace resource", zap.String("workspace_id", workspace), zap.Int("assignments_count", len(assignments)))
 	for _, assignment := range assignments {
 		resourceType, err := prepareResourceType(assignment.Principal)
 		if err != nil {

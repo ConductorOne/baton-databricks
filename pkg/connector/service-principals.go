@@ -152,6 +152,8 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 // Grants return all grants relevant to the servicePrincipal.
 // Databricks ServicePrincipals have membership and role grants.
 func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	l := ctxzap.Extract(ctx)
+
 	groupTrait, err := rs.GetGroupTrait(resource)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
@@ -178,7 +180,16 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 	}
 
 	var rv []*v2.Grant
+	l.Debug("grants: service principal resource",
+		zap.String("workspace_id", workspaceId),
+		zap.String("application_id", applicationId),
+		zap.Int("member_count", len(ruleSets)),
+	)
 	for _, ruleSet := range ruleSets {
+		l.Debug("processing rule set",
+			zap.String("role", ruleSet.Role),
+			zap.Int("principal_count", len(ruleSet.Principals)),
+		)
 		for _, p := range ruleSet.Principals {
 			resourceId, err := prepareResourceId(ctx, s.client, workspaceId, p)
 			if err != nil {

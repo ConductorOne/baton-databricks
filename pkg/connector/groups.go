@@ -170,6 +170,8 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 // Grants return all grants relevant to the group.
 // Databricks Groups have membership and role permissions grants (granting identity resource some permission to this specific group, e.g. group manager).
 func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	l := ctxzap.Extract(ctx)
+
 	var rv []*v2.Grant
 
 	parentId, groupId, err := parseResourceId(resource.Id.Resource)
@@ -196,6 +198,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.S
 		annos.WithRateLimiting(rateLimitData)
 	}
 
+	l.Debug("grants: group resource", zap.String("group_id", groupId.Resource), zap.Int("member_count", len(group.Members)))
 	for _, member := range group.Members {
 		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
 		pp := strings.Split(member.Ref, "/")
