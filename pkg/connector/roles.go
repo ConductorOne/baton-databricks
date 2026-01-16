@@ -78,9 +78,9 @@ func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.
 
 // List returns all the roles from the database as resource objects.
 // Roles include a RoleTrait because they are the 'shape' of a standard role.
-func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
+func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, _ rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil {
-		return nil, "", nil, nil
+		return nil, nil, nil
 	}
 
 	var rv []*v2.Resource
@@ -88,7 +88,7 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		for _, role := range roles {
 			rr, err := roleResource(ctx, role, parentResourceID)
 			if err != nil {
-				return nil, "", nil, err
+				return nil, nil, err
 			}
 
 			rv = append(rv, rr)
@@ -99,25 +99,24 @@ func (r *roleBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		for _, ent := range entitlements {
 			er, err := roleResource(ctx, ent, parentResourceID)
 			if err != nil {
-				return nil, "", nil, err
+				return nil, nil, err
 			}
 
 			rv = append(rv, er)
 		}
 	}
 
-	return rv, "", nil, nil
+	return rv, nil, nil
 }
 
 // Entitlements returns membership entitlements for a given role.
 func (r *roleBuilder) Entitlements(
 	_ context.Context,
 	resource *v2.Resource,
-	_ *pagination.Token,
+	_ rs.SyncOpAttrs,
 ) (
 	[]*v2.Entitlement,
-	string,
-	annotations.Annotations,
+	*rs.SyncOpResults,
 	error,
 ) {
 	return []*v2.Entitlement{
@@ -128,23 +127,23 @@ func (r *roleBuilder) Entitlements(
 			ent.WithDisplayName(fmt.Sprintf("%s role", resource.DisplayName)),
 			ent.WithDescription(fmt.Sprintf("%s Databricks role", resource.DisplayName)),
 		),
-	}, "", nil, nil
+	}, nil, nil
 }
 
 // Grants returns all the grants for a given role.
 // Since Databricks API does not support listing grants for a role, so that it aligns with the sdk API,
 // we have to go through all the users, groups and servicePrincipals to check if they have the role.
-func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
+func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	var rv []*v2.Grant
 
 	roleTrait, err := rs.GetRoleTrait(resource)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
 	}
 
 	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
 	}
 
 	isWorkspaceRole := parentType == workspaceResourceType.Id
@@ -157,12 +156,12 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 
 	roleName, ok := rs.GetProfileStringValue(roleTrait.Profile, "role_name")
 	if !ok {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get role type: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get role type: %w", err)
 	}
 
-	bag, page, err := parsePageToken(pToken.Token, &v2.ResourceId{ResourceType: roleResourceType.Id})
+	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: roleResourceType.Id})
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
 	switch bag.ResourceTypeID() {
@@ -186,7 +185,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			databricks.NewUserRolesAttrVars(),
 		)
 		if err != nil {
-			return nil, "", nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
+			return nil, nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
 		}
 
 		// check if user has the role
@@ -194,14 +193,14 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			if !isWorkspaceRole && u.HaveRole(roleName) {
 				uID, err := rs.NewResourceID(userResourceType, u.ID)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create user resource id: %w", err)
+					return nil, nil, fmt.Errorf("databricks-connector: failed to create user resource id: %w", err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, uID))
 			} else if isWorkspaceRole && u.HaveEntitlement(roleName) {
 				uID, err := rs.NewResourceID(userResourceType, u.ID)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create user resource id: %w", err)
+					return nil, nil, fmt.Errorf("databricks-connector: failed to create user resource id: %w", err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, uID))
@@ -211,7 +210,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		token := prepareNextToken(page, len(users), total)
 		err = bag.Next(token)
 		if err != nil {
-			return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 		}
 
 	case groupResourceType.Id:
@@ -222,7 +221,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			databricks.NewGroupRolesAttrVars(),
 		)
 		if err != nil {
-			return nil, "", nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
+			return nil, nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
 		}
 
 		// check if group has the role
@@ -236,11 +235,11 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 				accountId := r.client.GetAccountId()
 				accountResourceId, err := rs.NewResourceID(accountResourceType, accountId)
 				if err != nil {
-					return rv, "", nil, err
+					return rv, nil, err
 				}
 				resourceId, expandAnnotation, err := groupGrantExpansion(ctx, g.ID, accountResourceId)
 				if err != nil {
-					return rv, "", nil, err
+					return rv, nil, err
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, resourceId, grant.WithAnnotation(expandAnnotation)))
@@ -250,7 +249,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		token := prepareNextToken(page, len(groups), total)
 		err = bag.Next(token)
 		if err != nil {
-			return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 		}
 
 	case servicePrincipalResourceType.Id:
@@ -261,7 +260,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			databricks.NewServicePrincipalRolesAttrVars(),
 		)
 		if err != nil {
-			return nil, "", nil, fmt.Errorf("databricks-connector: failed to list service principals: %w", err)
+			return nil, nil, fmt.Errorf("databricks-connector: failed to list service principals: %w", err)
 		}
 
 		// check if service principal has the role
@@ -269,14 +268,14 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 			if !isWorkspaceRole && sp.HaveRole(roleName) {
 				spID, err := rs.NewResourceID(servicePrincipalResourceType, sp.ID)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create service principal resource id: %w", err)
+					return nil, nil, fmt.Errorf("databricks-connector: failed to create service principal resource id: %w", err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, spID))
 			} else if isWorkspaceRole && sp.HaveEntitlement(roleName) {
 				spID, err := rs.NewResourceID(servicePrincipalResourceType, sp.ID)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to create service principal resource id: %w", err)
+					return nil, nil, fmt.Errorf("databricks-connector: failed to create service principal resource id: %w", err)
 				}
 
 				rv = append(rv, grant.NewGrant(resource, RoleMemberEntitlement, spID))
@@ -286,19 +285,19 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken 
 		token := prepareNextToken(page, len(servicePrincipals), total)
 		err = bag.Next(token)
 		if err != nil {
-			return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 		}
 
 	default:
-		return nil, "", nil, fmt.Errorf("databricks-connector: invalid resource type: %s", bag.ResourceTypeID())
+		return nil, nil, fmt.Errorf("databricks-connector: invalid resource type: %s", bag.ResourceTypeID())
 	}
 
 	nextPage, err := bag.Marshal()
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, nextPage, nil, nil
+	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
 }
 
 func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {

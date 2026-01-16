@@ -8,7 +8,6 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/conductorone/baton-sdk/pkg/pagination"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
@@ -83,9 +82,9 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 
 // List returns all the users from the database as resource objects.
 // Users include a UserTrait because they are the 'shape' of a standard user.
-func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
+func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil {
-		return nil, "", nil, nil
+		return nil, nil, nil
 	}
 
 	var workspaceId string
@@ -93,9 +92,9 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		workspaceId = parentResourceID.Resource
 	}
 
-	bag, page, err := parsePageToken(pToken.Token, &v2.ResourceId{ResourceType: userResourceType.Id})
+	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: userResourceType.Id})
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
 	users, total, _, err := u.client.ListUsers(
@@ -105,7 +104,7 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		databricks.NewUserAttrVars(),
 	)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
 	}
 
 	var rv []*v2.Resource
@@ -114,7 +113,7 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 
 		ur, err := u.userResource(ctx, &uCopy, parentResourceID)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, nil, err
 		}
 
 		rv = append(rv, ur)
@@ -123,38 +122,36 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 	token := prepareNextToken(page, len(users), total)
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, nextPage, nil, nil
+	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
 }
 
 // Entitlements always returns an empty slice for users.
 func (u *userBuilder) Entitlements(
 	_ context.Context,
 	_ *v2.Resource,
-	_ *pagination.Token,
+	_ rs.SyncOpAttrs,
 ) (
 	[]*v2.Entitlement,
-	string,
-	annotations.Annotations,
+	*rs.SyncOpResults,
 	error,
 ) {
-	return nil, "", nil, nil
+	return nil, nil, nil
 }
 
 // Grants always returns an empty slice for users since they don't have any entitlements.
 func (u *userBuilder) Grants(
 	_ context.Context,
 	_ *v2.Resource,
-	_ *pagination.Token,
+	_ rs.SyncOpAttrs,
 ) (
 	[]*v2.Grant,
-	string,
-	annotations.Annotations,
+	*rs.SyncOpResults,
 	error,
 ) {
-	return nil, "", nil, nil
+	return nil, nil, nil
 }
 
 func (o *userBuilder) CreateAccountCapabilityDetails(ctx context.Context) (*v2.CredentialDetailsAccountProvisioning, annotations.Annotations, error) {

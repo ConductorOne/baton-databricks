@@ -11,7 +11,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 )
@@ -22,7 +21,7 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
-	syncers := []connectorbuilder.ResourceSyncer{
+	syncers := []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
@@ -31,39 +30,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newRoleBuilder(d.client),
 	}
 
-	// Convert ResourceSyncer to ResourceSyncerV2
-	v2Syncers := make([]connectorbuilder.ResourceSyncerV2, len(syncers))
-	for i, syncer := range syncers {
-		v2Syncers[i] = &resourceSyncerV1toV2Adapter{syncer: syncer}
-	}
-	return v2Syncers
-}
-
-// resourceSyncerV1toV2Adapter adapts a ResourceSyncer to ResourceSyncerV2.
-type resourceSyncerV1toV2Adapter struct {
-	syncer connectorbuilder.ResourceSyncer
-}
-
-func (a *resourceSyncerV1toV2Adapter) ResourceType(ctx context.Context) *v2.ResourceType {
-	return a.syncer.ResourceType(ctx)
-}
-
-func (a *resourceSyncerV1toV2Adapter) List(ctx context.Context, parentResourceID *v2.ResourceId, opts resource.SyncOpAttrs) ([]*v2.Resource, *resource.SyncOpResults, error) {
-	resources, pageToken, annos, err := a.syncer.List(ctx, parentResourceID, &opts.PageToken)
-	ret := &resource.SyncOpResults{NextPageToken: pageToken, Annotations: annos}
-	return resources, ret, err
-}
-
-func (a *resourceSyncerV1toV2Adapter) Entitlements(ctx context.Context, r *v2.Resource, opts resource.SyncOpAttrs) ([]*v2.Entitlement, *resource.SyncOpResults, error) {
-	ents, pageToken, annos, err := a.syncer.Entitlements(ctx, r, &opts.PageToken)
-	ret := &resource.SyncOpResults{NextPageToken: pageToken, Annotations: annos}
-	return ents, ret, err
-}
-
-func (a *resourceSyncerV1toV2Adapter) Grants(ctx context.Context, r *v2.Resource, opts resource.SyncOpAttrs) ([]*v2.Grant, *resource.SyncOpResults, error) {
-	grants, pageToken, annos, err := a.syncer.Grants(ctx, r, &opts.PageToken)
-	ret := &resource.SyncOpResults{NextPageToken: pageToken, Annotations: annos}
-	return grants, ret, err
+	return syncers
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client

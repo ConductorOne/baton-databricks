@@ -9,7 +9,6 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
-	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -72,28 +71,27 @@ func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error
 	return resource, nil
 }
 
-func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pToken *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
+func (a *accountBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, _ rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	ur, err := a.accountResource(ctx)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, nil, err
 	}
 
-	return []*v2.Resource{ur}, "", nil, nil
+	return []*v2.Resource{ur}, nil, nil
 }
 
 // Entitlements returns slice of entitlements for marketplace admins under account.
 func (a *accountBuilder) Entitlements(
 	_ context.Context,
 	resource *v2.Resource,
-	_ *pagination.Token,
+	_ rs.SyncOpAttrs,
 ) (
 	[]*v2.Entitlement,
-	string,
-	annotations.Annotations,
+	*rs.SyncOpResults,
 	error,
 ) {
 	if !a.client.IsAccountAPIAvailable() {
-		return nil, "", nil, nil
+		return nil, nil, nil
 	}
 	return []*v2.Entitlement{
 		ent.NewPermissionEntitlement(
@@ -103,14 +101,14 @@ func (a *accountBuilder) Entitlements(
 			ent.WithDisplayName(fmt.Sprintf("%s %s role", resource.DisplayName, MarketplaceAdminRole)),
 			ent.WithDescription(fmt.Sprintf("%s %s role in Databricks", resource.DisplayName, MarketplaceAdminRole)),
 		),
-	}, "", nil, nil
+	}, nil, nil
 }
 
 // Grants returns grants for marketplace admins under account.
 // To get marketplace admins, we can only use the account API.
-func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
+func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	if !a.client.IsAccountAPIAvailable() {
-		return nil, "", nil, nil
+		return nil, nil, nil
 	}
 
 	var rv []*v2.Grant
@@ -118,7 +116,7 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 	// list rule sets for the account
 	ruleSets, _, err := a.client.ListRuleSets(ctx, "", "", "")
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", resource.Id.Resource, err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to list rule sets for account %s: %w", resource.Id.Resource, err)
 	}
 
 	for _, ruleSet := range ruleSets {
@@ -127,14 +125,14 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 			for _, p := range ruleSet.Principals {
 				resourceId, err := prepareResourceId(ctx, a.client, "", p)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
+					return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 				}
 
 				var annotations []protoreflect.ProtoMessage
 				if resourceId.ResourceType == groupResourceType.Id {
 					rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, resource.ParentResourceId)
 					if err != nil {
-						return rv, "", nil, err
+						return rv, nil, err
 					}
 					resourceId = rid
 					annotations = append(annotations, expandAnnotation)
@@ -145,7 +143,7 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, pTok
 		}
 	}
 
-	return rv, "", nil, nil
+	return rv, nil, nil
 }
 
 func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
