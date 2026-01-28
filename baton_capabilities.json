@@ -1,89 +1,89 @@
 {
-  "@type": "type.googleapis.com/c1.connector.v2.ConnectorCapabilities",
-  "resourceTypeCapabilities": [
+  "@type":  "type.googleapis.com/c1.connector.v2.ConnectorCapabilities",
+  "resourceTypeCapabilities":  [
     {
-      "resourceType": {
-        "id": "account",
-        "displayName": "Account"
+      "resourceType":  {
+        "id":  "account",
+        "displayName":  "Account"
       },
-      "capabilities": [
+      "capabilities":  [
         "CAPABILITY_SYNC"
       ],
-      "permissions": {}
+      "permissions":  {}
     },
     {
-      "resourceType": {
-        "id": "group",
-        "displayName": "Group",
-        "traits": [
+      "resourceType":  {
+        "id":  "group",
+        "displayName":  "Group",
+        "traits":  [
           "TRAIT_GROUP"
         ]
       },
-      "capabilities": [
+      "capabilities":  [
         "CAPABILITY_SYNC"
       ],
-      "permissions": {}
+      "permissions":  {}
     },
     {
-      "resourceType": {
-        "id": "role",
-        "displayName": "Role",
-        "traits": [
+      "resourceType":  {
+        "id":  "role",
+        "displayName":  "Role",
+        "traits":  [
           "TRAIT_ROLE"
         ]
       },
-      "capabilities": [
+      "capabilities":  [
         "CAPABILITY_SYNC"
       ],
-      "permissions": {}
+      "permissions":  {}
     },
     {
-      "resourceType": {
-        "id": "service_principal",
-        "displayName": "Service Principal",
-        "traits": [
+      "resourceType":  {
+        "id":  "service_principal",
+        "displayName":  "Service Principal",
+        "traits":  [
           "TRAIT_GROUP"
         ]
       },
-      "capabilities": [
+      "capabilities":  [
         "CAPABILITY_SYNC"
       ],
-      "permissions": {}
+      "permissions":  {}
     },
     {
-      "resourceType": {
-        "id": "user",
-        "displayName": "User",
-        "traits": [
+      "resourceType":  {
+        "id":  "user",
+        "displayName":  "User",
+        "traits":  [
           "TRAIT_USER"
         ],
-        "annotations": [
+        "annotations":  [
           {
-            "@type": "type.googleapis.com/c1.connector.v2.SkipEntitlementsAndGrants"
+            "@type":  "type.googleapis.com/c1.connector.v2.SkipEntitlementsAndGrants"
           }
         ]
       },
-      "capabilities": [
+      "capabilities":  [
         "CAPABILITY_SYNC"
       ],
-      "permissions": {}
+      "permissions":  {}
     },
     {
-      "resourceType": {
-        "id": "workspace",
-        "displayName": "Workspace",
-        "traits": [
+      "resourceType":  {
+        "id":  "workspace",
+        "displayName":  "Workspace",
+        "traits":  [
           "TRAIT_GROUP"
         ]
       },
-      "capabilities": [
+      "capabilities":  [
         "CAPABILITY_SYNC"
       ],
-      "permissions": {}
+      "permissions":  {}
     }
   ],
-  "connectorCapabilities": [
+  "connectorCapabilities":  [
     "CAPABILITY_SYNC"
   ],
-  "credentialDetails": {}
+  "credentialDetails":  {}
 }
