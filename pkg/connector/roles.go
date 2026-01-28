@@ -156,7 +156,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 
 	roleName, ok := rs.GetProfileStringValue(roleTrait.Profile, "role_name")
 	if !ok {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get role type: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get role type from role profile")
 	}
 
 	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: roleResourceType.Id})
