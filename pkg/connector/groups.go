@@ -42,22 +42,11 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 }
 
 func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
-	members := make([]string, len(group.Members))
-
-	for i, member := range group.Members {
-		// Ref contains both the type and the ID of the member
-		members[i] = member.Ref
-	}
-
 	profile := map[string]interface{}{
 		"display_name": group.DisplayName,
 		"group_id":     group.ID,
 		"parent_type":  parent.GetResourceType(),
 		"parent_id":    parent.GetResource(),
-	}
-
-	if len(members) > 0 {
-		profile["members"] = strings.Join(members, ",")
 	}
 
 	groupTraitOptions := []rs.GroupTraitOption{
@@ -198,7 +187,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	// membership grants
 	// Always fetch the group with members attribute to ensure we get the members
 	// regardless of authentication type (OAuth vs personal access token)
-	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
+	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 	}
@@ -313,7 +302,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
+		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
@@ -456,7 +445,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
+		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
