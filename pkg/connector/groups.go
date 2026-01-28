@@ -12,7 +12,6 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
-	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -76,9 +75,9 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 
 // List returns all the groups from the database as resource objects.
 // Groups include a GroupTrait because they are the 'shape' of a standard group.
-func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, pg *pagination.Token) ([]*v2.Resource, string, annotations.Annotations, error) {
+func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil {
-		return nil, "", nil, nil
+		return nil, nil, nil
 	}
 
 	workspaceId := ""
@@ -86,9 +85,9 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		workspaceId = parentResourceID.Resource
 	}
 
-	bag, page, err := parsePageToken(pg.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})
+	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
 	groups, total, _, err := g.client.ListGroups(
@@ -98,7 +97,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		databricks.NewGroupAttrVars(),
 	)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
 	}
 
 	var rv []*v2.Resource
@@ -107,7 +106,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 
 		gr, err := groupResource(ctx, &gCopy, parentResourceID)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, nil, err
 		}
 
 		rv = append(rv, gr)
@@ -116,17 +115,17 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 	token := prepareNextToken(page, len(groups), total)
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, nextPage, nil, nil
+	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
 }
 
 // Entitlements return all entitlements relevant to the group.
 // Group can have members, which represent membership entitlements,
 // it can have permissions assigned to it, which represent role permissions entitlements,
 // and it can also have entitlements assigned to it, which are represented in role resource type.
-func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _ *pagination.Token) ([]*v2.Entitlement, string, annotations.Annotations, error) {
+func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
 	var rv []*v2.Entitlement
 
 	var workspaceId string
@@ -145,14 +144,14 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 
 	_, groupId, err := parseResourceId(resource.Id.Resource)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
 	}
 
 	// role permissions entitlements
 	// get all assignable roles for this specific group resource
 	roles, _, err := g.client.ListRoles(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list roles for group %s: %w", groupId.Resource, err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to list roles for group %s: %w", groupId.Resource, err)
 	}
 
 	for _, role := range roles {
@@ -165,17 +164,19 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 		rv = append(rv, ent.NewPermissionEntitlement(resource, role.Name, rolePermissionOptions...))
 	}
 
-	return rv, "", nil, nil
+	return rv, nil, nil
 }
 
 // Grants return all grants relevant to the group.
 // Databricks Groups have membership and role permissions grants (granting identity resource some permission to this specific group, e.g. group manager).
-func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken *pagination.Token) ([]*v2.Grant, string, annotations.Annotations, error) {
+func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	l := ctxzap.Extract(ctx)
+
 	var rv []*v2.Grant
 
 	parentId, groupId, err := parseResourceId(resource.Id.Resource)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
 	}
 
 	var workspaceId string
@@ -189,7 +190,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	// regardless of authentication type (OAuth vs personal access token)
 	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 	}
 
 	annos := annotations.Annotations{}
@@ -197,11 +198,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		annos.WithRateLimiting(rateLimitData)
 	}
 
+	l.Debug("grants: group resource", zap.String("group_id", groupId.Resource), zap.Int("member_count", len(group.Members)))
 	for _, member := range group.Members {
 		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
 		pp := strings.Split(member.Ref, "/")
 		if len(pp) != 2 {
-			return nil, "", nil, fmt.Errorf("databricks-connector: invalid member format of %s", member.Ref)
+			return nil, nil, fmt.Errorf("databricks-connector: invalid member format of %s", member.Ref)
 		}
 
 		memberType, memberID := pp[0], pp[1]
@@ -214,14 +216,14 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		case "Groups":
 			rid, expandAnnotation, err := groupGrantExpansion(ctx, memberID, parentId)
 			if err != nil {
-				return rv, "", nil, err
+				return rv, nil, err
 			}
 			resourceId = rid
 			anns = append(anns, expandAnnotation)
 		case "ServicePrincipals":
 			resourceId = &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: memberID}
 		default:
-			return nil, "", nil, fmt.Errorf("databricks-connector: invalid member type: %s", memberType)
+			return nil, nil, fmt.Errorf("databricks-connector: invalid member type: %s", memberType)
 		}
 
 		rv = append(rv, grant.NewGrant(resource, groupMemberEntitlement, resourceId, grant.WithAnnotation(anns...)))
@@ -230,7 +232,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 	// role permissions grants
 	ruleSets, rateLimitDataRuleSets, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)
 	}
 
 	if rateLimitDataRuleSets != nil {
@@ -241,13 +243,13 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		for _, p := range ruleSet.Principals {
 			resourceId, err := prepareResourceId(ctx, g.client, workspaceId, p)
 			if err != nil {
-				return nil, "", nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
+				return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource id for principal %s: %w", p, err)
 			}
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
 				rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, resource.ParentResourceId)
 				if err != nil {
-					return rv, "", nil, err
+					return rv, nil, err
 				}
 				resourceId = rid
 				annotations = append(annotations, expandAnnotation)
@@ -257,7 +259,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, pToken
 		}
 	}
 
-	return rv, "", annos, nil
+	return rv, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
 func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
