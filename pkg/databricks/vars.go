@@ -88,6 +88,14 @@ func NewGroupAttrVars() *AttrVars {
 		Attrs: []string{
 			"id",
 			"displayName",
+		},
+	}
+}
+
+func NewGroupMembersAttrVars() *AttrVars {
+	return &AttrVars{
+		Attrs: []string{
+			"id",
 			"members",
 		},
 	}
