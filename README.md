@@ -127,7 +127,7 @@ Available Commands:
   help               Help about any command
 
 Flags:
-      --account-hostname string           The hostname used to connect to the Databricks account API ($BATON_ACCOUNT_HOSTNAME)
+      --account-hostname string           The hostname used to connect to the Databricks account API ($BATON_ACCOUNT_HOSTNAME) (default "accounts.cloud.databricks.com")
       --account-id string                 required: The Databricks account ID used to connect to the Databricks Account and Workspace API ($BATON_ACCOUNT_ID)
       --client-id string                  The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string              The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
@@ -138,14 +138,10 @@ Flags:
       --hostname string                   The Databricks hostname used to connect to the Databricks API ($BATON_HOSTNAME) (default "cloud.databricks.com")
       --log-format string                 The output format for logs: json, console ($BATON_LOG_FORMAT) (default "json")
       --log-level string                  The log level: debug, info, warn, error ($BATON_LOG_LEVEL) (default "info")
-      --password string                   The Databricks password used to connect to the Databricks API ($BATON_PASSWORD)
   -p, --provisioning                      This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-full-sync                    This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
       --ticketing                         This must be set to enable ticketing support ($BATON_TICKETING)
-      --username string                   The Databricks username used to connect to the Databricks API ($BATON_USERNAME)
   -v, --version                           version for baton-databricks
-      --workspace-tokens strings          The Databricks access tokens scoped to specific workspaces used to connect to the Databricks Workspace API ($BATON_WORKSPACE_TOKENS)
-      --workspaces strings                Limit syncing to the specified workspaces ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```
