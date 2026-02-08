@@ -144,7 +144,8 @@ func New(
 	ctx context.Context,
 	hostname,
 	accountHostname,
-	accountID string,
+	accountID,
+	baseURL string,
 	auth databricks.Auth,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
@@ -152,7 +153,7 @@ func New(
 		return nil, err
 	}
 
-	client, err := databricks.NewClient(ctx, httpClient, hostname, accountHostname, accountID, auth)
+	client, err := databricks.NewClient(ctx, httpClient, hostname, accountHostname, accountID, baseURL, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +175,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.Hostname,
 		accountHostname,
 		cfg.AccountId,
+		cfg.BaseUrl,
 		auth,
 	)
 	if err != nil {
