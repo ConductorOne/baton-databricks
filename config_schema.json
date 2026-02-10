@@ -81,6 +81,18 @@
       }
     },
     {
+      "name": "http-timeout-seconds",
+      "description": "HTTP client timeout in seconds (max 1800)",
+      "isOps": true,
+      "intField": {
+        "defaultValue": "300",
+        "rules": {
+          "lte": "1800",
+          "gte": "1"
+        }
+      }
+    },
+    {
       "name": "account-hostname",
       "displayName": "Account Hostname",
       "description": "The hostname used to connect to the Databricks account API. If not set, it will be calculated from the hostname field.",
