@@ -1,44 +1,44 @@
 ![Baton Logo](./docs/images/baton-logo.png)
 
-# `baton-databricks` [![Go Reference](https://pkg.go.dev/badge/github.com/conductorone/baton-databricks.svg)](https://pkg.go.dev/github.com/conductorone/baton-databricks) ![main ci](https://github.com/conductorone/baton-databricks/actions/workflows/main.yaml/badge.svg)
+# `baton-databricks` [![Go Reference](https://pkg.go.dev/badge/github.com/conductorone/baton-databricks.svg)](https://pkg.go.dev/github.com/conductorone/baton-databricks) ![ci](https://github.com/conductorone/baton-databricks/actions/workflows/ci.yaml/badge.svg) ![verify](https://github.com/conductorone/baton-databricks/actions/workflows/verify.yaml/badge.svg)
 
-`baton-databricks` is a connector for Databricks built using the 
-[Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the 
-Databricks API, to sync data about Databricks identities (users, groups and 
-service principals), roles and workspaces. 
+`baton-databricks` is a connector for Databricks built using the
+[Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
+Databricks API, to sync data about Databricks identities (users, groups and
+service principals), roles and workspaces.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
 # Prerequisites
 
-To work with the connector, you can choose from multiple ways to run it, but the 
-main requirement is to have a Databricks account and its ID. You can find the ID 
-of an account, after you log into account platform and click on your username in 
-right top corner that will open a dropdown menu with the account ID along other 
+To work with the connector, you can choose from multiple ways to run it, but the
+main requirement is to have a Databricks account and its ID. You can find the ID
+of an account, after you log into account platform and click on your username in
+right top corner that will open a dropdown menu with the account ID along other
 options.
 
-Another requirement is to have valid credentials to run the connector with. This 
-will decide how connector will be executed. You can use either OAuth client 
-credentials flow or Basic auth flow (username and password) or Bearer auth flow. 
-Both OAuth and Basic can be used across account and all workspaces you have 
+Another requirement is to have valid credentials to run the connector with. This
+will decide how connector will be executed. You can use either OAuth client
+credentials flow or Basic auth flow (username and password) or Bearer auth flow.
+Both OAuth and Basic can be used across account and all workspaces you have
 access to. Bearer auth can be used only for a specific workspace.
 
-To use the OAuth, you need to create a service principal and add OAuth secret 
-(client id and secret) to it. You can do that by going to the user management 
-tab and clicking on the Service Principals tab. Then click on the Add Service 
-principal button and name it. You then need to add OAuth secret to it by 
-clicking on the Generate secret button. You can use this secret to authenticate 
-across all workspaces that service principal has access to. To use basic auth, 
-you just need to provide a username and password of a user that has access to 
-the Databricks API. Both methods require admin access to the Databricks account 
+To use the OAuth, you need to create a service principal and add OAuth secret
+(client id and secret) to it. You can do that by going to the user management
+tab and clicking on the Service Principals tab. Then click on the Add Service
+principal button and name it. You then need to add OAuth secret to it by
+clicking on the Generate secret button. You can use this secret to authenticate
+across all workspaces that service principal has access to. To use basic auth,
+you just need to provide a username and password of a user that has access to
+the Databricks API. Both methods require admin access to the Databricks account
 and each workspace you want to sync.
 
 To use bearer auth, you need to provide a Databricks workspace access token. You
-can create a new token by logging into the workspace and going into user 
-settings. Then go to Developer tab and create a new access token. This will try 
-to work with only specified workspaces and their respective tokens. You can 
-provide multiple tokens by separating them with a comma. This method requires 
-admin access to each workspace you want to sync. 
+can create a new token by logging into the workspace and going into user
+settings. Then go to Developer tab and create a new access token. This will try
+to work with only specified workspaces and their respective tokens. You can
+provide multiple tokens by separating them with a comma. This method requires
+admin access to each workspace you want to sync.
 
 # Using Azure Databricks
 
@@ -87,27 +87,26 @@ baton resources
 - Users
 - Roles
 
-By default, connector will fetch all resources from the account and all 
-workspaces. You can limit the scope of the sync by providing a list of 
-workspaces to sync with. You can do that by providing a comma-separated list of 
-workspace hostnames to the `--workspaces` flag. You can also provide a list of 
-workspace access tokens to the `--workspace-tokens` flag. This will limit the 
-sync to only workspaces that are associated with those tokens. You can also use 
-both flags at the same time. If you do that, connector will sync with all 
-workspaces that are associated with provided tokens and all workspaces that are 
-in the list of workspaces.  
+By default, connector will fetch all resources from the account and all
+workspaces. You can limit the scope of the sync by providing a list of
+workspaces to sync with. You can do that by providing a comma-separated list of
+workspace hostnames to the `--workspaces` flag. You can also provide a list of
+workspace access tokens to the `--workspace-tokens` flag. This will limit the
+sync to only workspaces that are associated with those tokens. You can also use
+both flags at the same time. If you do that, connector will sync with all
+workspaces that are associated with provided tokens and all workspaces that are
+in the list of workspaces.
 
 ## Group povisioning limitations
 provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
-this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.  
-[here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.) are the different types of groups in Databricks 
-
+this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.
+[here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.) are the different types of groups in Databricks
 
 # Contributing, Support and Issues
 
-We started Baton because we were tired of taking screenshots and manually 
-building spreadsheets. We welcome contributions, and ideas, no matter how 
-small&mdash;our goal is to make identity and permissions sprawl less painful for 
+We started Baton because we were tired of taking screenshots and manually
+building spreadsheets. We welcome contributions, and ideas, no matter how
+small&mdash;our goal is to make identity and permissions sprawl less painful for
 everyone. If you have questions, problems, or ideas: Please open a GitHub Issue!
 
 See [CONTRIBUTING.md](https://github.com/ConductorOne/baton/blob/main/CONTRIBUTING.md) for more details.
