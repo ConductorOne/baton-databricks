@@ -54,11 +54,23 @@ func GetAccountHostname(hostname string) string {
 	return "accounts." + hostname
 }
 
-func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID string, auth Auth) (*Client, error) {
-	baseUrl := &url.URL{
-		Scheme: "https",
-		Host:   hostname,
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth) (*Client, error) {
+	var baseUrl *url.URL
+	var err error
+
+	// If baseURL is provided, use it directly (for testing)
+	if baseURL != "" {
+		baseUrl, err = url.Parse(baseURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse base URL: %w", err)
+		}
+	} else {
+		baseUrl = &url.URL{
+			Scheme: "https",
+			Host:   hostname,
+		}
 	}
+
 	accountBaseUrl := &url.URL{
 		Scheme: "https",
 		Host:   accountHostname,

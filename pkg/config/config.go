@@ -36,12 +36,18 @@ var (
 		field.WithDefaultValue("cloud.databricks.com"),
 		field.WithDisplayName("Hostname"),
 	)
+	BaseURLField = field.StringField(
+		"base-url",
+		field.WithDescription("Override the Databricks API URL (for testing)"),
+		field.WithHidden(true),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
 		HostnameField,
+		BaseURLField,
 	}
 )
 
