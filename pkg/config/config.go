@@ -40,6 +40,7 @@ var (
 		"base-url",
 		field.WithDescription("Override the Databricks API URL (for testing)"),
 		field.WithHidden(true),
+		field.WithExportTarget(field.ExportTargetCLIOnly),
 	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
