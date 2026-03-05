@@ -9,6 +9,7 @@ type Databricks struct {
 	DatabricksClientId string `mapstructure:"databricks-client-id"`
 	DatabricksClientSecret string `mapstructure:"databricks-client-secret"`
 	Hostname string `mapstructure:"hostname"`
+	BaseUrl string `mapstructure:"base-url"`
 }
 
 func (c *Databricks) findFieldByTag(tagValue string) (any, bool) {
