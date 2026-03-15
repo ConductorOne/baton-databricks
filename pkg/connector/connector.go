@@ -179,7 +179,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		auth,
 	)
 	if err != nil {
-		l.Error("error creating connector", zap.Error(err))
+		l.Warn("error creating connector", zap.Error(err))
 		return nil, nil, err
 	}
 
