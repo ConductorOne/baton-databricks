@@ -58,8 +58,7 @@ type Options struct {
 	// the client option BaseEndpoint instead.
 	EndpointResolver EndpointResolver
 
-	// Resolves the endpoint used for a particular service operation. This should be
-	// used over the deprecated EndpointResolver.
+	// Resolves the endpoint used for a particular service operation.
 	EndpointResolverV2 EndpointResolverV2
 
 	// Signature Version 4 (SigV4) Signer
@@ -128,6 +127,9 @@ type Options struct {
 
 	// The list of auth schemes supported by the client.
 	AuthSchemes []smithyhttp.AuthScheme
+
+	// Priority list of preferred auth scheme names (e.g. sigv4a).
+	AuthSchemePreference []string
 }
 
 // Copy creates a clone where the APIOptions list is deep copied.
