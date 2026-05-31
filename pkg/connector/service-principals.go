@@ -43,6 +43,13 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 
+	// A Databricks service principal is a registered identity that holds its own
+	// credentials and scopes, so classify it as an app-registration NHI.
+	options = append(options, rs.WithNHIType(
+		v2.NonHumanIdentityTrait_NHI_TYPE_APP_REGISTRATION,
+		"databricks.service_principal",
+	))
+
 	resource, err := rs.NewGroupResource(
 		servicePrincipal.DisplayName,
 		servicePrincipalResourceType,
