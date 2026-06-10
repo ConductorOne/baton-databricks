@@ -33,10 +33,10 @@ func TestSPSecretBuilder_List_Basic(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 			"secrets":         secrets,
 			"next_page_token": "",
-		})
+		}))
 	}))
 	defer srv.Close()
 
@@ -86,15 +86,15 @@ func TestSPSecretBuilder_List_Pagination(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		callCount++
 		if r.URL.Query().Get("page_token") == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 				"secrets":         page1,
 				"next_page_token": "cursor-page-2",
-			})
+			}))
 		} else {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 				"secrets":         page2,
 				"next_page_token": "",
-			})
+			}))
 		}
 	}))
 	defer srv.Close()
@@ -165,7 +165,7 @@ func TestSPSecretBuilder_NoEntitlementsOrGrants(t *testing.T) {
 func TestSPSecretBuilder_List_CreatedAtParsed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 			"secrets": []map[string]interface{}{
 				{
 					"id":          "s-ts",
@@ -175,7 +175,7 @@ func TestSPSecretBuilder_List_CreatedAtParsed(t *testing.T) {
 				},
 			},
 			"next_page_token": "",
-		})
+		}))
 	}))
 	defer srv.Close()
 

@@ -38,7 +38,7 @@ const (
 
 	// Workspace PATs: workspace-level, admin-only.
 	// https://docs.databricks.com/api/workspace/tokenmanagement
-	workspaceTokensEndpoint = "/api/2.0/token-management/tokens"
+	workspaceTokensEndpoint = "/api/2.0/token-management/tokens" //nolint:gosec // URL path, not a credential
 )
 
 type Client struct {

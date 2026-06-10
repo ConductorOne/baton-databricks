@@ -45,6 +45,7 @@ func workspaceResource(_ context.Context, workspace *databricks.Workspace, paren
 		rs.WithParentResourceID(parent),
 		rs.WithAnnotation(
 			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: workspacePATResourceType.Id},
 		),
 	)
 

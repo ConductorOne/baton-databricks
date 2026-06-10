@@ -34,9 +34,9 @@ func TestTokenBuilder_List_Basic(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 			"token_infos": tokens,
-		})
+		}))
 	}))
 	defer srv.Close()
 
@@ -97,9 +97,9 @@ func TestTokenBuilder_List_Forbidden_GracefulDegrade(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 			"message": "User does not have CAN_MANAGE permission",
-		})
+		}))
 	}))
 	defer srv.Close()
 
@@ -121,9 +121,9 @@ func TestTokenBuilder_List_Unauthorized_GracefulDegrade(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 			"message": "Unauthorized",
-		})
+		}))
 	}))
 	defer srv.Close()
 
@@ -179,9 +179,9 @@ func TestTokenBuilder_NoEntitlementsOrGrants(t *testing.T) {
 func TestTokenBuilder_List_Empty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 			"token_infos": []interface{}{},
-		})
+		}))
 	}))
 	defer srv.Close()
 
