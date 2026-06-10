@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/pagination"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/stretchr/testify/require"
 )
@@ -106,17 +107,24 @@ func TestSPSecretBuilder_List_Pagination(t *testing.T) {
 		Resource:     "99",
 	}
 
-	resources, _, err := builder.List(context.Background(), parentID, rs.SyncOpAttrs{})
+	// First page: empty token → returns page 1 + a next-page token.
+	page1Resources, results1, err := builder.List(context.Background(), parentID, rs.SyncOpAttrs{})
 	require.NoError(t, err)
-	require.Len(t, resources, 2)
-	require.Equal(t, 2, callCount)
+	require.Len(t, page1Resources, 1)
+	require.NotNil(t, results1, "first call must return a SyncOpResults with a next-page token")
+	require.NotEmpty(t, results1.NextPageToken)
+	require.Equal(t, 1, callCount)
+	require.Equal(t, "s1", page1Resources[0].Id.Resource)
 
-	ids := map[string]bool{}
-	for _, r := range resources {
-		ids[r.Id.Resource] = true
-	}
-	require.True(t, ids["s1"])
-	require.True(t, ids["s2"])
+	// Second page: token from first call → returns page 2 + no more token.
+	page2Resources, results2, err := builder.List(context.Background(), parentID, rs.SyncOpAttrs{
+		PageToken: pagination.Token{Token: results1.NextPageToken},
+	})
+	require.NoError(t, err)
+	require.Len(t, page2Resources, 1)
+	require.Nil(t, results2, "last page must return nil SyncOpResults")
+	require.Equal(t, 2, callCount)
+	require.Equal(t, "s2", page2Resources[0].Id.Resource)
 }
 
 func TestSPSecretBuilder_List_WrongParentType(t *testing.T) {

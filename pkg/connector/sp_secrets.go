@@ -46,9 +46,11 @@ func (b *servicePrincipalSecretBuilder) spSecretResource(
 	)
 }
 
-// List fans out over the parent service principal and emits a secret resource
-// for each OAuth credential belonging to that SP.
-func (b *servicePrincipalSecretBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, _ rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
+// List returns one page of OAuth client secrets for the parent service principal.
+// The sync engine drives fan-out across SPs via parentResourceID and drives
+// pagination across pages by threading SyncOpResults.NextPageToken back in as
+// opts.PageToken.Token on the next call.
+func (b *servicePrincipalSecretBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, opts rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil || parentResourceID.ResourceType != servicePrincipalResourceType.Id {
 		return nil, nil, nil
 	}
@@ -56,32 +58,26 @@ func (b *servicePrincipalSecretBuilder) List(ctx context.Context, parentResource
 	l := ctxzap.Extract(ctx)
 	spID := parentResourceID.Resource
 
-	var rv []*v2.Resource
-	pageToken := ""
-
-	for {
-		secrets, nextToken, _, err := b.client.ListServicePrincipalSecrets(ctx, spID, pageToken)
-		if err != nil {
-			return nil, nil, fmt.Errorf("databricks-connector: failed to list SP secrets for %s: %w", spID, err)
-		}
-
-		l.Debug("listed SP OAuth secrets", zap.String("sp_id", spID), zap.Int("count", len(secrets)))
-
-		for i := range secrets {
-			r, err := b.spSecretResource(&secrets[i], parentResourceID)
-			if err != nil {
-				return nil, nil, err
-			}
-			rv = append(rv, r)
-		}
-
-		if nextToken == "" {
-			break
-		}
-		pageToken = nextToken
+	secrets, nextToken, _, err := b.client.ListServicePrincipalSecrets(ctx, spID, opts.PageToken.Token)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to list SP secrets for %s: %w", spID, err)
 	}
 
-	return rv, nil, nil
+	l.Debug("listed SP OAuth secrets", zap.String("sp_id", spID), zap.Int("count", len(secrets)))
+
+	rv := make([]*v2.Resource, 0, len(secrets))
+	for i := range secrets {
+		r, err := b.spSecretResource(&secrets[i], parentResourceID)
+		if err != nil {
+			return nil, nil, err
+		}
+		rv = append(rv, r)
+	}
+
+	if nextToken == "" {
+		return rv, nil, nil
+	}
+	return rv, &rs.SyncOpResults{NextPageToken: nextToken}, nil
 }
 
 // Entitlements returns nil — secrets carry no access entitlements.
