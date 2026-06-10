@@ -31,6 +31,14 @@ const (
 
 	accountWorkspacesEndpoint           = "/api/2.0/accounts/%s/workspaces"
 	accountWorkspaceAssignmentsEndpoint = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
+
+	// SP OAuth secrets: account-level, per-SP fan-out.
+	// https://docs.databricks.com/api/account/serviceprincipalsecrets
+	accountSPSecretsEndpoint = "/api/2.0/accounts/%s/servicePrincipals/%s/credentials/secrets"
+
+	// Workspace PATs: workspace-level, admin-only.
+	// https://docs.databricks.com/api/workspace/tokenmanagement
+	workspaceTokensEndpoint = "/api/2.0/token-management/tokens"
 )
 
 type Client struct {
@@ -684,6 +692,56 @@ func (c *Client) CreateUser(
 		return nil, ratelimitData, err
 	}
 	return &res, ratelimitData, nil
+}
+
+// ListServicePrincipalSecrets lists OAuth client secrets for a service principal.
+// Account-level endpoint; no new auth beyond the connector's existing account SP scope.
+// https://docs.databricks.com/api/account/serviceprincipalsecrets
+func (c *Client) ListServicePrincipalSecrets(
+	ctx context.Context,
+	spID string,
+	pageToken string,
+) (
+	[]SecretInfo,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountSPSecretsEndpoint, c.accountId, spID))
+
+	var res struct {
+		Secrets       []SecretInfo `json:"secrets"`
+		NextPageToken string       `json:"next_page_token"`
+	}
+	ratelimitData, err := c.Get(ctx, u, &res, NewPageTokenVars(pageToken))
+	if err != nil {
+		return nil, "", ratelimitData, err
+	}
+
+	return res.Secrets, res.NextPageToken, ratelimitData, nil
+}
+
+// ListTokenManagementTokens lists all PATs in a workspace (requires workspace admin).
+// https://docs.databricks.com/api/workspace/tokenmanagement
+func (c *Client) ListTokenManagementTokens(
+	ctx context.Context,
+	workspaceDeploymentName string,
+) (
+	[]TokenInfo,
+	*v2.RateLimitDescription,
+	error,
+) {
+	u := c.workspaceUrl(workspaceDeploymentName).JoinPath(workspaceTokensEndpoint)
+
+	var res struct {
+		TokenInfos []TokenInfo `json:"token_infos"`
+	}
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	return res.TokenInfos, ratelimitData, nil
 }
 
 // https://docs.databricks.com/api/account/accountusers/delete
