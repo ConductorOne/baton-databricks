@@ -50,6 +50,10 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 		"databricks.service_principal",
 	))
 
+	options = append(options, rs.WithAnnotation(
+		&v2.ChildResourceType{ResourceTypeId: servicePrincipalSecretResourceType.Id},
+	))
+
 	resource, err := rs.NewGroupResource(
 		servicePrincipal.DisplayName,
 		servicePrincipalResourceType,
