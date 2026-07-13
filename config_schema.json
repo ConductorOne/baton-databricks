@@ -126,13 +126,21 @@
       "name": "databricks-client-secret",
       "displayName": "OAuth2 Client Secret",
       "description": "The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API",
-      "isRequired": true,
       "isSecret": true,
-      "stringField": {
-        "rules": {
-          "isRequired": true
-        }
-      }
+      "stringField": {}
+    },
+    {
+      "name": "databricks-token-file",
+      "displayName": "Federation Token File",
+      "description": "Path to a file containing an external JWT for workload identity federation (e.g. a SPIFFE JWT-SVID or Kubernetes projected ServiceAccount token). The file is re-read on each token refresh to support credential rotation.",
+      "stringField": {}
+    },
+    {
+      "name": "databricks-token",
+      "displayName": "Federation Token",
+      "description": "An external JWT for workload identity federation (RFC 8693 token exchange). Use --databricks-token-file for automatic credential rotation.",
+      "isSecret": true,
+      "stringField": {}
     },
     {
       "name": "hostname",
@@ -141,6 +149,24 @@
       "stringField": {
         "defaultValue": "cloud.databricks.com"
       }
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "databricks-client-secret",
+        "databricks-token-file",
+        "databricks-token"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_AT_LEAST_ONE",
+      "fieldNames": [
+        "databricks-client-secret",
+        "databricks-token-file",
+        "databricks-token"
+      ]
     }
   ],
   "displayName": "Databricks",
