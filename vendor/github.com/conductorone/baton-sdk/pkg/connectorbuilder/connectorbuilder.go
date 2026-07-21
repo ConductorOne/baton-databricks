@@ -516,6 +516,16 @@ func validateCapabilityDetails(_ context.Context, credDetails *v2.CredentialDeta
 		}
 	}
 
+	if credDetails.HasCapabilityCredentialIssue() {
+		// Ensure that the preferred option is included and is part of the supported options
+		if credDetails.GetCapabilityCredentialIssue().GetPreferredCredentialOption() == v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_UNSPECIFIED {
+			return status.Error(codes.InvalidArgument, "error: preferred credential issue option is not set")
+		}
+		if !slices.Contains(credDetails.GetCapabilityCredentialIssue().GetSupportedCredentialOptions(), credDetails.GetCapabilityCredentialIssue().GetPreferredCredentialOption()) {
+			return status.Error(codes.InvalidArgument, "error: preferred credential issue option is not part of the supported options")
+		}
+	}
+
 	return nil
 }
 
@@ -633,6 +643,17 @@ func getCredentialDetails(ctx context.Context, b *builder) (*v2.CredentialDetail
 		}
 		rv.SetCapabilityCredentialRotation(credentialRotationCapabilityDetails)
 		break // Only need one credential manager's details
+	}
+
+	// Check for credential issuance capability details
+	for _, ci := range b.credentialIssuers {
+		credentialIssueCapabilityDetails, _, err := ci.IssueCapabilityDetails(ctx)
+		if err != nil {
+			l.Error("error: getting credential issuance details", zap.Error(err))
+			return nil, fmt.Errorf("error: getting credential issuance details: %w", err)
+		}
+		rv.SetCapabilityCredentialIssue(credentialIssueCapabilityDetails)
+		break // Only need one credential issuer's details
 	}
 
 	err := validateCapabilityDetails(ctx, rv)

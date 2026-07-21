@@ -94,6 +94,25 @@ type ServicePrincipal struct {
 	ApplicationID string `json:"applicationId"`
 }
 
+type ServicePrincipalSecret struct {
+	ID         string `json:"id"`
+	Secret     string `json:"secret,omitempty"`
+	SecretHash string `json:"secret_hash"`
+	Status     string `json:"status"`
+	CreateTime string `json:"create_time"`
+	ExpireTime string `json:"expire_time"`
+	UpdateTime string `json:"update_time"`
+}
+
+type CreateServicePrincipalSecretRequest struct {
+	Lifetime string `json:"lifetime,omitempty"`
+}
+
+type ListServicePrincipalSecretsResponse struct {
+	Secrets       []ServicePrincipalSecret `json:"secrets"`
+	NextPageToken string                   `json:"next_page_token"`
+}
+
 func (s ServicePrincipal) HaveRole(role string) bool {
 	for _, r := range s.Roles {
 		if r.Value == role {

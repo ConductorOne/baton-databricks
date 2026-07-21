@@ -25,6 +25,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
+		newServicePrincipalSecretBuilder(d.client),
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client),
 		newRoleBuilder(d.client),

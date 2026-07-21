@@ -170,7 +170,8 @@ func (c *Client) doRequest(
 
 	if err == nil {
 		l := ctxzap.Extract(ctx)
-		l.Debug("do request response", zap.Any("response", response))
+		// Responses may contain one-time credentials. Never log response bodies.
+		l.Debug("request completed", zap.String("method", method), zap.String("url", uri.Redacted()))
 		return ratelimitData, nil
 	}
 

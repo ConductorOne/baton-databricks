@@ -8,6 +8,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -19,7 +20,10 @@ import (
 type servicePrincipalBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	createSecret func(context.Context, string, string) (*databricks.ServicePrincipalSecret, error)
 }
+
+var _ connectorbuilder.CredentialIssuerV2 = (*servicePrincipalBuilder)(nil)
 
 func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return servicePrincipalResourceType
@@ -397,5 +401,6 @@ func newServicePrincipalBuilder(client *databricks.Client) *servicePrincipalBuil
 	return &servicePrincipalBuilder{
 		client:       client,
 		resourceType: servicePrincipalResourceType,
+		createSecret: client.CreateServicePrincipalSecret,
 	}
 }
