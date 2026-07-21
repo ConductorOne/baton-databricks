@@ -117,12 +117,16 @@ func servicePrincipalSecretResource(identityID *v2.ResourceId, secret *databrick
 		resource.WithSecretType(v2.SecretTrait_CREDENTIAL_TYPE_STATIC_SECRET),
 		resource.WithSecretDetail("databricks.oauth_client_secret"),
 	}
+	resourceOptions := []resource.ResourceOption{
+		resource.WithParentResourceID(identityID),
+		resource.WithAnnotation(&v2.RawId{Id: secret.ID}),
+	}
 	if secret.CreateTime != "" {
 		createdAt, err := time.Parse(time.RFC3339Nano, secret.CreateTime)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: parse service principal secret creation time: %w", err)
 		}
-		secretOptions = append(secretOptions, resource.WithSecretCreatedAt(createdAt))
+		resourceOptions = append(resourceOptions, resource.WithResourceCreatedAt(createdAt))
 	}
 	if secret.ExpireTime != "" {
 		expiresAt, err := time.Parse(time.RFC3339Nano, secret.ExpireTime)
@@ -137,7 +141,6 @@ func servicePrincipalSecretResource(identityID *v2.ResourceId, secret *databrick
 		servicePrincipalSecretResourceType,
 		secret.ID,
 		secretOptions,
-		resource.WithParentResourceID(identityID),
-		resource.WithAnnotation(&v2.RawId{Id: secret.ID}),
+		resourceOptions...,
 	)
 }
