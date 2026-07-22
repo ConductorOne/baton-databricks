@@ -32,6 +32,7 @@ const (
 	accountWorkspacesEndpoint              = "/api/2.0/accounts/%s/workspaces"
 	accountWorkspaceAssignmentsEndpoint    = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
 	accountServicePrincipalSecretsEndpoint = "/api/2.0/accounts/%s/servicePrincipals/%s/credentials/secrets"
+	accountServicePrincipalSecretEndpoint  = accountServicePrincipalSecretsEndpoint + "/%s"
 )
 
 type Client struct {
@@ -68,11 +69,17 @@ func (c *Client) ListServicePrincipalSecrets(
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountServicePrincipalSecretsEndpoint, c.accountId, servicePrincipalID))
 	var response ListServicePrincipalSecretsResponse
 	params := []Vars{&ServicePrincipalSecretPageVars{PageSize: 100, PageToken: pageToken}}
-	_, err := c.Get(ctx, u, &response, params...)
+	_, err := c.GetNoCache(ctx, u, &response, params...)
 	if err != nil {
 		return nil, err
 	}
 	return &response, nil
+}
+
+func (c *Client) DeleteServicePrincipalSecret(ctx context.Context, servicePrincipalID, secretID string) error {
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountServicePrincipalSecretEndpoint, c.accountId, servicePrincipalID, secretID))
+	_, err := c.Delete(ctx, u)
+	return err
 }
 
 func GetAccountHostname(hostname string) string {
@@ -129,6 +136,10 @@ func (c *Client) IsWorkspaceAPIAvailable() bool {
 
 func (c *Client) IsAccountAPIAvailable() bool {
 	return c.isAccAPIAvailable
+}
+
+func (c *Client) HasAccountConfiguration() bool {
+	return c.accountId != ""
 }
 
 func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {

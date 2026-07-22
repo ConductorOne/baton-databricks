@@ -18,11 +18,14 @@ import (
 )
 
 type servicePrincipalSecretBuilder struct {
-	client *databricks.Client
+	client       *databricks.Client
+	deleteSecret func(context.Context, string, string) error
 }
 
+var _ connectorbuilder.ResourceDeleterV2 = (*servicePrincipalSecretBuilder)(nil)
+
 func newServicePrincipalSecretBuilder(client *databricks.Client) *servicePrincipalSecretBuilder {
-	return &servicePrincipalSecretBuilder{client: client}
+	return &servicePrincipalSecretBuilder{client: client, deleteSecret: client.DeleteServicePrincipalSecret}
 }
 
 func (s *servicePrincipalSecretBuilder) ResourceType(context.Context) *v2.ResourceType {
@@ -67,7 +70,20 @@ func (*servicePrincipalSecretBuilder) Grants(context.Context, *v2.Resource, reso
 	return nil, nil, nil
 }
 
-func (s *servicePrincipalBuilder) Issue(
+func (s *servicePrincipalSecretBuilder) Delete(ctx context.Context, resourceID, parentResourceID *v2.ResourceId) (annotations.Annotations, error) {
+	if resourceID == nil || resourceID.GetResourceType() != servicePrincipalSecretResourceType.Id || resourceID.GetResource() == "" {
+		return nil, fmt.Errorf("databricks-connector: invalid service principal secret resource")
+	}
+	if parentResourceID == nil || parentResourceID.GetResourceType() != servicePrincipalResourceType.Id || parentResourceID.GetResource() == "" {
+		return nil, fmt.Errorf("databricks-connector: invalid service principal parent resource")
+	}
+	if err := s.deleteSecret(ctx, parentResourceID.GetResource(), resourceID.GetResource()); err != nil {
+		return nil, fmt.Errorf("databricks-connector: delete service principal secret: %w", err)
+	}
+	return nil, nil
+}
+
+func (s *credentialIssuingServicePrincipalBuilder) Issue(
 	ctx context.Context,
 	input *connectorbuilder.CredentialIssueInput,
 ) (*connectorbuilder.CredentialIssueOutput, error) {
@@ -112,7 +128,7 @@ func (s *servicePrincipalBuilder) Issue(
 	}, nil
 }
 
-func (*servicePrincipalBuilder) IssueCapabilityDetails(context.Context) (*v2.CredentialDetailsCredentialIssue, annotations.Annotations, error) {
+func (*credentialIssuingServicePrincipalBuilder) IssueCapabilityDetails(context.Context) (*v2.CredentialDetailsCredentialIssue, annotations.Annotations, error) {
 	return v2.CredentialDetailsCredentialIssue_builder{
 		Options: []*v2.CredentialIssueOptionDescriptor{
 			v2.CredentialIssueOptionDescriptor_builder{

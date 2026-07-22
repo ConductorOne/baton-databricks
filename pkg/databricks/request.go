@@ -46,12 +46,32 @@ func (c *Client) Get(
 	response interface{},
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
+	return c.get(ctx, urlAddress, response, nil, params...)
+}
+
+func (c *Client) GetNoCache(
+	ctx context.Context,
+	urlAddress *url.URL,
+	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.get(ctx, urlAddress, response, []uhttp.RequestOption{uhttp.WithNoCache()}, params...)
+}
+
+func (c *Client) get(
+	ctx context.Context,
+	urlAddress *url.URL,
+	response interface{},
+	requestOptions []uhttp.RequestOption,
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
 	return c.doRequest(
 		ctx,
 		urlAddress,
 		http.MethodGet,
 		nil,
 		response,
+		requestOptions,
 		params...,
 	)
 }
@@ -69,6 +89,7 @@ func (c *Client) Put(
 		http.MethodPut,
 		body,
 		response,
+		nil,
 		params...,
 	)
 }
@@ -86,6 +107,7 @@ func (c *Client) Post(
 		http.MethodPost,
 		body,
 		response,
+		nil,
 		params...,
 	)
 }
@@ -120,6 +142,7 @@ func (c *Client) doRequest(
 	method string,
 	body interface{},
 	response interface{},
+	requestOptions []uhttp.RequestOption,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
 	// TODO(marcos): Refactor URLs so that we don't have to unescape.
@@ -136,6 +159,7 @@ func (c *Client) doRequest(
 	options := []uhttp.RequestOption{
 		uhttp.WithAcceptJSONHeader(),
 	}
+	options = append(options, requestOptions...)
 	if body != nil {
 		options = append(options, uhttp.WithJSONBody(body))
 	}

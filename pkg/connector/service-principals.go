@@ -20,10 +20,14 @@ import (
 type servicePrincipalBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+}
+
+type credentialIssuingServicePrincipalBuilder struct {
+	*servicePrincipalBuilder
 	createSecret func(context.Context, string, string) (*databricks.ServicePrincipalSecret, error)
 }
 
-var _ connectorbuilder.CredentialIssuerV2 = (*servicePrincipalBuilder)(nil)
+var _ connectorbuilder.CredentialIssuerV2 = (*credentialIssuingServicePrincipalBuilder)(nil)
 
 func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return servicePrincipalResourceType
@@ -374,10 +378,16 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 	return nil, nil
 }
 
-func newServicePrincipalBuilder(client *databricks.Client) *servicePrincipalBuilder {
-	return &servicePrincipalBuilder{
+func newServicePrincipalBuilder(client *databricks.Client) connectorbuilder.ResourceSyncerV2 {
+	base := &servicePrincipalBuilder{
 		client:       client,
 		resourceType: servicePrincipalResourceType,
-		createSecret: client.CreateServicePrincipalSecret,
+	}
+	if !client.HasAccountConfiguration() {
+		return base
+	}
+	return &credentialIssuingServicePrincipalBuilder{
+		servicePrincipalBuilder: base,
+		createSecret:            client.CreateServicePrincipalSecret,
 	}
 }
