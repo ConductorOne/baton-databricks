@@ -39,10 +39,9 @@ func workspaceResource(_ context.Context, workspace *databricks.Workspace, paren
 		workspace.Name,
 		workspaceResourceType,
 		workspace.DeploymentName,
-		[]rs.GroupTraitOption{
-			rs.WithGroupProfile(profile),
-		},
+		nil,
 		rs.WithParentResourceID(parent),
+		rs.WithResourceProfile(profile),
 		rs.WithAnnotation(
 			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
 		),
@@ -111,14 +110,9 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 		return nil, nil, nil
 	}
 
-	groupTrait, err := rs.GetGroupTrait(resource)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	workspaceId, ok := rs.GetProfileInt64Value(groupTrait.Profile, "workspace_id")
+	workspaceId, ok := rs.GetProfileInt64Value(resource.GetProfile(), "workspace_id")
 	if !ok {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get workspace ID")
 	}
 
 	workspace := strconv.Itoa(int(workspaceId))
@@ -195,18 +189,13 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted workspace membership")
 	}
 
-	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	workspaceID, ok := rs.GetProfileInt64Value(groupTrait.Profile, "workspace_id")
+	workspaceID, ok := rs.GetProfileInt64Value(entitlement.Resource.GetProfile(), "workspace_id")
 	if !ok {
-		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID")
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	_, err = w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	_, err := w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
 	}
@@ -230,18 +219,13 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have workspace membership revoked")
 	}
 
-	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	workspaceID, ok := rs.GetProfileInt64Value(groupTrait.Profile, "workspace_id")
+	workspaceID, ok := rs.GetProfileInt64Value(entitlement.Resource.GetProfile(), "workspace_id")
 	if !ok {
-		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to get workspace ID")
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	_, err = w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	_, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
 	}
