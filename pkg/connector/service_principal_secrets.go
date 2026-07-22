@@ -2,13 +2,19 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 type servicePrincipalSecretBuilder struct {
@@ -34,6 +40,11 @@ func (s *servicePrincipalSecretBuilder) List(
 
 	response, err := s.client.ListServicePrincipalSecrets(ctx, parentResourceID.GetResource(), attr.PageToken.Token)
 	if err != nil {
+		var apiErr *databricks.APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+			ctxzap.Extract(ctx).Warn("service principal secrets are not readable; continuing without them", zap.Int("status_code", apiErr.StatusCode))
+			return nil, &resource.SyncOpResults{}, nil
+		}
 		return nil, nil, fmt.Errorf("databricks-connector: list service principal secrets: %w", err)
 	}
 
@@ -58,53 +69,62 @@ func (*servicePrincipalSecretBuilder) Grants(context.Context, *v2.Resource, reso
 
 func (s *servicePrincipalBuilder) Issue(
 	ctx context.Context,
-	identityID *v2.ResourceId,
-	credentialOptions *v2.LocalCredentialOptions,
-) (*v2.Resource, []*v2.PlaintextData, annotations.Annotations, error) {
+	input *connectorbuilder.CredentialIssueInput,
+) (*connectorbuilder.CredentialIssueOutput, error) {
+	identityID := input.IdentityID
 	if identityID == nil || identityID.GetResourceType() != servicePrincipalResourceType.Id {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: invalid service principal identity")
+		return nil, fmt.Errorf("databricks-connector: invalid service principal identity")
 	}
-	clientSecret := credentialOptions.GetClientSecret()
+	clientSecret := input.CredentialOptions.GetClientSecret()
 	if clientSecret == nil {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: only OAuth client-secret credentials are supported")
+		return nil, fmt.Errorf("databricks-connector: only OAuth client-secret credentials are supported")
 	}
 
 	lifetime := ""
-	if ttl := clientSecret.GetTtl(); ttl != nil {
+	if ttl := input.IssuanceConstraints.GetLifetime(); ttl != nil {
 		if err := ttl.CheckValid(); err != nil || ttl.AsDuration() <= 0 || ttl.GetNanos() != 0 {
-			return nil, nil, nil, fmt.Errorf("databricks-connector: invalid client-secret TTL")
+			return nil, fmt.Errorf("databricks-connector: invalid client-secret lifetime")
 		}
 		lifetime = fmt.Sprintf("%ds", ttl.GetSeconds())
 	}
 
 	created, err := s.createSecret(ctx, identityID.GetResource(), lifetime)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: create service principal secret: %w", err)
+		return nil, fmt.Errorf("databricks-connector: create service principal secret: %w", err)
 	}
 	if created.Secret == "" {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: create service principal secret returned no secret material")
+		return nil, fmt.Errorf("databricks-connector: create service principal secret returned no secret material")
 	}
 
 	plaintext := []byte(created.Secret)
 	created.Secret = ""
 	secret, err := servicePrincipalSecretResource(identityID, created)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return secret, []*v2.PlaintextData{{
-		Name:        "client_secret",
-		Description: "Databricks OAuth client secret",
-		Bytes:       plaintext,
-	}}, nil, nil
+	return &connectorbuilder.CredentialIssueOutput{
+		Secret: secret,
+		PlaintextData: []*v2.PlaintextData{{
+			Name:        "client_secret",
+			Description: "Databricks OAuth client secret",
+			Bytes:       plaintext,
+		}},
+	}, nil
 }
 
 func (*servicePrincipalBuilder) IssueCapabilityDetails(context.Context) (*v2.CredentialDetailsCredentialIssue, annotations.Annotations, error) {
-	return &v2.CredentialDetailsCredentialIssue{
-		SupportedCredentialOptions: []v2.CapabilityDetailCredentialOption{
-			v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_CLIENT_SECRET,
+	return v2.CredentialDetailsCredentialIssue_builder{
+		Options: []*v2.CredentialIssueOptionDescriptor{
+			v2.CredentialIssueOptionDescriptor_builder{
+				Option: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_CLIENT_SECRET,
+				Lifetime: v2.IssuanceLifetimeCapability_builder{
+					Min:         durationpb.New(time.Second),
+					Granularity: durationpb.New(time.Second),
+				}.Build(),
+			}.Build(),
 		},
-		PreferredCredentialOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_CLIENT_SECRET,
-	}, nil, nil
+		PreferredOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_CLIENT_SECRET,
+	}.Build(), nil, nil
 }
 
 func servicePrincipalSecretResource(identityID *v2.ResourceId, secret *databricks.ServicePrincipalSecret) (*v2.Resource, error) {

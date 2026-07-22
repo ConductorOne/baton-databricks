@@ -8,6 +8,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -29,10 +30,15 @@ func TestServicePrincipalBuilderIssueClientSecret(t *testing.T) {
 		},
 	}
 
-	secret, plaintexts, _, err := builder.Issue(context.Background(), identityID, v2.LocalCredentialOptions_builder{
-		ClientSecret: v2.LocalCredentialOptions_ClientSecret_builder{Ttl: durationpb.New(24 * time.Hour)}.Build(),
-	}.Build())
+	output, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{
+		IdentityID: identityID,
+		CredentialOptions: v2.LocalCredentialOptions_builder{
+			ClientSecret: &v2.LocalCredentialOptions_ClientSecret{},
+		}.Build(),
+		IssuanceConstraints: v2.CredentialIssuanceConstraints_builder{Lifetime: durationpb.New(24 * time.Hour)}.Build(),
+	})
 	require.NoError(t, err)
+	secret, plaintexts := output.Secret, output.PlaintextData
 	require.Equal(t, "secret-456", secret.GetId().GetResource())
 	require.Len(t, plaintexts, 1)
 	require.Equal(t, "client_secret", plaintexts[0].GetName())
@@ -48,11 +54,11 @@ func TestServicePrincipalBuilderIssueClientSecret(t *testing.T) {
 
 func TestServicePrincipalBuilderIssueRejectsTokenArm(t *testing.T) {
 	builder := &servicePrincipalBuilder{}
-	_, _, _, err := builder.Issue(context.Background(), &v2.ResourceId{
+	_, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{IdentityID: &v2.ResourceId{
 		ResourceType: servicePrincipalResourceType.Id,
 		Resource:     "sp-123",
-	}, v2.LocalCredentialOptions_builder{
+	}, CredentialOptions: v2.LocalCredentialOptions_builder{
 		Token: &v2.LocalCredentialOptions_Token{},
-	}.Build())
+	}.Build()})
 	require.ErrorContains(t, err, "only OAuth client-secret credentials")
 }
