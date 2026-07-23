@@ -33,7 +33,10 @@ var (
 		Id:          "service_principal_secret",
 		DisplayName: "Service Principal Secret",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_SECRET},
-		Annotations: annotations.New(&v2.SkipEntitlementsAndGrants{}),
+		Annotations: annotations.New(
+			&v2.SkipEntitlementsAndGrants{},
+			&v2.OptInRequired{},
+		),
 	}
 
 	// The role resource type is for all static roles and entitlements available in API.

@@ -194,16 +194,25 @@ func TestCredentialIssuanceCapabilityRequiresAccountConfiguration(t *testing.T) 
 			require.NoError(t, err)
 			metadata, err := connector.GetMetadata(ctx, &v2.ConnectorServiceGetMetadataRequest{})
 			require.NoError(t, err)
-			var found bool
+			var foundIssue bool
+			var foundSecret bool
 			for _, resourceCapability := range metadata.GetMetadata().GetCapabilities().GetResourceTypeCapabilities() {
-				if resourceCapability.GetResourceType().GetId() != servicePrincipalResourceType.Id {
-					continue
-				}
-				for _, capability := range resourceCapability.GetCapabilities() {
-					found = found || capability == v2.Capability_CAPABILITY_CREDENTIAL_ISSUE
+				switch resourceCapability.GetResourceType().GetId() {
+				case servicePrincipalResourceType.Id:
+					for _, capability := range resourceCapability.GetCapabilities() {
+						foundIssue = foundIssue || capability == v2.Capability_CAPABILITY_CREDENTIAL_ISSUE
+					}
+				case servicePrincipalSecretResourceType.Id:
+					foundSecret = true
+					require.True(t, resourceCapability.GetOptInRequired())
+					annos := annotations.Annotations(resourceCapability.GetResourceType().GetAnnotations())
+					require.True(t, annos.Contains(&v2.SkipEntitlementsAndGrants{}))
 				}
 			}
-			require.Equal(t, test.wantIssue, found)
+			require.True(t, foundSecret)
+			require.Equal(t, test.wantIssue, foundIssue)
+			_, isIssuer := lifecycle.servicePrincipals.(connectorbuilder.CredentialIssuerV2)
+			require.Equal(t, test.wantIssue, isIssuer)
 		})
 	}
 }
