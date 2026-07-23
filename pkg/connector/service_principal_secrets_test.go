@@ -113,7 +113,11 @@ func TestServicePrincipalSecretCredentialLifecycle(t *testing.T) {
 		case http.MethodPost:
 			secret := databricks.ServicePrincipalSecret{ID: "secret-456", Secret: "one-time-secret", Status: "ACTIVE"}
 			secrets[secret.ID] = secret
-			require.NoError(t, json.NewEncoder(w).Encode(secret))
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+				"id":     secret.ID,
+				"secret": secret.Secret,
+				"status": secret.Status,
+			}))
 		case http.MethodGet:
 			listed := make([]databricks.ServicePrincipalSecret, 0, len(secrets))
 			for _, secret := range secrets {
