@@ -106,6 +106,47 @@ func TestServicePrincipalBuilderIssueRejectsTokenArm(t *testing.T) {
 	require.ErrorContains(t, err, "only OAuth client-secret credentials")
 }
 
+func TestServicePrincipalBuilderIssueRejectsSubSecondExpiryBeforeCreation(t *testing.T) {
+	created := false
+	builder := &credentialIssuingServicePrincipalBuilder{
+		servicePrincipalBuilder: &servicePrincipalBuilder{resourceType: servicePrincipalResourceType},
+		createSecret: func(context.Context, string, string) (*databricks.ServicePrincipalSecret, error) {
+			created = true
+			return nil, nil
+		},
+	}
+	_, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{
+		IdentityID: &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: "sp-123"},
+		CredentialOptions: v2.CredentialIssueOptions_builder{
+			ClientSecret: &v2.CredentialIssueOptions_ClientSecret{},
+		}.Build(),
+		ExpiresAt: timestamppb.New(time.Now().Add(500 * time.Millisecond)),
+	})
+	require.ErrorContains(t, err, "below provider minimum")
+	require.False(t, created)
+}
+
+func TestServicePrincipalSecretListSkipsWorkspaceOnlyConfiguration(t *testing.T) {
+	client, err := databricks.NewClient(context.Background(), http.DefaultClient, "workspace.example", "accounts.invalid", "", "https://workspace.example", &databricks.NoAuth{})
+	require.NoError(t, err)
+	builder := newServicePrincipalSecretBuilder(client)
+	listed, result, err := builder.List(context.Background(), &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: "sp-123"}, resource.SyncOpAttrs{})
+	require.NoError(t, err)
+	require.Empty(t, listed)
+	require.NotNil(t, result)
+}
+
+func TestServicePrincipalSecretDeleteIsIdempotentOnNotFound(t *testing.T) {
+	builder := &servicePrincipalSecretBuilder{deleteSecret: func(context.Context, string, string) error {
+		return &databricks.APIError{StatusCode: http.StatusNotFound}
+	}}
+	_, err := builder.Delete(context.Background(),
+		&v2.ResourceId{ResourceType: servicePrincipalSecretResourceType.Id, Resource: "secret-456"},
+		&v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: "sp-123"},
+	)
+	require.NoError(t, err)
+}
+
 func TestServicePrincipalSecretCredentialLifecycle(t *testing.T) {
 	ctx := context.Background()
 	secrets := map[string]databricks.ServicePrincipalSecret{}

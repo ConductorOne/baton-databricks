@@ -40,6 +40,9 @@ func (s *servicePrincipalSecretBuilder) List(
 	if parentResourceID == nil {
 		return nil, nil, nil
 	}
+	if !s.client.HasAccountConfiguration() {
+		return nil, &resource.SyncOpResults{}, nil
+	}
 
 	response, err := s.client.ListServicePrincipalSecrets(ctx, parentResourceID.GetResource(), attr.PageToken.Token)
 	if err != nil {
@@ -78,6 +81,10 @@ func (s *servicePrincipalSecretBuilder) Delete(ctx context.Context, resourceID, 
 		return nil, fmt.Errorf("databricks-connector: invalid service principal parent resource")
 	}
 	if err := s.deleteSecret(ctx, parentResourceID.GetResource(), resourceID.GetResource()); err != nil {
+		var apiErr *databricks.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("databricks-connector: delete service principal secret: %w", err)
 	}
 	return nil, nil
@@ -105,7 +112,11 @@ func (s *credentialIssuingServicePrincipalBuilder) Issue(
 		if remaining <= 0 {
 			return nil, fmt.Errorf("databricks-connector: invalid client-secret lifetime")
 		}
-		lifetime = fmt.Sprintf("%ds", int64(remaining/time.Second))
+		seconds := int64(remaining / time.Second)
+		if seconds < 1 {
+			return nil, fmt.Errorf("databricks-connector: client-secret lifetime is below provider minimum")
+		}
+		lifetime = fmt.Sprintf("%ds", seconds)
 	}
 
 	created, err := s.createSecret(ctx, identityID.GetResource(), lifetime)
