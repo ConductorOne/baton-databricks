@@ -106,23 +106,24 @@ func TestServicePrincipalBuilderIssueRejectsTokenArm(t *testing.T) {
 	require.ErrorContains(t, err, "only OAuth client-secret credentials")
 }
 
-func TestServicePrincipalBuilderIssueRoundsSubSecondExpiryToProviderMinimum(t *testing.T) {
+func TestServicePrincipalBuilderIssueRejectsSubSecondExpiryBeforeCreation(t *testing.T) {
+	created := false
 	builder := &credentialIssuingServicePrincipalBuilder{
 		servicePrincipalBuilder: &servicePrincipalBuilder{resourceType: servicePrincipalResourceType},
-		createSecret: func(_ context.Context, _, lifetime string) (*databricks.ServicePrincipalSecret, error) {
-			require.Equal(t, "1s", lifetime)
-			return &databricks.ServicePrincipalSecret{ID: "secret-456", Secret: "one-time-secret"}, nil
+		createSecret: func(context.Context, string, string) (*databricks.ServicePrincipalSecret, error) {
+			created = true
+			return nil, nil
 		},
 	}
-	output, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{
+	_, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{
 		IdentityID: &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: "sp-123"},
 		CredentialOptions: v2.CredentialIssueOptions_builder{
 			ClientSecret: &v2.CredentialIssueOptions_ClientSecret{},
 		}.Build(),
 		ExpiresAt: timestamppb.New(time.Now().Add(500 * time.Millisecond)),
 	})
-	require.NoError(t, err)
-	require.Equal(t, "secret-456", output.Secret.GetId().GetResource())
+	require.ErrorContains(t, err, "below provider minimum")
+	require.False(t, created)
 }
 
 func TestServicePrincipalSecretListSkipsWorkspaceOnlyConfiguration(t *testing.T) {

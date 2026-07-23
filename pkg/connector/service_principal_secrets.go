@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"time"
 
@@ -113,7 +112,10 @@ func (s *credentialIssuingServicePrincipalBuilder) Issue(
 		if remaining <= 0 {
 			return nil, fmt.Errorf("databricks-connector: invalid client-secret lifetime")
 		}
-		seconds := max(int64(math.Ceil(remaining.Seconds())), 1)
+		seconds := int64(remaining / time.Second)
+		if seconds < 1 {
+			return nil, fmt.Errorf("databricks-connector: client-secret lifetime is below provider minimum")
+		}
 		lifetime = fmt.Sprintf("%ds", seconds)
 	}
 
