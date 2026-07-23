@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -83,7 +84,7 @@ func (s *servicePrincipalSecretBuilder) Delete(ctx context.Context, resourceID, 
 	if err := s.deleteSecret(ctx, parentResourceID.GetResource(), resourceID.GetResource()); err != nil {
 		var apiErr *databricks.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			return nil, nil
+			return annotations.New(&v2.ResourceDoesNotExist{}), nil
 		}
 		return nil, fmt.Errorf("databricks-connector: delete service principal secret: %w", err)
 	}
@@ -112,10 +113,7 @@ func (s *credentialIssuingServicePrincipalBuilder) Issue(
 		if remaining <= 0 {
 			return nil, fmt.Errorf("databricks-connector: invalid client-secret lifetime")
 		}
-		seconds := int64(remaining / time.Second)
-		if seconds < 1 {
-			return nil, fmt.Errorf("databricks-connector: client-secret lifetime is below provider minimum")
-		}
+		seconds := max(int64(math.Ceil(remaining.Seconds())), 1)
 		lifetime = fmt.Sprintf("%ds", seconds)
 	}
 
