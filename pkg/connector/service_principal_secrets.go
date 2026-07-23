@@ -97,11 +97,15 @@ func (s *credentialIssuingServicePrincipalBuilder) Issue(
 	}
 
 	lifetime := ""
-	if ttl := input.IssuanceConstraints.GetLifetime(); ttl != nil {
-		if err := ttl.CheckValid(); err != nil || ttl.AsDuration() <= 0 || ttl.GetNanos() != 0 {
+	if expiresAt := input.ExpiresAt; expiresAt != nil {
+		if err := expiresAt.CheckValid(); err != nil {
 			return nil, fmt.Errorf("databricks-connector: invalid client-secret lifetime")
 		}
-		lifetime = fmt.Sprintf("%ds", ttl.GetSeconds())
+		remaining := time.Until(expiresAt.AsTime())
+		if remaining <= 0 {
+			return nil, fmt.Errorf("databricks-connector: invalid client-secret lifetime")
+		}
+		lifetime = fmt.Sprintf("%ds", int64(remaining/time.Second))
 	}
 
 	created, err := s.createSecret(ctx, identityID.GetResource(), lifetime)
@@ -119,7 +123,8 @@ func (s *credentialIssuingServicePrincipalBuilder) Issue(
 		return nil, err
 	}
 	return &connectorbuilder.CredentialIssueOutput{
-		Secret: secret,
+		Secret:       secret,
+		ResourceMode: v2.CredentialResourceMode_CREDENTIAL_RESOURCE_MODE_DISCOVERABLE,
 		PlaintextData: []*v2.PlaintextData{{
 			Name:        "client_secret",
 			Description: "Databricks OAuth client secret",
@@ -133,10 +138,11 @@ func (*credentialIssuingServicePrincipalBuilder) IssueCapabilityDetails(context.
 		Options: []*v2.CredentialIssueOptionDescriptor{
 			v2.CredentialIssueOptionDescriptor_builder{
 				Option: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_CLIENT_SECRET,
-				Lifetime: v2.IssuanceLifetimeCapability_builder{
-					Min:         durationpb.New(time.Second),
-					Granularity: durationpb.New(time.Second),
+				Expiry: v2.IssuanceExpiryCapability_builder{
+					Min: durationpb.New(time.Second),
 				}.Build(),
+				ResourceMode:         v2.CredentialResourceMode_CREDENTIAL_RESOURCE_MODE_DISCOVERABLE,
+				SecretResourceTypeId: servicePrincipalSecretResourceType.Id,
 			}.Build(),
 		},
 		PreferredOption: v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_CLIENT_SECRET,

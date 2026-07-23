@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type credentialLifecycleConnector struct {
@@ -59,7 +60,9 @@ func TestServicePrincipalBuilderIssueClientSecret(t *testing.T) {
 		servicePrincipalBuilder: &servicePrincipalBuilder{resourceType: servicePrincipalResourceType},
 		createSecret: func(_ context.Context, servicePrincipalID, lifetime string) (*databricks.ServicePrincipalSecret, error) {
 			require.Equal(t, "sp-123", servicePrincipalID)
-			require.Equal(t, "86400s", lifetime)
+			seconds, err := strconv.ParseInt(strings.TrimSuffix(lifetime, "s"), 10, 64)
+			require.NoError(t, err)
+			require.InDelta(t, 24*time.Hour/time.Second, seconds, 2)
 			return &databricks.ServicePrincipalSecret{
 				ID:         "secret-456",
 				Secret:     "one-time-client-secret",
@@ -72,10 +75,10 @@ func TestServicePrincipalBuilderIssueClientSecret(t *testing.T) {
 
 	output, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{
 		IdentityID: identityID,
-		CredentialOptions: v2.LocalCredentialOptions_builder{
-			ClientSecret: &v2.LocalCredentialOptions_ClientSecret{},
+		CredentialOptions: v2.CredentialIssueOptions_builder{
+			ClientSecret: &v2.CredentialIssueOptions_ClientSecret{},
 		}.Build(),
-		IssuanceConstraints: v2.CredentialIssuanceConstraints_builder{Lifetime: durationpb.New(24 * time.Hour)}.Build(),
+		ExpiresAt: timestamppb.New(time.Now().Add(24 * time.Hour)),
 	})
 	require.NoError(t, err)
 	secret, plaintexts := output.Secret, output.PlaintextData
@@ -97,8 +100,8 @@ func TestServicePrincipalBuilderIssueRejectsTokenArm(t *testing.T) {
 	_, err := builder.Issue(context.Background(), &connectorbuilder.CredentialIssueInput{IdentityID: &v2.ResourceId{
 		ResourceType: servicePrincipalResourceType.Id,
 		Resource:     "sp-123",
-	}, CredentialOptions: v2.LocalCredentialOptions_builder{
-		Token: &v2.LocalCredentialOptions_Token{},
+	}, CredentialOptions: v2.CredentialIssueOptions_builder{
+		Token: &v2.CredentialIssueOptions_Token{},
 	}.Build()})
 	require.ErrorContains(t, err, "only OAuth client-secret credentials")
 }
@@ -150,10 +153,11 @@ func TestServicePrincipalSecretCredentialLifecycle(t *testing.T) {
 	identityID := v2.ResourceId_builder{ResourceType: servicePrincipalResourceType.Id, Resource: "sp-123"}.Build()
 	issued, err := connector.IssueCredential(ctx, v2.IssueCredentialRequest_builder{
 		IdentityId: identityID,
-		CredentialOptions: v2.CredentialOptions_builder{
-			ClientSecret: &v2.CredentialOptions_ClientSecret{},
+		CredentialOptions: v2.CredentialIssueOptions_builder{
+			ClientSecret: &v2.CredentialIssueOptions_ClientSecret{},
 		}.Build(),
 		EncryptionConfigs: []*v2.EncryptionConfig{newIssueEncryptionConfig(t)},
+		RequestId:         "request-123",
 	}.Build())
 	require.NoError(t, err)
 	require.Equal(t, "secret-456", issued.GetSecret().GetId().GetResource())

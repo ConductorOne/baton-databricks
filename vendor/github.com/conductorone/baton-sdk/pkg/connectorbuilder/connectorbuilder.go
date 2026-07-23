@@ -516,26 +516,6 @@ func validateCapabilityDetails(_ context.Context, credDetails *v2.CredentialDeta
 		}
 	}
 
-	if credDetails.HasCapabilityCredentialIssue() {
-		issue := credDetails.GetCapabilityCredentialIssue()
-		if issue.GetPreferredOption() == v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_UNSPECIFIED {
-			return status.Error(codes.InvalidArgument, "error: preferred credential issue option is not set")
-		}
-		seen := make(map[v2.CapabilityDetailCredentialOption]struct{}, len(issue.GetOptions()))
-		for _, descriptor := range issue.GetOptions() {
-			if descriptor == nil || descriptor.GetOption() == v2.CapabilityDetailCredentialOption_CAPABILITY_DETAIL_CREDENTIAL_OPTION_UNSPECIFIED {
-				return status.Error(codes.InvalidArgument, "error: credential issue option descriptor is invalid")
-			}
-			if _, exists := seen[descriptor.GetOption()]; exists {
-				return status.Errorf(codes.InvalidArgument, "error: duplicate credential issue option %s", descriptor.GetOption())
-			}
-			seen[descriptor.GetOption()] = struct{}{}
-		}
-		if _, ok := seen[issue.GetPreferredOption()]; !ok {
-			return status.Error(codes.InvalidArgument, "error: preferred credential issue option is not part of the supported options")
-		}
-	}
-
 	return nil
 }
 
@@ -653,17 +633,6 @@ func getCredentialDetails(ctx context.Context, b *builder) (*v2.CredentialDetail
 		}
 		rv.SetCapabilityCredentialRotation(credentialRotationCapabilityDetails)
 		break // Only need one credential manager's details
-	}
-
-	// Check for credential issuance capability details
-	for _, ci := range b.credentialIssuers {
-		credentialIssueCapabilityDetails, _, err := ci.IssueCapabilityDetails(ctx)
-		if err != nil {
-			l.Error("error: getting credential issuance details", zap.Error(err))
-			return nil, fmt.Errorf("error: getting credential issuance details: %w", err)
-		}
-		rv.SetCapabilityCredentialIssue(credentialIssueCapabilityDetails)
-		break // Only need one credential issuer's details
 	}
 
 	err := validateCapabilityDetails(ctx, rv)
