@@ -62,6 +62,7 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 
 	excludeSet := make(map[string]struct{}, len(excludeWorkspaces))
 	for _, w := range excludeWorkspaces {
+		w = strings.TrimSpace(w)
 		if w == "" {
 			continue
 		}
