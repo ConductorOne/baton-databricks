@@ -132,18 +132,16 @@ func (r *roleBuilder) Entitlements(
 	}, nil, nil
 }
 
+// isAPIErrorWithStatus reports whether err is (or wraps) a *databricks.APIError
+// whose StatusCode equals statusCode.
+func isAPIErrorWithStatus(err error, statusCode int) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == statusCode
+}
+
 // Grants returns all the grants for a given role.
 // Since Databricks API does not support listing grants for a role, so that it aligns with the sdk API,
 // we have to go through all the users, groups and servicePrincipals to check if they have the role.
-// isWorkspaceAccessForbidden reports whether err is a 403 from a workspace-scoped
-// API call. This happens when the service principal has account-level access but is
-// not an admin on that specific workspace; such workspaces are skipped so one
-// inaccessible workspace does not fail the whole sync.
-func isWorkspaceAccessForbidden(err error) bool {
-	var apiErr *databricks.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
-}
-
 func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	l := ctxzap.Extract(ctx)
 	var rv []*v2.Grant
@@ -197,7 +195,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewUserRolesAttrVars(),
 		)
 		if err != nil {
-			if isWorkspaceRole && isWorkspaceAccessForbidden(err) {
+			if isWorkspaceRole && isAPIErrorWithStatus(err, http.StatusForbidden) {
 				l.Info("databricks-connector: workspace not accessible to service principal, skipping users",
 					zap.String("workspace_id", workspaceId))
 				users, total = nil, 0
@@ -239,7 +237,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewGroupRolesAttrVars(),
 		)
 		if err != nil {
-			if isWorkspaceRole && isWorkspaceAccessForbidden(err) {
+			if isWorkspaceRole && isAPIErrorWithStatus(err, http.StatusForbidden) {
 				l.Info("databricks-connector: workspace not accessible to service principal, skipping groups",
 					zap.String("workspace_id", workspaceId))
 				groups, total = nil, 0
@@ -284,7 +282,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewServicePrincipalRolesAttrVars(),
 		)
 		if err != nil {
-			if isWorkspaceRole && isWorkspaceAccessForbidden(err) {
+			if isWorkspaceRole && isAPIErrorWithStatus(err, http.StatusForbidden) {
 				l.Info("databricks-connector: workspace not accessible to service principal, skipping service principals",
 					zap.String("workspace_id", workspaceId))
 				servicePrincipals, total = nil, 0

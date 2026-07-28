@@ -8,24 +8,26 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-func TestIsWorkspaceAccessForbidden(t *testing.T) {
+func TestIsAPIErrorWithStatus(t *testing.T) {
 	tests := []struct {
-		name string
-		err  error
-		want bool
+		name       string
+		err        error
+		statusCode int
+		want       bool
 	}{
-		{"403 API error", &databricks.APIError{StatusCode: http.StatusForbidden}, true},
-		{"wrapped 403 API error", fmt.Errorf("list: %w", &databricks.APIError{StatusCode: http.StatusForbidden}), true},
-		{"400 API error", &databricks.APIError{StatusCode: http.StatusBadRequest}, false},
-		{"500 API error", &databricks.APIError{StatusCode: http.StatusInternalServerError}, false},
-		{"non-API error", fmt.Errorf("network timeout"), false},
-		{"nil error", nil, false},
+		{"403 API error", &databricks.APIError{StatusCode: http.StatusForbidden}, http.StatusForbidden, true},
+		{"wrapped 403 API error", fmt.Errorf("list: %w", &databricks.APIError{StatusCode: http.StatusForbidden}), http.StatusForbidden, true},
+		{"403 API error, want 400", &databricks.APIError{StatusCode: http.StatusForbidden}, http.StatusBadRequest, false},
+		{"400 API error", &databricks.APIError{StatusCode: http.StatusBadRequest}, http.StatusForbidden, false},
+		{"500 API error", &databricks.APIError{StatusCode: http.StatusInternalServerError}, http.StatusForbidden, false},
+		{"non-API error", fmt.Errorf("network timeout"), http.StatusForbidden, false},
+		{"nil error", nil, http.StatusForbidden, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isWorkspaceAccessForbidden(tt.err); got != tt.want {
-				t.Errorf("isWorkspaceAccessForbidden(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := isAPIErrorWithStatus(tt.err, tt.statusCode); got != tt.want {
+				t.Errorf("isAPIErrorWithStatus(%v, %d) = %v, want %v", tt.err, tt.statusCode, got, tt.want)
 			}
 		})
 	}
