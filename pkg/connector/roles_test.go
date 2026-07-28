@@ -8,7 +8,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-func TestIsAPIErrorWithStatus(t *testing.T) {
+func TestIsApiError(t *testing.T) {
 	tests := []struct {
 		name       string
 		err        error
@@ -26,8 +26,8 @@ func TestIsAPIErrorWithStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isAPIErrorWithStatus(tt.err, tt.statusCode); got != tt.want {
-				t.Errorf("isAPIErrorWithStatus(%v, %d) = %v, want %v", tt.err, tt.statusCode, got, tt.want)
+			if got := isApiError(tt.err, tt.statusCode); got != tt.want {
+				t.Errorf("isApiError(%v, %d) = %v, want %v", tt.err, tt.statusCode, got, tt.want)
 			}
 		})
 	}

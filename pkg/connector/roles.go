@@ -132,7 +132,7 @@ func (r *roleBuilder) Entitlements(
 	}, nil, nil
 }
 
-func isAPIErrorWithStatus(err error, statusCode int) bool {
+func isApiError(err error, statusCode int) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == statusCode
 }
@@ -193,7 +193,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewUserRolesAttrVars(),
 		)
 		if err != nil {
-			if isWorkspaceRole && isAPIErrorWithStatus(err, http.StatusForbidden) {
+			if isWorkspaceRole && isApiError(err, http.StatusForbidden) {
 				l.Info("databricks-connector: workspace not accessible to service principal, skipping users",
 					zap.String("workspace_id", workspaceId))
 				users, total = nil, 0
@@ -235,7 +235,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewGroupRolesAttrVars(),
 		)
 		if err != nil {
-			if isWorkspaceRole && isAPIErrorWithStatus(err, http.StatusForbidden) {
+			if isWorkspaceRole && isApiError(err, http.StatusForbidden) {
 				l.Info("databricks-connector: workspace not accessible to service principal, skipping groups",
 					zap.String("workspace_id", workspaceId))
 				groups, total = nil, 0
@@ -280,7 +280,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewServicePrincipalRolesAttrVars(),
 		)
 		if err != nil {
-			if isWorkspaceRole && isAPIErrorWithStatus(err, http.StatusForbidden) {
+			if isWorkspaceRole && isApiError(err, http.StatusForbidden) {
 				l.Info("databricks-connector: workspace not accessible to service principal, skipping service principals",
 					zap.String("workspace_id", workspaceId))
 				servicePrincipals, total = nil, 0
