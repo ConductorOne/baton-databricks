@@ -8,6 +8,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -21,6 +22,13 @@ type servicePrincipalBuilder struct {
 	resourceType *v2.ResourceType
 }
 
+type credentialIssuingServicePrincipalBuilder struct {
+	*servicePrincipalBuilder
+	createSecret func(context.Context, string, string) (*databricks.ServicePrincipalSecret, error)
+}
+
+var _ connectorbuilder.CredentialIssuerV2 = (*credentialIssuingServicePrincipalBuilder)(nil)
+
 func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return servicePrincipalResourceType
 }
@@ -31,10 +39,6 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 		"display_name":   servicePrincipal.DisplayName,
 		"parent_type":    parent.ResourceType,
 		"parent_id":      parent.Resource,
-	}
-
-	servicePrincipalTraitOptions := []rs.GroupTraitOption{
-		rs.WithGroupProfile(profile),
 	}
 
 	// keep the parent resource id, only if the parent resource is account
@@ -49,12 +53,13 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 		v2.NonHumanIdentityTrait_NHI_TYPE_APP_REGISTRATION,
 		"databricks.service_principal",
 	))
+	options = append(options, rs.WithResourceProfile(profile))
 
 	resource, err := rs.NewGroupResource(
 		servicePrincipal.DisplayName,
 		servicePrincipalResourceType,
 		servicePrincipal.ID,
-		servicePrincipalTraitOptions,
+		nil,
 		options...,
 	)
 
@@ -116,12 +121,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
 	var rv []*v2.Entitlement
 
-	groupTrait, err := rs.GetGroupTrait(resource)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(resource.GetProfile())
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
@@ -131,7 +131,7 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 		workspaceId = parentID
 	}
 
-	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
+	applicationId, ok := rs.GetProfileStringValue(resource.GetProfile(), "application_id")
 	if !ok {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
@@ -161,12 +161,7 @@ func (s *servicePrincipalBuilder) Entitlements(_ context.Context, resource *v2.R
 func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	l := ctxzap.Extract(ctx)
 
-	groupTrait, err := rs.GetGroupTrait(resource)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(resource.GetProfile())
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
@@ -176,7 +171,7 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 		workspaceId = parentID
 	}
 
-	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
+	applicationId, ok := rs.GetProfileStringValue(resource.GetProfile(), "application_id")
 	if !ok {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
@@ -235,12 +230,7 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted service principal permissions")
 	}
 
-	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(entitlement.Resource.GetProfile())
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
@@ -250,7 +240,7 @@ func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resou
 		workspaceId = parentID
 	}
 
-	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
+	applicationId, ok := rs.GetProfileStringValue(entitlement.Resource.GetProfile(), "application_id")
 	if !ok {
 		return nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
@@ -318,12 +308,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have service principal permissions revoked")
 	}
 
-	groupTrait, err := rs.GetGroupTrait(entitlement.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to get group trait: %w", err)
-	}
-
-	parentType, parentID, err := getParentInfoFromProfile(groupTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(entitlement.Resource.GetProfile())
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to get parent info from group profile: %w", err)
 	}
@@ -333,7 +318,7 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 		workspaceId = parentID
 	}
 
-	applicationId, ok := rs.GetProfileStringValue(groupTrait.Profile, "application_id")
+	applicationId, ok := rs.GetProfileStringValue(entitlement.Resource.GetProfile(), "application_id")
 	if !ok {
 		return nil, fmt.Errorf("databricks-connector: failed to get application_id from service principal profile")
 	}
@@ -393,9 +378,16 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 	return nil, nil
 }
 
-func newServicePrincipalBuilder(client *databricks.Client) *servicePrincipalBuilder {
-	return &servicePrincipalBuilder{
+func newServicePrincipalBuilder(client *databricks.Client) connectorbuilder.ResourceSyncerV2 {
+	base := &servicePrincipalBuilder{
 		client:       client,
 		resourceType: servicePrincipalResourceType,
+	}
+	if !client.HasAccountConfiguration() {
+		return base
+	}
+	return &credentialIssuingServicePrincipalBuilder{
+		servicePrincipalBuilder: base,
+		createSecret:            client.CreateServicePrincipalSecret,
 	}
 }

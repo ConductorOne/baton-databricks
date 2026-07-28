@@ -9,6 +9,18 @@ type Vars interface {
 	Apply(params *url.Values)
 }
 
+type ServicePrincipalSecretPageVars struct {
+	PageSize  int
+	PageToken string
+}
+
+func (p *ServicePrincipalSecretPageVars) Apply(params *url.Values) {
+	params.Set("page_size", fmt.Sprintf("%d", p.PageSize))
+	if p.PageToken != "" {
+		params.Set("page_token", p.PageToken)
+	}
+}
+
 // Pagination vars are used for paginating results from the API.
 type PaginationVars struct {
 	Start uint `json:"startIndex"`

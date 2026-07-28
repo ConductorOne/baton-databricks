@@ -2,6 +2,7 @@ package connector
 
 import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
 )
 
 var (
@@ -25,6 +26,17 @@ var (
 		Id:          "service_principal",
 		DisplayName: "Service Principal",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_GROUP},
+		Annotations: annotations.New(&v2.ChildResourceType{ResourceTypeId: servicePrincipalSecretResourceType.Id}),
+	}
+
+	servicePrincipalSecretResourceType = &v2.ResourceType{
+		Id:          "service_principal_secret",
+		DisplayName: "Service Principal Secret",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_SECRET},
+		Annotations: annotations.New(
+			&v2.SkipEntitlementsAndGrants{},
+			&v2.OptInRequired{},
+		),
 	}
 
 	// The role resource type is for all static roles and entitlements available in API.
