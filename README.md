@@ -97,6 +97,12 @@ both flags at the same time. If you do that, connector will sync with all
 workspaces that are associated with provided tokens and all workspaces that are
 in the list of workspaces.
 
+To instead exclude specific workspaces from the sync, pass them to the
+`--databricks-exclude-workspaces` flag (or the
+`BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated
+list. Each entry can be a workspace name, deployment name, or numeric workspace
+ID. Excluded workspaces and their roles are skipped entirely.
+
 ## Group povisioning limitations
 provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
 this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.
@@ -132,6 +138,7 @@ Flags:
       --client-secret string              The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
       --databricks-client-id string       The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string   The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
+      --databricks-exclude-workspaces strings   Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
   -f, --file string                       The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")
   -h, --help                              help for baton-databricks
       --hostname string                   The Databricks hostname used to connect to the Databricks API ($BATON_HOSTNAME) (default "cloud.databricks.com")
