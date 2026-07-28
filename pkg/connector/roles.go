@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -133,7 +135,17 @@ func (r *roleBuilder) Entitlements(
 // Grants returns all the grants for a given role.
 // Since Databricks API does not support listing grants for a role, so that it aligns with the sdk API,
 // we have to go through all the users, groups and servicePrincipals to check if they have the role.
+// isWorkspaceAccessForbidden reports whether err is a 403 from a workspace-scoped
+// API call. This happens when the service principal has account-level access but is
+// not an admin on that specific workspace; such workspaces are skipped so one
+// inaccessible workspace does not fail the whole sync.
+func isWorkspaceAccessForbidden(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
+}
+
 func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	l := ctxzap.Extract(ctx)
 	var rv []*v2.Grant
 
 	roleTrait, err := rs.GetRoleTrait(resource)
@@ -185,7 +197,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewUserRolesAttrVars(),
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
+			if isWorkspaceRole && isWorkspaceAccessForbidden(err) {
+				l.Info("databricks-connector: workspace not accessible to service principal, skipping users",
+					zap.String("workspace_id", workspaceId))
+				users, total = nil, 0
+			} else {
+				return nil, nil, fmt.Errorf("databricks-connector: failed to list users: %w", err)
+			}
 		}
 
 		// check if user has the role
@@ -221,7 +239,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewGroupRolesAttrVars(),
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
+			if isWorkspaceRole && isWorkspaceAccessForbidden(err) {
+				l.Info("databricks-connector: workspace not accessible to service principal, skipping groups",
+					zap.String("workspace_id", workspaceId))
+				groups, total = nil, 0
+			} else {
+				return nil, nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
+			}
 		}
 
 		// check if group has the role
@@ -260,7 +284,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			databricks.NewServicePrincipalRolesAttrVars(),
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("databricks-connector: failed to list service principals: %w", err)
+			if isWorkspaceRole && isWorkspaceAccessForbidden(err) {
+				l.Info("databricks-connector: workspace not accessible to service principal, skipping service principals",
+					zap.String("workspace_id", workspaceId))
+				servicePrincipals, total = nil, 0
+			} else {
+				return nil, nil, fmt.Errorf("databricks-connector: failed to list service principals: %w", err)
+			}
 		}
 
 		// check if service principal has the role
