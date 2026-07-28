@@ -132,8 +132,6 @@ func (r *roleBuilder) Entitlements(
 	}, nil, nil
 }
 
-// isAPIErrorWithStatus reports whether err is (or wraps) a *databricks.APIError
-// whose StatusCode equals statusCode.
 func isAPIErrorWithStatus(err error, statusCode int) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == statusCode
