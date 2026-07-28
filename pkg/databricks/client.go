@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -34,12 +35,13 @@ const (
 )
 
 type Client struct {
-	httpClient     *uhttp.BaseHttpClient
-	baseUrl        *url.URL
-	accountBaseUrl *url.URL
-	auth           Auth
-	etag           string
-	accountId      string
+	httpClient        *uhttp.BaseHttpClient
+	baseUrl           *url.URL
+	accountBaseUrl    *url.URL
+	auth              Auth
+	etag              string
+	accountId         string
+	excludeWorkspaces map[string]struct{}
 
 	isAccAPIAvailable bool
 	isWSAPIAvailable  bool
@@ -54,9 +56,17 @@ func GetAccountHostname(hostname string) string {
 	return "accounts." + hostname
 }
 
-func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth) (*Client, error) {
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth, excludeWorkspaces []string) (*Client, error) {
 	var baseUrl *url.URL
 	var err error
+
+	excludeSet := make(map[string]struct{}, len(excludeWorkspaces))
+	for _, w := range excludeWorkspaces {
+		if w == "" {
+			continue
+		}
+		excludeSet[w] = struct{}{}
+	}
 
 	// If baseURL is provided, use it directly (for testing)
 	if baseURL != "" {
@@ -78,12 +88,25 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 
 	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient)
 	return &Client{
-		httpClient:     cli,
-		auth:           auth,
-		accountId:      accountID,
-		accountBaseUrl: accountBaseUrl,
-		baseUrl:        baseUrl,
+		httpClient:        cli,
+		auth:              auth,
+		accountId:         accountID,
+		accountBaseUrl:    accountBaseUrl,
+		baseUrl:           baseUrl,
+		excludeWorkspaces: excludeSet,
 	}, err
+}
+
+func (c *Client) isWorkspaceExcluded(w Workspace) bool {
+	if len(c.excludeWorkspaces) == 0 {
+		return false
+	}
+	for _, key := range []string{w.Name, w.DeploymentName, strconv.Itoa(w.ID)} {
+		if _, ok := c.excludeWorkspaces[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
@@ -514,7 +537,19 @@ func (c *Client) ListWorkspaces(
 		return nil, ratelimitData, err
 	}
 
-	return res, ratelimitData, nil
+	if len(c.excludeWorkspaces) == 0 {
+		return res, ratelimitData, nil
+	}
+
+	filtered := make([]Workspace, 0, len(res))
+	for _, w := range res {
+		if c.isWorkspaceExcluded(w) {
+			continue
+		}
+		filtered = append(filtered, w)
+	}
+
+	return filtered, ratelimitData, nil
 }
 
 func (c *Client) ListWorkspaceMembers(
