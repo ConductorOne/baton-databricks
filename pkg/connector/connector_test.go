@@ -17,7 +17,7 @@ func TestGetAccountHostname(t *testing.T) {
 	}{
 		{"explicit override honored", "accounts.custom.example.com", "cloud.databricks.com", "accounts.custom.example.com"},
 		{"unset azure calculates", "", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net"},
-		{"unset gcp calculates", "", "myorg.gcp.databricks.net", "accounts.gcp.databricks.net"},
+		{"unset gcp calculates", "", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com"},
 		{"unset aws calculates", "", "cloud.databricks.com", "accounts.cloud.databricks.com"},
 	}
 	for _, tc := range cases {
