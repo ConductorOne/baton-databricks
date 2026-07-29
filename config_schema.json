@@ -115,24 +115,14 @@
       "name": "databricks-client-id",
       "displayName": "OAuth2 Client ID",
       "description": "The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API",
-      "isRequired": true,
-      "stringField": {
-        "rules": {
-          "isRequired": true
-        }
-      }
+      "stringField": {}
     },
     {
       "name": "databricks-client-secret",
       "displayName": "OAuth2 Client Secret",
       "description": "The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API",
-      "isRequired": true,
       "isSecret": true,
-      "stringField": {
-        "rules": {
-          "isRequired": true
-        }
-      }
+      "stringField": {}
     },
     {
       "name": "hostname",
@@ -141,6 +131,51 @@
       "stringField": {
         "defaultValue": "cloud.databricks.com"
       }
+    },
+    {
+      "name": "workspaces",
+      "displayName": "Workspaces",
+      "description": "Limit syncing to the specified workspaces. Required when using workspace tokens.",
+      "stringSliceField": {}
+    },
+    {
+      "name": "workspace-tokens",
+      "displayName": "Workspace Tokens",
+      "description": "The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API",
+      "isSecret": true,
+      "stringSliceField": {}
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_AT_LEAST_ONE",
+      "fieldNames": [
+        "databricks-client-id",
+        "workspace-tokens"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "databricks-client-id",
+        "workspace-tokens"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_REQUIRED_TOGETHER",
+      "fieldNames": [
+        "databricks-client-id",
+        "databricks-client-secret"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
+      "fieldNames": [
+        "workspace-tokens"
+      ],
+      "secondaryFieldNames": [
+        "workspaces"
+      ]
     }
   ],
   "displayName": "Databricks",

@@ -106,6 +106,11 @@ func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {
 	c.isWSAPIAvailable = wsAPI
 }
 
+func (c *Client) IsTokenAuth() bool {
+	_, ok := c.auth.(*TokenAuth)
+	return ok
+}
+
 func (c *Client) UpdateEtag(etag string) {
 	c.etag = etag
 }
