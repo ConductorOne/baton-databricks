@@ -30,6 +30,8 @@ func TestIsWorkspaceExcluded(t *testing.T) {
 		{"no match", []string{"staging"}, false},
 		{"empty and whitespace entries ignored", []string{"", "   "}, false},
 		{"space-padded entry still matches", []string{" prod"}, true},
+		{"name match is case-insensitive", []string{"PROD"}, true},
+		{"deployment name match is case-insensitive", []string{"DBC-ABC"}, true},
 	}
 
 	for _, tt := range tests {

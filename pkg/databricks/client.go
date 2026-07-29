@@ -66,7 +66,7 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 		if w == "" {
 			continue
 		}
-		excludeSet[w] = struct{}{}
+		excludeSet[strings.ToLower(w)] = struct{}{}
 	}
 
 	// If baseURL is provided, use it directly (for testing)
@@ -103,7 +103,7 @@ func (c *Client) isWorkspaceExcluded(w Workspace) bool {
 		return false
 	}
 	for _, key := range []string{w.Name, w.DeploymentName, strconv.Itoa(w.ID)} {
-		if _, ok := c.excludeWorkspaces[key]; ok {
+		if _, ok := c.excludeWorkspaces[strings.ToLower(key)]; ok {
 			return true
 		}
 	}
