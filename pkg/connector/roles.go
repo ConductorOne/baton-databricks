@@ -194,7 +194,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		)
 		if err != nil {
 			if isWorkspaceRole && isApiError(err, http.StatusForbidden) {
-				l.Info("databricks-connector: workspace not accessible to service principal, skipping users",
+				l.Debug("databricks-connector: workspace not accessible to service principal, skipping users",
 					zap.String("workspace_id", workspaceId))
 				users, total = nil, 0
 			} else {
@@ -236,7 +236,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		)
 		if err != nil {
 			if isWorkspaceRole && isApiError(err, http.StatusForbidden) {
-				l.Info("databricks-connector: workspace not accessible to service principal, skipping groups",
+				l.Debug("databricks-connector: workspace not accessible to service principal, skipping groups",
 					zap.String("workspace_id", workspaceId))
 				groups, total = nil, 0
 			} else {
@@ -281,7 +281,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		)
 		if err != nil {
 			if isWorkspaceRole && isApiError(err, http.StatusForbidden) {
-				l.Info("databricks-connector: workspace not accessible to service principal, skipping service principals",
+				l.Debug("databricks-connector: workspace not accessible to service principal, skipping service principals",
 					zap.String("workspace_id", workspaceId))
 				servicePrincipals, total = nil, 0
 			} else {
