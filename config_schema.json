@@ -96,9 +96,7 @@
       "name": "account-hostname",
       "displayName": "Account Hostname",
       "description": "The hostname used to connect to the Databricks account API. If not set, it will be calculated from the hostname field.",
-      "stringField": {
-        "defaultValue": "accounts.cloud.databricks.com"
-      }
+      "stringField": {}
     },
     {
       "name": "account-id",
