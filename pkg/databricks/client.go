@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
+
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 )
@@ -98,16 +101,19 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 	}, err
 }
 
-func (c *Client) isWorkspaceExcluded(w Workspace) bool {
+// isWorkspaceExcluded case-insensitively matches w against the exclude set (name,
+// deployment name, or ID) — Databricks lowercases deployment_name but not workspace_name.
+func (c *Client) isWorkspaceExcluded(w Workspace) (string, bool) {
 	if len(c.excludeWorkspaces) == 0 {
-		return false
+		return "", false
 	}
 	for _, key := range []string{w.Name, w.DeploymentName, strconv.Itoa(w.ID)} {
-		if _, ok := c.excludeWorkspaces[strings.ToLower(key)]; ok {
-			return true
+		key = strings.ToLower(key)
+		if _, ok := c.excludeWorkspaces[key]; ok {
+			return key, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
@@ -523,6 +529,8 @@ func (c *Client) ListRoles(
 	return res.Roles, ratelimitData, nil
 }
 
+// ListWorkspaces returns the account's workspaces, minus any excluded by the
+// databricks-exclude-workspaces field. GET /accounts/{id}/workspaces (unpaginated).
 func (c *Client) ListWorkspaces(
 	ctx context.Context,
 ) (
@@ -542,13 +550,26 @@ func (c *Client) ListWorkspaces(
 		return res, ratelimitData, nil
 	}
 
+	matched := make(map[string]struct{}, len(c.excludeWorkspaces))
 	filtered := make([]Workspace, 0, len(res))
 	for _, w := range res {
-		if c.isWorkspaceExcluded(w) {
+		if key, ok := c.isWorkspaceExcluded(w); ok {
+			matched[key] = struct{}{}
 			continue
 		}
 		filtered = append(filtered, w)
 	}
+
+	unmatched := make([]string, 0, len(c.excludeWorkspaces))
+	for key := range c.excludeWorkspaces {
+		if _, ok := matched[key]; !ok {
+			unmatched = append(unmatched, key)
+		}
+	}
+	ctxzap.Extract(ctx).Debug("databricks: applied workspace exclusions",
+		zap.Int("excluded", len(res)-len(filtered)),
+		zap.Strings("unmatched_exclude_entries", unmatched),
+	)
 
 	return filtered, ratelimitData, nil
 }

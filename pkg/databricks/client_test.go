@@ -37,7 +37,7 @@ func TestIsWorkspaceExcluded(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newTestClient(t, tt.exclude)
-			if got := c.isWorkspaceExcluded(ws); got != tt.want {
+			if _, got := c.isWorkspaceExcluded(ws); got != tt.want {
 				t.Errorf("isWorkspaceExcluded(%+v) with exclude %v = %v, want %v", ws, tt.exclude, got, tt.want)
 			}
 		})
