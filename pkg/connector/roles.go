@@ -59,15 +59,14 @@ func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.
 		roleID = role
 	}
 
-	roleTraitOptions := []rs.RoleTraitOption{
-		rs.WithRoleProfile(profile),
-	}
+	var roleTraitOptions []rs.RoleTraitOption
 
 	resource, err := rs.NewRoleResource(
 		role,
 		roleResourceType,
 		roleID,
 		roleTraitOptions,
+		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
 	)
 
@@ -144,12 +143,12 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 	l := ctxzap.Extract(ctx)
 	var rv []*v2.Grant
 
-	roleTrait, err := rs.GetRoleTrait(resource)
+	_, err := rs.GetRoleTrait(resource)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
 	}
 
-	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(rs.GetProfile(resource))
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
 	}
@@ -162,7 +161,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		workspaceId = parentID
 	}
 
-	roleName, ok := rs.GetProfileStringValue(roleTrait.Profile, "role_name")
+	roleName, ok := rs.GetProfileStringValue(rs.GetProfile(resource), "role_name")
 	if !ok {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get role type from role profile")
 	}
@@ -339,12 +338,12 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can be granted role membership")
 	}
 
-	roleTrait, err := rs.GetRoleTrait(entitlement.Resource)
+	_, err := rs.GetRoleTrait(entitlement.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
 	}
 
-	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(rs.GetProfile(entitlement.Resource))
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
 	}
@@ -420,12 +419,12 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 		return nil, fmt.Errorf("databricks-connector: only users, groups and service principals can have role membership revoked")
 	}
 
-	roleTrait, err := rs.GetRoleTrait(entitlement.Resource)
+	_, err := rs.GetRoleTrait(entitlement.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to get role trait: %w", err)
 	}
 
-	parentType, parentID, err := getParentInfoFromProfile(roleTrait.Profile)
+	parentType, parentID, err := getParentInfoFromProfile(rs.GetProfile(entitlement.Resource))
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to get parent info from role profile: %w", err)
 	}
