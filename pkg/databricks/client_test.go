@@ -43,3 +43,23 @@ func TestIsWorkspaceExcluded(t *testing.T) {
 		})
 	}
 }
+
+func TestIsWorkspaceExcludedReturnsEveryMatchedKey(t *testing.T) {
+	ws := Workspace{ID: 12345, Name: "prod", DeploymentName: "dbc-abc"}
+	c := newTestClient(t, []string{"prod", "dbc-abc", "staging"})
+
+	keys, ok := c.isWorkspaceExcluded(ws)
+	if !ok {
+		t.Fatalf("isWorkspaceExcluded(%+v) = false, want true", ws)
+	}
+	want := []string{"prod", "dbc-abc"}
+	if len(keys) != len(want) {
+		t.Fatalf("isWorkspaceExcluded(%+v) matched keys = %v, want %v", ws, keys, want)
+	}
+	for i, k := range want {
+		if keys[i] != k {
+			t.Errorf("isWorkspaceExcluded(%+v) matched keys = %v, want %v", ws, keys, want)
+			break
+		}
+	}
+}

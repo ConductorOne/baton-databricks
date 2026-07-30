@@ -103,17 +103,19 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 
 // isWorkspaceExcluded case-insensitively matches w against the exclude set (name,
 // deployment name, or ID) — Databricks lowercases deployment_name but not workspace_name.
-func (c *Client) isWorkspaceExcluded(w Workspace) (string, bool) {
+// Returns every exclude-set key that matched, since a workspace can match more than one.
+func (c *Client) isWorkspaceExcluded(w Workspace) ([]string, bool) {
 	if len(c.excludeWorkspaces) == 0 {
-		return "", false
+		return nil, false
 	}
+	var keys []string
 	for _, key := range []string{w.Name, w.DeploymentName, strconv.Itoa(w.ID)} {
 		key = strings.ToLower(key)
 		if _, ok := c.excludeWorkspaces[key]; ok {
-			return key, true
+			keys = append(keys, key)
 		}
 	}
-	return "", false
+	return keys, len(keys) > 0
 }
 
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
@@ -553,8 +555,10 @@ func (c *Client) ListWorkspaces(
 	matched := make(map[string]struct{}, len(c.excludeWorkspaces))
 	filtered := make([]Workspace, 0, len(res))
 	for _, w := range res {
-		if key, ok := c.isWorkspaceExcluded(w); ok {
-			matched[key] = struct{}{}
+		if keys, ok := c.isWorkspaceExcluded(w); ok {
+			for _, key := range keys {
+				matched[key] = struct{}{}
+			}
 			continue
 		}
 		filtered = append(filtered, w)
