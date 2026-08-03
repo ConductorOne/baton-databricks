@@ -139,7 +139,6 @@ func isWorkspaceAccessForbidden(err error) bool {
 // Grants returns all the grants for a given role.
 // Since Databricks API does not support listing grants for a role, so that it aligns with the sdk API,
 // we have to go through all the users, groups and servicePrincipals to check if they have the role.
-
 func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	l := ctxzap.Extract(ctx)
 	var rv []*v2.Grant
