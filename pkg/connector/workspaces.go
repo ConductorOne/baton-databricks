@@ -24,10 +24,30 @@ const workspaceMemberEntitlement = "member"
 type workspaceBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	workspaces   map[string]struct{}
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return workspaceResourceType
+}
+
+// minimalWorkspaceResource builds a workspace from just its deployment name, for
+// token auth where the Account API (and its numeric workspace IDs) is unreachable.
+// Users, groups and service principals hang off the workspace here instead of the account.
+func minimalWorkspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
+	return rs.NewGroupResource(
+		workspace.DeploymentName,
+		workspaceResourceType,
+		workspace.DeploymentName,
+		nil,
+		rs.WithParentResourceID(parent),
+		rs.WithAnnotation(
+			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+		),
+	)
 }
 
 func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
@@ -62,12 +82,32 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	var rv []*v2.Resource
 
+	if !w.client.IsAccountAPIAvailable() {
+		for workspace := range w.workspaces {
+			ws := &databricks.Workspace{DeploymentName: workspace}
+
+			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			rv = append(rv, wr)
+		}
+
+		return rv, nil, nil
+	}
+
 	workspaces, _, err := w.client.ListWorkspaces(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
 	for _, workspace := range workspaces {
+		// Skip workspaces outside the configured set when one was provided.
+		if _, ok := w.workspaces[workspace.DeploymentName]; !ok && len(w.workspaces) > 0 {
+			continue
+		}
+
 		wCopy := workspace
 
 		wr, err := workspaceResource(ctx, &wCopy, parentResourceID)
@@ -239,9 +279,15 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	return nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client) *workspaceBuilder {
+func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
+	wMap := make(map[string]struct{}, len(workspaces))
+	for _, w := range workspaces {
+		wMap[w] = struct{}{}
+	}
+
 	return &workspaceBuilder{
 		client:       client,
 		resourceType: workspaceResourceType,
+		workspaces:   wMap,
 	}
 }

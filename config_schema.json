@@ -139,9 +139,57 @@
       "stringField": {
         "defaultValue": "cloud.databricks.com"
       }
+    },
+    {
+      "name": "workspaces",
+      "displayName": "Workspaces",
+      "description": "Limit syncing to the specified workspaces. Required when using workspace tokens.",
+      "stringSliceField": {}
+    },
+    {
+      "name": "workspace-tokens",
+      "displayName": "Workspace Tokens",
+      "description": "The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API",
+      "isRequired": true,
+      "isSecret": true,
+      "stringSliceField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     }
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg"
+  "iconUrl": "/static/app-icons/databricks.svg",
+  "fieldGroups": [
+    {
+      "name": "oauth2",
+      "displayName": "OAuth2",
+      "helpText": "Authenticate as a service principal using an OAuth2 client ID and secret.",
+      "fields": [
+        "account-id",
+        "databricks-client-id",
+        "databricks-client-secret",
+        "hostname",
+        "account-hostname",
+        "workspaces",
+        "base-url"
+      ],
+      "default": true
+    },
+    {
+      "name": "workspace-token",
+      "displayName": "Workspace token",
+      "helpText": "Authenticate with a personal access token scoped to each workspace.",
+      "fields": [
+        "account-id",
+        "workspaces",
+        "workspace-tokens",
+        "hostname",
+        "account-hostname",
+        "base-url"
+      ]
+    }
+  ]
 }
