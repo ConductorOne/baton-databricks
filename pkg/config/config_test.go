@@ -31,3 +31,17 @@ func TestValidateConfig(t *testing.T) {
 		})
 	}
 }
+
+// Both auth modes' fields live in the same struct; ValidateConfig must reject
+// them being set together since field groups only validate one selected group.
+func TestValidateConfigRejectsBothAuthModes(t *testing.T) {
+	cfg := &Databricks{
+		DatabricksClientId: "client-id",
+		Workspaces:         []string{"ws-1"},
+		WorkspaceTokens:    []string{"tok-1"},
+	}
+
+	if err := ValidateConfig(context.Background(), cfg); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
