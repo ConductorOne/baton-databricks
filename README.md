@@ -97,6 +97,11 @@ both flags at the same time. If you do that, connector will sync with all
 workspaces that are associated with provided tokens and all workspaces that are
 in the list of workspaces.
 
+When authenticating with `--workspace-tokens` instead of the OAuth client ID and
+secret, also pass `--auth-method workspace-token` (or set
+`BATON_AUTH_METHOD=workspace-token`), otherwise the connector validates against
+the OAuth fields by default and rejects the config.
+
 ## Group povisioning limitations
 provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
 this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.

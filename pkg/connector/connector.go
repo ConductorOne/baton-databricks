@@ -210,11 +210,11 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 
 func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
 	if len(cfg.WorkspaceTokens) > 0 {
-		l.Info("using workspace token auth", zap.String("account-id", cfg.AccountId))
+		l.Debug("using workspace token auth", zap.String("account-id", cfg.AccountId))
 		return databricks.NewTokenAuth(cfg.Workspaces, cfg.WorkspaceTokens)
 	}
 
-	l.Info("using oauth", zap.String("account-id", cfg.AccountId))
+	l.Debug("using oauth", zap.String("account-id", cfg.AccountId))
 	return databricks.NewOAuth2(
 		cfg.AccountId,
 		cfg.DatabricksClientId,

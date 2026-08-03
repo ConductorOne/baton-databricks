@@ -115,14 +115,24 @@
       "name": "databricks-client-id",
       "displayName": "OAuth2 Client ID",
       "description": "The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API",
-      "stringField": {}
+      "isRequired": true,
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     },
     {
       "name": "databricks-client-secret",
       "displayName": "OAuth2 Client Secret",
       "description": "The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API",
+      "isRequired": true,
       "isSecret": true,
-      "stringField": {}
+      "stringField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     },
     {
       "name": "hostname",
@@ -142,43 +152,46 @@
       "name": "workspace-tokens",
       "displayName": "Workspace Tokens",
       "description": "The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API",
+      "isRequired": true,
       "isSecret": true,
-      "stringSliceField": {}
-    }
-  ],
-  "constraints": [
-    {
-      "kind": "CONSTRAINT_KIND_AT_LEAST_ONE",
-      "fieldNames": [
-        "databricks-client-id",
-        "workspace-tokens"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
-      "fieldNames": [
-        "databricks-client-id",
-        "workspace-tokens"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_REQUIRED_TOGETHER",
-      "fieldNames": [
-        "databricks-client-id",
-        "databricks-client-secret"
-      ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
-      "fieldNames": [
-        "workspace-tokens"
-      ],
-      "secondaryFieldNames": [
-        "workspaces"
-      ]
+      "stringSliceField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
     }
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg"
+  "iconUrl": "/static/app-icons/databricks.svg",
+  "fieldGroups": [
+    {
+      "name": "oauth2",
+      "displayName": "OAuth2",
+      "helpText": "Authenticate as a service principal using an OAuth2 client ID and secret.",
+      "fields": [
+        "account-id",
+        "databricks-client-id",
+        "databricks-client-secret",
+        "hostname",
+        "account-hostname",
+        "workspaces",
+        "base-url"
+      ],
+      "default": true
+    },
+    {
+      "name": "workspace-token",
+      "displayName": "Workspace token",
+      "helpText": "Authenticate with a personal access token scoped to each workspace.",
+      "fields": [
+        "account-id",
+        "workspaces",
+        "workspace-tokens",
+        "hostname",
+        "account-hostname",
+        "base-url"
+      ]
+    }
+  ]
 }
