@@ -34,11 +34,11 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 		)
 	}
 
-	var status v2.UserTrait_Status_Status
+	var status v2.Status_ResourceStatus
 	if user.Active {
-		status = v2.UserTrait_Status_STATUS_ENABLED
+		status = v2.Status_RESOURCE_STATUS_ENABLED
 	} else {
-		status = v2.UserTrait_Status_STATUS_DISABLED
+		status = v2.Status_RESOURCE_STATUS_DISABLED
 	}
 
 	firstName, lastName := rs.SplitFullName(user.DisplayName)
@@ -51,16 +51,17 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 	}
 
 	userTraitOptions := []rs.UserTraitOption{
-		rs.WithUserProfile(profile),
-		rs.WithStatus(status),
 		rs.WithUserLogin(user.UserName),
 		rs.WithEmail(primaryEmail, true),
 	}
 
 	userTraitOptions = append(userTraitOptions, emailOptions...)
 
+	options := []rs.ResourceOption{
+		rs.WithResourceProfile(profile),
+		rs.WithResourceStatus(status, ""),
+	}
 	// keep the parent resource id, only if the parent resource is account
-	var options []rs.ResourceOption
 	if parent.ResourceType == accountResourceType.Id {
 		options = append(options, rs.WithParentResourceID(parent))
 	}

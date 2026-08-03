@@ -48,11 +48,9 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 		"parent_id":    parent.GetResource(),
 	}
 
-	groupTraitOptions := []rs.GroupTraitOption{
-		rs.WithGroupProfile(profile),
+	options := []rs.ResourceOption{
+		rs.WithResourceProfile(profile),
 	}
-
-	var options []rs.ResourceOption
 	if parent != nil {
 		options = append(options, rs.WithParentResourceID(parent))
 	}
@@ -62,7 +60,7 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 		group.DisplayName,
 		groupResourceType,
 		groupId,
-		groupTraitOptions,
+		nil,
 		options...,
 	)
 
