@@ -129,17 +129,16 @@ func (r *roleBuilder) Entitlements(
 	}, nil, nil
 }
 
-// Grants returns all the grants for a given role.
-// Since Databricks API does not support listing grants for a role, so that it aligns with the sdk API,
-// we have to go through all the users, groups and servicePrincipals to check if they have the role.
-// isWorkspaceAccessForbidden reports whether err is a 403 from a workspace-scoped
-// API call. This happens when the service principal has account-level access but is
-// not an admin on that specific workspace; such workspaces are skipped so one
-// inaccessible workspace does not fail the whole sync.
+// A 403 here means the service principal has account access but isn't a
+// workspace admin; such workspaces are skipped rather than failing the whole sync.
 func isWorkspaceAccessForbidden(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
 }
+
+// Grants returns all the grants for a given role.
+// Since Databricks API does not support listing grants for a role, so that it aligns with the sdk API,
+// we have to go through all the users, groups and servicePrincipals to check if they have the role.
 
 func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	l := ctxzap.Extract(ctx)
