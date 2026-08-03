@@ -84,8 +84,10 @@ baton resources
 - Workspaces
 - Groups
 - Service Principals
+- Service Principal Secrets
 - Users
 - Roles
+- Workspace Personal Access Tokens
 
 By default, connector will fetch all resources from the account and all
 workspaces. You can limit the scope of the sync by providing a list of
