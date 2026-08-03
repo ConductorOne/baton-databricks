@@ -7,6 +7,11 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/field"
 )
 
+const (
+	DatabricksOAuth2Group         = "oauth2"
+	DatabricksWorkspaceTokenGroup = "workspace-token"
+)
+
 var (
 	AccountIdField = field.StringField(
 		"account-id",
@@ -17,12 +22,14 @@ var (
 	DatabricksClientIdField = field.StringField(
 		"databricks-client-id",
 		field.WithDescription("The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API"),
+		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client ID"),
 	)
 	DatabricksClientSecretField = field.StringField(
 		"databricks-client-secret",
 		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
 		field.WithIsSecret(true),
+		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client Secret"),
 	)
 	WorkspacesField = field.StringSliceField(
@@ -34,6 +41,7 @@ var (
 		"workspace-tokens",
 		field.WithDescription("The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API"),
 		field.WithIsSecret(true),
+		field.WithRequired(true),
 		field.WithDisplayName("Workspace Tokens"),
 	)
 	AccountHostnameField = field.StringField(
@@ -69,33 +77,30 @@ var (
 		BaseURLField,
 		ExcludeWorkspacesField,
 	}
-	fieldRelationships = []field.SchemaFieldRelationship{
-		field.FieldsAtLeastOneUsed(
-			DatabricksClientIdField,
-			WorkspaceTokensField,
-		),
-		field.FieldsMutuallyExclusive(
-			DatabricksClientIdField,
-			WorkspaceTokensField,
-		),
-		field.FieldsRequiredTogether(
-			DatabricksClientIdField,
-			DatabricksClientSecretField,
-		),
-		field.FieldsDependentOn(
-			[]field.SchemaField{WorkspaceTokensField},
-			[]field.SchemaField{WorkspacesField},
-		),
-	}
 )
 
 //go:generate go run ./gen
 var Config = field.NewConfiguration(
 	configFields,
-	field.WithConstraints(fieldRelationships...),
 	field.WithConnectorDisplayName("Databricks"),
 	field.WithHelpUrl("/docs/baton/databricks"),
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
+	field.WithFieldGroups([]field.SchemaFieldGroup{
+		{
+			Name:        DatabricksOAuth2Group,
+			DisplayName: "OAuth2",
+			HelpText:    "Authenticate as a service principal using an OAuth2 client ID and secret.",
+			Fields:      []field.SchemaField{AccountIdField, DatabricksClientIdField, DatabricksClientSecretField, HostnameField, AccountHostnameField, WorkspacesField, BaseURLField},
+			Default:     true,
+		},
+		{
+			Name:        DatabricksWorkspaceTokenGroup,
+			DisplayName: "Workspace token",
+			HelpText:    "Authenticate with a personal access token scoped to each workspace.",
+			Fields:      []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField},
+			Default:     false,
+		},
+	}),
 )
 
 // ValidateConfig checks constraints that the field relationships can't express: a

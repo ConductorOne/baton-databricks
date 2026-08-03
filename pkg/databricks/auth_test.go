@@ -60,3 +60,15 @@ func TestTokenAuthApplyPrefixCollision(t *testing.T) {
 		t.Fatalf("Authorization = %q, want %q", got, "Bearer token-12")
 	}
 }
+
+// Fewer tokens than workspaces must not panic; unmatched workspaces just get no token.
+func TestNewTokenAuthFewerTokensThanWorkspaces(t *testing.T) {
+	auth := NewTokenAuth([]string{"dbc-1", "dbc-2"}, []string{"token-1"})
+
+	req := &http.Request{URL: mustURL(t, "https://dbc-2.cloud.databricks.com/x"), Header: http.Header{}}
+	auth.Apply(req)
+
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty", got)
+	}
+}

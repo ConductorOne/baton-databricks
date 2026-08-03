@@ -39,6 +39,9 @@ type TokenAuth struct {
 func NewTokenAuth(workspaces, tokens []string) *TokenAuth {
 	tokensMap := make(map[string]string, len(workspaces))
 	for i, workspace := range workspaces {
+		if i >= len(tokens) {
+			break
+		}
 		tokensMap[workspace] = tokens[i]
 	}
 

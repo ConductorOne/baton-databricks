@@ -97,6 +97,11 @@ both flags at the same time. If you do that, connector will sync with all
 workspaces that are associated with provided tokens and all workspaces that are
 in the list of workspaces.
 
+When authenticating with `--workspace-tokens` instead of the OAuth client ID and
+secret, also pass `--auth-method workspace-token` (or set
+`BATON_AUTH_METHOD=workspace-token`), otherwise the connector validates against
+the OAuth fields by default and rejects the config.
+
 To instead exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
 `BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated
