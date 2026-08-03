@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
@@ -34,12 +38,13 @@ const (
 )
 
 type Client struct {
-	httpClient     *uhttp.BaseHttpClient
-	baseUrl        *url.URL
-	accountBaseUrl *url.URL
-	auth           Auth
-	etag           string
-	accountId      string
+	httpClient        *uhttp.BaseHttpClient
+	baseUrl           *url.URL
+	accountBaseUrl    *url.URL
+	auth              Auth
+	etag              string
+	accountId         string
+	excludeWorkspaces map[string]struct{}
 
 	isAccAPIAvailable bool
 	isWSAPIAvailable  bool
@@ -54,9 +59,18 @@ func GetAccountHostname(hostname string) string {
 	return "accounts." + hostname
 }
 
-func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth) (*Client, error) {
+func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth, excludeWorkspaces []string) (*Client, error) {
 	var baseUrl *url.URL
 	var err error
+
+	excludeSet := make(map[string]struct{}, len(excludeWorkspaces))
+	for _, w := range excludeWorkspaces {
+		w = strings.TrimSpace(w)
+		if w == "" {
+			continue
+		}
+		excludeSet[strings.ToLower(w)] = struct{}{}
+	}
 
 	// If baseURL is provided, use it directly (for testing)
 	if baseURL != "" {
@@ -78,12 +92,30 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 
 	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient)
 	return &Client{
-		httpClient:     cli,
-		auth:           auth,
-		accountId:      accountID,
-		accountBaseUrl: accountBaseUrl,
-		baseUrl:        baseUrl,
+		httpClient:        cli,
+		auth:              auth,
+		accountId:         accountID,
+		accountBaseUrl:    accountBaseUrl,
+		baseUrl:           baseUrl,
+		excludeWorkspaces: excludeSet,
 	}, err
+}
+
+// isWorkspaceExcluded case-insensitively matches w against the exclude set (name,
+// deployment name, or ID) — Databricks lowercases deployment_name but not workspace_name.
+// Returns every exclude-set key that matched, since a workspace can match more than one.
+func (c *Client) isWorkspaceExcluded(w Workspace) ([]string, bool) {
+	if len(c.excludeWorkspaces) == 0 {
+		return nil, false
+	}
+	var keys []string
+	for _, key := range []string{w.Name, w.DeploymentName, strconv.Itoa(w.ID)} {
+		key = strings.ToLower(key)
+		if _, ok := c.excludeWorkspaces[key]; ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys, len(keys) > 0
 }
 
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
@@ -499,6 +531,8 @@ func (c *Client) ListRoles(
 	return res.Roles, ratelimitData, nil
 }
 
+// ListWorkspaces returns the account's workspaces, minus any excluded by the
+// databricks-exclude-workspaces field. GET /accounts/{id}/workspaces (unpaginated).
 func (c *Client) ListWorkspaces(
 	ctx context.Context,
 ) (
@@ -514,7 +548,34 @@ func (c *Client) ListWorkspaces(
 		return nil, ratelimitData, err
 	}
 
-	return res, ratelimitData, nil
+	if len(c.excludeWorkspaces) == 0 {
+		return res, ratelimitData, nil
+	}
+
+	matched := make(map[string]struct{}, len(c.excludeWorkspaces))
+	filtered := make([]Workspace, 0, len(res))
+	for _, w := range res {
+		if keys, ok := c.isWorkspaceExcluded(w); ok {
+			for _, key := range keys {
+				matched[key] = struct{}{}
+			}
+			continue
+		}
+		filtered = append(filtered, w)
+	}
+
+	unmatched := make([]string, 0, len(c.excludeWorkspaces))
+	for key := range c.excludeWorkspaces {
+		if _, ok := matched[key]; !ok {
+			unmatched = append(unmatched, key)
+		}
+	}
+	ctxzap.Extract(ctx).Debug("databricks: applied workspace exclusions",
+		zap.Int("excluded", len(res)-len(filtered)),
+		zap.Strings("unmatched_exclude_entries", unmatched),
+	)
+
+	return filtered, ratelimitData, nil
 }
 
 func (c *Client) ListWorkspaceMembers(

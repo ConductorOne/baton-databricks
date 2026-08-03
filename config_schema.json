@@ -139,6 +139,12 @@
       "stringField": {
         "defaultValue": "cloud.databricks.com"
       }
+    },
+    {
+      "name": "databricks-exclude-workspaces",
+      "displayName": "Exclude Workspaces",
+      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID",
+      "stringSliceField": {}
     }
   ],
   "displayName": "Databricks",

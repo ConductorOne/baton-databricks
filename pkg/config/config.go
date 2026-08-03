@@ -41,6 +41,11 @@ var (
 		field.WithHidden(true),
 		field.WithExportTarget(field.ExportTargetCLIOnly),
 	)
+	ExcludeWorkspacesField = field.StringSliceField(
+		"databricks-exclude-workspaces",
+		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID"),
+		field.WithDisplayName("Exclude Workspaces"),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -48,6 +53,7 @@ var (
 		DatabricksClientSecretField,
 		HostnameField,
 		BaseURLField,
+		ExcludeWorkspacesField,
 	}
 )
 
