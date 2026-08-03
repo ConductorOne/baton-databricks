@@ -103,11 +103,16 @@ var Config = field.NewConfiguration(
 	}),
 )
 
-// ValidateConfig checks constraints that the field relationships can't express: a
-// workspace token must be paired with the workspace it belongs to.
+// ValidateConfig checks constraints that field groups can't express: OAuth2 and
+// workspace-token credentials are mutually exclusive, and a workspace token
+// must be paired with the workspace it belongs to.
 func ValidateConfig(ctx context.Context, cfg *Databricks) error {
 	workspaces := cfg.Workspaces
 	tokens := cfg.WorkspaceTokens
+
+	if len(tokens) > 0 && cfg.DatabricksClientId != "" {
+		return fmt.Errorf("databricks-connector: databricks-client-id and workspace-tokens are mutually exclusive")
+	}
 
 	if len(tokens) > 0 && len(workspaces) != len(tokens) {
 		return fmt.Errorf(
