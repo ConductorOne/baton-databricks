@@ -185,12 +185,17 @@ func New(
 func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	l := ctxzap.Extract(ctx)
 
-	if err := config.ValidateConfig(ctx, cfg); err != nil {
+	authMethod := ""
+	if opts != nil {
+		authMethod = opts.SelectedAuthMethod
+	}
+
+	if err := config.ValidateConfig(ctx, cfg, authMethod); err != nil {
 		return nil, nil, err
 	}
 
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(ctx, cfg, l)
+	auth := prepareClientAuth(ctx, cfg, authMethod, l)
 
 	cb, err := New(
 		ctx,
@@ -210,8 +215,8 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	return cb, nil, nil
 }
 
-func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
-	if len(cfg.WorkspaceTokens) > 0 {
+func prepareClientAuth(_ context.Context, cfg *config.Databricks, authMethod string, l *zap.Logger) databricks.Auth {
+	if authMethod == config.DatabricksWorkspaceTokenGroup {
 		l.Debug("using workspace token auth", zap.String("account-id", cfg.AccountId))
 		return databricks.NewTokenAuth(cfg.Workspaces, cfg.WorkspaceTokens)
 	}

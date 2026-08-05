@@ -105,20 +105,18 @@ var Config = field.NewConfiguration(
 
 // ValidateConfig checks constraints that field groups can't express: OAuth2 and
 // workspace-token credentials are mutually exclusive, and a workspace token
-// must be paired with the workspace it belongs to.
-func ValidateConfig(ctx context.Context, cfg *Databricks) error {
-	workspaces := cfg.Workspaces
-	tokens := cfg.WorkspaceTokens
-
-	if len(tokens) > 0 && cfg.DatabricksClientId != "" {
+// must be paired with the workspace it belongs to when workspace-token auth
+// is the selected auth method.
+func ValidateConfig(ctx context.Context, cfg *Databricks, authMethod string) error {
+	if len(cfg.WorkspaceTokens) > 0 && cfg.DatabricksClientId != "" {
 		return fmt.Errorf("databricks-connector: databricks-client-id and workspace-tokens are mutually exclusive")
 	}
 
-	if len(tokens) > 0 && len(workspaces) != len(tokens) {
+	if authMethod == DatabricksWorkspaceTokenGroup && len(cfg.Workspaces) != len(cfg.WorkspaceTokens) {
 		return fmt.Errorf(
 			"databricks-connector: workspaces and workspace-tokens must be the same length, got %d workspaces and %d tokens",
-			len(workspaces),
-			len(tokens),
+			len(cfg.Workspaces),
+			len(cfg.WorkspaceTokens),
 		)
 	}
 
