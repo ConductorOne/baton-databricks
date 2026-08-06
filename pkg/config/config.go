@@ -21,8 +21,18 @@ var (
 		"databricks-client-secret",
 		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
 		field.WithIsSecret(true),
-		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client Secret"),
+	)
+	DatabricksTokenFileField = field.StringField(
+		"databricks-token-file",
+		field.WithDescription("Path to a file containing an external JWT for workload identity federation (e.g. a SPIFFE JWT-SVID or Kubernetes projected ServiceAccount token). The file is re-read on each token refresh to support credential rotation."),
+		field.WithDisplayName("Federation Token File"),
+	)
+	DatabricksTokenField = field.StringField(
+		"databricks-token",
+		field.WithDescription("An external JWT for workload identity federation (RFC 8693 token exchange). Use --databricks-token-file for automatic credential rotation."),
+		field.WithIsSecret(true),
+		field.WithDisplayName("Federation Token"),
 	)
 	AccountHostnameField = field.StringField(
 		"account-hostname",
@@ -51,6 +61,8 @@ var (
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
+		DatabricksTokenFileField,
+		DatabricksTokenField,
 		HostnameField,
 		BaseURLField,
 		ExcludeWorkspacesField,
@@ -63,4 +75,8 @@ var Config = field.NewConfiguration(
 	field.WithConnectorDisplayName("Databricks"),
 	field.WithHelpUrl("/docs/baton/databricks"),
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
+	field.WithConstraints(
+		field.FieldsMutuallyExclusive(DatabricksClientSecretField, DatabricksTokenFileField, DatabricksTokenField),
+		field.FieldsAtLeastOneUsed(DatabricksClientSecretField, DatabricksTokenFileField, DatabricksTokenField),
+	),
 )

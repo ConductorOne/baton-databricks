@@ -191,13 +191,23 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
-	databricksClientSecret := cfg.DatabricksClientSecret
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+
+	if cfg.DatabricksTokenFile != "" || cfg.DatabricksToken != "" {
+		l.Info("using workload identity federation (token exchange)")
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			cfg.DatabricksTokenFile,
+			cfg.DatabricksToken,
+			accountHostname,
+		)
+	}
 
 	return databricks.NewOAuth2(
 		accountID,
 		databricksClientId,
-		databricksClientSecret,
+		cfg.DatabricksClientSecret,
 		accountHostname,
 	)
 }
