@@ -90,8 +90,11 @@ var Config = field.NewConfiguration(
 			Name:        DatabricksOAuth2Group,
 			DisplayName: "OAuth2",
 			HelpText:    "Authenticate as a service principal using an OAuth2 client ID and secret.",
-			Fields:      []field.SchemaField{AccountIdField, DatabricksClientIdField, DatabricksClientSecretField, HostnameField, AccountHostnameField, WorkspacesField, BaseURLField, ExcludeWorkspacesField},
-			Default:     true,
+			Fields: []field.SchemaField{
+				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
+				HostnameField, AccountHostnameField, WorkspacesField, BaseURLField, ExcludeWorkspacesField,
+			},
+			Default: true,
 		},
 		{
 			Name:        DatabricksWorkspaceTokenGroup,
