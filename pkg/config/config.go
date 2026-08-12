@@ -90,14 +90,14 @@ var Config = field.NewConfiguration(
 			Name:        DatabricksOAuth2Group,
 			DisplayName: "OAuth2",
 			HelpText:    "Authenticate as a service principal using an OAuth2 client ID and secret.",
-			Fields:      []field.SchemaField{AccountIdField, DatabricksClientIdField, DatabricksClientSecretField, HostnameField, AccountHostnameField, WorkspacesField, BaseURLField},
+			Fields:      []field.SchemaField{AccountIdField, DatabricksClientIdField, DatabricksClientSecretField, HostnameField, AccountHostnameField, WorkspacesField, BaseURLField, ExcludeWorkspacesField},
 			Default:     true,
 		},
 		{
 			Name:        DatabricksWorkspaceTokenGroup,
 			DisplayName: "Workspace token",
 			HelpText:    "Authenticate with a personal access token scoped to each workspace.",
-			Fields:      []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField},
+			Fields:      []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField, ExcludeWorkspacesField},
 			Default:     false,
 		},
 	}),
@@ -108,8 +108,8 @@ var Config = field.NewConfiguration(
 // must be paired with the workspace it belongs to when workspace-token auth
 // is the selected auth method.
 func ValidateConfig(ctx context.Context, cfg *Databricks, authMethod string) error {
-	if len(cfg.WorkspaceTokens) > 0 && cfg.DatabricksClientId != "" {
-		return fmt.Errorf("databricks-connector: databricks-client-id and workspace-tokens are mutually exclusive")
+	if len(cfg.WorkspaceTokens) > 0 && (cfg.DatabricksClientId != "" || cfg.DatabricksClientSecret != "") {
+		return fmt.Errorf("databricks-connector: databricks-client-id/databricks-client-secret and workspace-tokens are mutually exclusive")
 	}
 
 	if authMethod == DatabricksWorkspaceTokenGroup && len(cfg.Workspaces) != len(cfg.WorkspaceTokens) {

@@ -48,3 +48,15 @@ func TestValidateConfigRejectsBothAuthModes(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+func TestValidateConfigRejectsClientSecretWithTokens(t *testing.T) {
+	cfg := &Databricks{
+		DatabricksClientSecret: "client-secret",
+		Workspaces:             []string{"ws-1"},
+		WorkspaceTokens:        []string{"tok-1"},
+	}
+
+	if err := ValidateConfig(context.Background(), cfg, DatabricksOAuth2Group); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}

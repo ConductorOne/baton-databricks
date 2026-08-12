@@ -82,8 +82,12 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	var rv []*v2.Resource
 
-	if !w.client.IsAccountAPIAvailable() {
+	if w.client.IsTokenAuth() {
 		for workspace := range w.workspaces {
+			if w.client.IsWorkspaceExcluded(workspace) {
+				continue
+			}
+
 			ws := &databricks.Workspace{DeploymentName: workspace}
 
 			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID)
@@ -102,10 +106,15 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
+	matchedConfigured := make(map[string]struct{}, len(w.workspaces))
 	for _, workspace := range workspaces {
 		// Skip workspaces outside the configured set when one was provided.
-		if _, ok := w.workspaces[workspace.DeploymentName]; !ok && len(w.workspaces) > 0 {
-			continue
+		if len(w.workspaces) > 0 {
+			cfg, ok := matchConfiguredWorkspace(w.workspaces, workspace.DeploymentName)
+			if !ok {
+				continue
+			}
+			matchedConfigured[cfg] = struct{}{}
 		}
 
 		wCopy := workspace
@@ -118,7 +127,30 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		rv = append(rv, wr)
 	}
 
+	l := ctxzap.Extract(ctx)
+	for workspace := range w.workspaces {
+		if _, ok := matchedConfigured[workspace]; !ok {
+			l.Warn("databricks-connector: configured workspace not found among account workspaces",
+				zap.String("workspace", workspace),
+			)
+		}
+	}
+
 	return rv, nil, nil
+}
+
+// matchConfiguredWorkspace looks up deploymentName case-insensitively, returning
+// the matched key so warnings can report the value the user configured.
+func matchConfiguredWorkspace(configured map[string]struct{}, deploymentName string) (string, bool) {
+	if _, ok := configured[deploymentName]; ok {
+		return deploymentName, true
+	}
+	for cfg := range configured {
+		if strings.EqualFold(cfg, deploymentName) {
+			return cfg, true
+		}
+	}
+	return "", false
 }
 
 // Entitlements returns slice of entitlements representing workspace members.

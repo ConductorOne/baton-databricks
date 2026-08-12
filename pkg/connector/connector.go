@@ -123,7 +123,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		for _, workspace := range d.workspaces {
 			_, _, err := d.client.ListRoles(ctx, workspace, "", "")
 			if err != nil && !isAccAPIAvailable {
-				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace: %w", err)
+				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
 			}
 
 			isWSAPIAvailable = true
@@ -137,7 +137,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		for _, workspace := range workspaces {
 			_, _, err := d.client.ListRoles(ctx, workspace.DeploymentName, "", "")
 			if err != nil && !isAccAPIAvailable {
-				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace: %w", err)
+				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace.DeploymentName, err)
 			}
 
 			isWSAPIAvailable = true

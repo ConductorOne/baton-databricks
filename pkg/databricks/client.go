@@ -118,6 +118,13 @@ func (c *Client) isWorkspaceExcluded(w Workspace) ([]string, bool) {
 	return keys, len(keys) > 0
 }
 
+// IsWorkspaceExcluded reports whether deploymentName matches the
+// databricks-exclude-workspaces set.
+func (c *Client) IsWorkspaceExcluded(deploymentName string) bool {
+	_, ok := c.isWorkspaceExcluded(Workspace{DeploymentName: deploymentName})
+	return ok
+}
+
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
 	return &url.URL{
 		Scheme: "https",
