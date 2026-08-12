@@ -49,15 +49,21 @@ func NewTokenAuth(workspaces, tokens []string) *TokenAuth {
 }
 
 func (t *TokenAuth) Apply(req *http.Request) {
-	// A workspace request host is "<deployment-name>.<hostname>". Match on the
-	// deployment-name prefix rather than the first label, since Azure deployment
-	// names themselves contain a dot (e.g. "adb-1234567890.1").
+	// A workspace request host is "<deployment-name>.<hostname>". A shorter
+	// deployment name can be a false prefix of a longer one (Azure names
+	// contain a dot, e.g. "adb-123" of "adb-123.1"), so match the longest one.
 	host := req.URL.Host
+	var bestWorkspace, bestToken string
 	for workspace, token := range t.tokens {
-		if host == workspace || strings.HasPrefix(host, workspace+".") {
-			req.Header.Set("Authorization", "Bearer "+token)
-			return
+		if host != workspace && !strings.HasPrefix(host, workspace+".") {
+			continue
 		}
+		if len(workspace) > len(bestWorkspace) {
+			bestWorkspace, bestToken = workspace, token
+		}
+	}
+	if bestToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bestToken)
 	}
 }
 

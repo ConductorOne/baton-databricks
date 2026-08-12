@@ -34,7 +34,7 @@ var (
 	)
 	WorkspacesField = field.StringSliceField(
 		"workspaces",
-		field.WithDescription("Limit syncing to the specified workspaces. Required when using workspace tokens."),
+		field.WithDescription("Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens."),
 		field.WithDisplayName("Workspaces"),
 	)
 	WorkspaceTokensField = field.StringSliceField(

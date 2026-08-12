@@ -61,6 +61,19 @@ func TestTokenAuthApplyPrefixCollision(t *testing.T) {
 	}
 }
 
+// An Azure deployment name's own dot must not let a shorter workspace name
+// falsely prefix a longer one that embeds it (e.g. "adb-123" of "adb-123.1").
+func TestTokenAuthApplyNestedDottedPrefix(t *testing.T) {
+	auth := NewTokenAuth([]string{"adb-123", "adb-123.1"}, []string{"token-short", "token-long"})
+
+	req := &http.Request{URL: mustURL(t, "https://adb-123.1.azuredatabricks.net/x"), Header: http.Header{}}
+	auth.Apply(req)
+
+	if got := req.Header.Get("Authorization"); got != "Bearer token-long" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer token-long")
+	}
+}
+
 // Fewer tokens than workspaces must not panic; unmatched workspaces just get no token.
 func TestNewTokenAuthFewerTokensThanWorkspaces(t *testing.T) {
 	auth := NewTokenAuth([]string{"dbc-1", "dbc-2"}, []string{"token-1"})
