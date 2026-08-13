@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -151,6 +153,17 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	}
 
 	return result, nil
+}
+
+// isGroupNotFoundError matches the rule-sets/roles API's response for a group ID
+// it doesn't recognize (e.g. an orphaned or stale workspace SCIM group), distinct
+// from other 400s.
+func isGroupNotFoundError(err error) bool {
+	var apiErr *databricks.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(apiErr.Message, "not found")
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {

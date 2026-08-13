@@ -149,6 +149,12 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 	// get all assignable roles for this specific group resource
 	roles, _, err := g.client.ListRoles(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
+		if isGroupNotFoundError(err) {
+			ctxzap.Extract(ctx).Debug("databricks-connector: skipping roles for group not recognized by the rule-sets API",
+				zap.String("group_id", groupId.Resource),
+			)
+			return rv, nil, nil
+		}
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list roles for group %s: %w", groupId.Resource, err)
 	}
 
@@ -230,6 +236,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.S
 	// role permissions grants
 	ruleSets, rateLimitDataRuleSets, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
+		if isGroupNotFoundError(err) {
+			l.Debug("databricks-connector: skipping role rule sets for group not recognized by the rule-sets API",
+				zap.String("group_id", groupId.Resource),
+			)
+			return rv, &rs.SyncOpResults{Annotations: annos}, nil
+		}
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list role rule sets for group %s: %w", resource.Id.Resource, err)
 	}
 
