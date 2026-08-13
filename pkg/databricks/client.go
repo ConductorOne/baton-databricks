@@ -119,9 +119,14 @@ func (c *Client) isWorkspaceExcluded(w Workspace) ([]string, bool) {
 }
 
 // IsWorkspaceExcluded reports whether deploymentName matches the
-// databricks-exclude-workspaces set.
+// databricks-exclude-workspaces set. Checks the name only, not via
+// isWorkspaceExcluded: that also matches on ID, and a zero-value ID here would
+// let an exclude entry of "0" match every workspace.
 func (c *Client) IsWorkspaceExcluded(deploymentName string) bool {
-	_, ok := c.isWorkspaceExcluded(Workspace{DeploymentName: deploymentName})
+	if len(c.excludeWorkspaces) == 0 {
+		return false
+	}
+	_, ok := c.excludeWorkspaces[strings.ToLower(deploymentName)]
 	return ok
 }
 

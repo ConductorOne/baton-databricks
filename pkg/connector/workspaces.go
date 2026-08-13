@@ -100,6 +100,16 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			rv = append(rv, wr)
 		}
 
+		if len(w.workspaces) > 0 && len(rv) == 0 {
+			configured := make([]string, 0, len(w.workspaces))
+			for workspace := range w.workspaces {
+				configured = append(configured, workspace)
+			}
+			ctxzap.Extract(ctx).Warn("databricks-connector: all configured workspaces are excluded, sync will be empty",
+				zap.Strings("workspaces", configured),
+			)
+		}
+
 		return rv, nil, nil
 	}
 
@@ -140,11 +150,18 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		)
 	}
 	for workspace := range w.workspaces {
-		if _, ok := matchedConfigured[workspace]; !ok {
-			l.Debug("databricks-connector: configured workspace not found among account workspaces",
+		if _, ok := matchedConfigured[workspace]; ok {
+			continue
+		}
+		if w.client.IsWorkspaceExcluded(workspace) {
+			l.Debug("databricks-connector: configured workspace was excluded from sync",
 				zap.String("workspace", workspace),
 			)
+			continue
 		}
+		l.Debug("databricks-connector: configured workspace not found among account workspaces",
+			zap.String("workspace", workspace),
+		)
 	}
 
 	return rv, nil, nil

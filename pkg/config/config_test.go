@@ -34,29 +34,49 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-// Both auth modes' fields live in the same struct; ValidateConfig must reject
-// them being set together regardless of the selected auth method, since field
-// groups only validate the fields in the one selected group.
-func TestValidateConfigRejectsBothAuthModes(t *testing.T) {
+// Both auth modes' fields live in the same struct; with no auth method selected,
+// ValidateConfig can't tell which credentials would actually be used, so it must
+// reject having both set.
+func TestValidateConfigRejectsBothAuthModesWhenAmbiguous(t *testing.T) {
 	cfg := &Databricks{
 		DatabricksClientId: "client-id",
 		Workspaces:         []string{"ws-1"},
 		WorkspaceTokens:    []string{"tok-1"},
 	}
 
-	if err := ValidateConfig(context.Background(), cfg, DatabricksOAuth2Group); err == nil {
+	if err := ValidateConfig(context.Background(), cfg, ""); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
 
-func TestValidateConfigRejectsClientSecretWithTokens(t *testing.T) {
+func TestValidateConfigRejectsClientSecretWithTokensWhenAmbiguous(t *testing.T) {
 	cfg := &Databricks{
 		DatabricksClientSecret: "client-secret",
 		Workspaces:             []string{"ws-1"},
 		WorkspaceTokens:        []string{"tok-1"},
 	}
 
-	if err := ValidateConfig(context.Background(), cfg, DatabricksOAuth2Group); err == nil {
+	if err := ValidateConfig(context.Background(), cfg, ""); err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// Once an auth method is explicitly selected, prepareClientAuth only reads that
+// group's fields, so leftover values from the other group (e.g. stale OAuth
+// creds after switching to workspace tokens, or vice versa) must not block startup.
+func TestValidateConfigTrustsExplicitAuthMethod(t *testing.T) {
+	cfg := &Databricks{
+		DatabricksClientId:     "client-id",
+		DatabricksClientSecret: "client-secret",
+		Workspaces:             []string{"ws-1"},
+		WorkspaceTokens:        []string{"tok-1"},
+	}
+
+	if err := ValidateConfig(context.Background(), cfg, DatabricksWorkspaceTokenGroup); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if err := ValidateConfig(context.Background(), cfg, DatabricksOAuth2Group); err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 }

@@ -107,11 +107,13 @@ var Config = field.NewConfiguration(
 )
 
 // ValidateConfig checks constraints that field groups can't express: OAuth2 and
-// workspace-token credentials are mutually exclusive, and a workspace token
-// must be paired with the workspace it belongs to when workspace-token auth
-// is the selected auth method.
+// workspace-token credentials are mutually exclusive when the auth method isn't
+// explicitly selected, and a workspace token must be paired with the workspace
+// it belongs to when workspace-token auth is the selected auth method.
 func ValidateConfig(ctx context.Context, cfg *Databricks, authMethod string) error {
-	if len(cfg.WorkspaceTokens) > 0 && (cfg.DatabricksClientId != "" || cfg.DatabricksClientSecret != "") {
+	// A merged/stored config can carry both groups' fields; once authMethod picks one,
+	// prepareClientAuth only reads that group, so the other group's leftovers are inert.
+	if authMethod == "" && len(cfg.WorkspaceTokens) > 0 && (cfg.DatabricksClientId != "" || cfg.DatabricksClientSecret != "") {
 		return fmt.Errorf("databricks-connector: databricks-client-id/databricks-client-secret and workspace-tokens are mutually exclusive")
 	}
 

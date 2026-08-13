@@ -130,7 +130,11 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs
 
 				var annotations []protoreflect.ProtoMessage
 				if resourceId.ResourceType == groupResourceType.Id {
-					rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, resource.ParentResourceId)
+					groupParentResourceId, err := groupGrantParent(a.client.IsAccountAPIAvailable(), a.client.GetAccountId(), "")
+					if err != nil {
+						return rv, nil, err
+					}
+					rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, groupParentResourceId)
 					if err != nil {
 						return rv, nil, err
 					}
