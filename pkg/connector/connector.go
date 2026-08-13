@@ -208,7 +208,6 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.Workspaces,
 	)
 	if err != nil {
-		l.Warn("error creating connector", zap.Error(err))
 		return nil, nil, err
 	}
 

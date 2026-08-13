@@ -33,6 +33,8 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 
 // minimalWorkspaceResource builds a workspace from just its deployment name, for
 // token auth where the Account API (and its numeric workspace IDs) is unreachable.
+// Deployment names are unique per Databricks cloud (they form the workspace's
+// canonical hostname), so they're safe as the resource ID here.
 // Users, groups and service principals hang off the workspace here instead of the account.
 func minimalWorkspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
 	return rs.NewGroupResource(
@@ -130,7 +132,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	l := ctxzap.Extract(ctx)
 	for workspace := range w.workspaces {
 		if _, ok := matchedConfigured[workspace]; !ok {
-			l.Warn("databricks-connector: configured workspace not found among account workspaces",
+			l.Debug("databricks-connector: configured workspace not found among account workspaces",
 				zap.String("workspace", workspace),
 			)
 		}
