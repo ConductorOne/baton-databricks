@@ -130,7 +130,9 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs
 
 				var annotations []protoreflect.ProtoMessage
 				if resourceId.ResourceType == groupResourceType.Id {
-					groupParentResourceId, err := groupGrantParent(a.client.IsAccountAPIAvailable(), a.client.GetAccountId(), "")
+					// Grants already returned early above when the account API is unavailable,
+					// so groups reaching this point are always account-parented.
+					groupParentResourceId, err := rs.NewResourceID(accountResourceType, a.client.GetAccountId())
 					if err != nil {
 						return rv, nil, err
 					}

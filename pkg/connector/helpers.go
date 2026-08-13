@@ -163,7 +163,9 @@ func isGroupNotFoundError(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(apiErr.Message, "not found")
+	return apiErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(apiErr.Message, "not found") &&
+		strings.Contains(strings.ToLower(apiErr.Message), "group")
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {

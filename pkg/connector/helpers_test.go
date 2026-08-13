@@ -2,8 +2,11 @@ package connector
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"testing"
 
+	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 )
 
@@ -46,4 +49,46 @@ func TestGroupGrantParentMatchesSyncedGroupId(t *testing.T) {
 			t.Errorf("principal ID = %q, want %q (the ID groupBuilder emits for an account-parented group)", gotResourceId.Resource, wantId)
 		}
 	})
+}
+
+func TestIsGroupNotFoundError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "matching group not found",
+			err:  &databricks.APIError{StatusCode: http.StatusBadRequest, Message: "Group 12345 not found"},
+			want: true,
+		},
+		{
+			name: "non-matching 400",
+			err:  &databricks.APIError{StatusCode: http.StatusBadRequest, Message: "invalid role name"},
+			want: false,
+		},
+		{
+			name: "unrelated not-found 400 without group in message",
+			err:  &databricks.APIError{StatusCode: http.StatusBadRequest, Message: "workspace not found"},
+			want: false,
+		},
+		{
+			name: "404 status code",
+			err:  &databricks.APIError{StatusCode: http.StatusNotFound, Message: "Group 12345 not found"},
+			want: false,
+		},
+		{
+			name: "non-APIError",
+			err:  errors.New("connection reset"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGroupNotFoundError(tt.err); got != tt.want {
+				t.Errorf("isGroupNotFoundError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
