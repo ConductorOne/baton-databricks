@@ -35,6 +35,15 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
 }
 
+// Mirrors how groupBuilder parents synced groups: account when its API is
+// reachable, otherwise the workspace (token auth).
+func groupGrantParent(accountAPIAvailable bool, accountId, workspaceId string) (*v2.ResourceId, error) {
+	if accountAPIAvailable {
+		return rs.NewResourceID(accountResourceType, accountId)
+	}
+	return rs.NewResourceID(workspaceResourceType, workspaceId)
+}
+
 func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {
 	groupResourceStr := groupResourceId(ctx, groupId, parentResource)
 	resourceId, err := rs.NewResourceID(groupResourceType, groupResourceStr)

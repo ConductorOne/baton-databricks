@@ -112,7 +112,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	for _, workspace := range workspaces {
 		// Skip workspaces outside the configured set when one was provided.
 		if len(w.workspaces) > 0 {
-			cfg, ok := matchConfiguredWorkspace(w.workspaces, workspace.DeploymentName)
+			cfg, ok := matchConfiguredWorkspace(w.workspaces, workspace.DeploymentName, workspace.Name, strconv.Itoa(workspace.ID))
 			if !ok {
 				continue
 			}
@@ -130,6 +130,15 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	}
 
 	l := ctxzap.Extract(ctx)
+	if len(w.workspaces) > 0 && len(matchedConfigured) == 0 {
+		configured := make([]string, 0, len(w.workspaces))
+		for workspace := range w.workspaces {
+			configured = append(configured, workspace)
+		}
+		l.Warn("databricks-connector: none of the configured workspaces matched any account workspace, sync will be empty",
+			zap.Strings("workspaces", configured),
+		)
+	}
 	for workspace := range w.workspaces {
 		if _, ok := matchedConfigured[workspace]; !ok {
 			l.Debug("databricks-connector: configured workspace not found among account workspaces",
@@ -141,15 +150,21 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	return rv, nil, nil
 }
 
-// matchConfiguredWorkspace looks up deploymentName case-insensitively, returning
-// the matched key so warnings can report the value the user configured.
-func matchConfiguredWorkspace(configured map[string]struct{}, deploymentName string) (string, bool) {
-	if _, ok := configured[deploymentName]; ok {
-		return deploymentName, true
-	}
-	for cfg := range configured {
-		if strings.EqualFold(cfg, deploymentName) {
-			return cfg, true
+// matchConfiguredWorkspace looks up a workspace by deployment name, name, or numeric
+// ID case-insensitively (mirroring Client.IsWorkspaceExcluded), returning the matched
+// key so warnings can report the value the user configured.
+func matchConfiguredWorkspace(configured map[string]struct{}, candidates ...string) (string, bool) {
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, ok := configured[candidate]; ok {
+			return candidate, true
+		}
+		for cfg := range configured {
+			if strings.EqualFold(cfg, candidate) {
+				return cfg, true
+			}
 		}
 	}
 	return "", false

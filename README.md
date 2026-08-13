@@ -174,7 +174,7 @@ Flags:
   -v, --version                                          version for baton-databricks
       --workers int                                      The number of sync workers to use. -1 for auto-detect, 0 for sequential, >0 for parallel ($BATON_WORKERS)
       --workspace-tokens strings                         required: The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API ($BATON_WORKSPACE_TOKENS)
-      --workspaces strings                               Limit syncing to the specified workspaces. Required when using workspace tokens. ($BATON_WORKSPACES)
+      --workspaces strings                               Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```
