@@ -143,7 +143,7 @@
     {
       "name": "workspaces",
       "displayName": "Workspaces",
-      "description": "Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens.",
+      "description": "Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. Mutually exclusive with databricks-exclude-workspaces.",
       "stringSliceField": {}
     },
     {
@@ -161,8 +161,17 @@
     {
       "name": "databricks-exclude-workspaces",
       "displayName": "Exclude Workspaces",
-      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID",
+      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces.",
       "stringSliceField": {}
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "workspaces",
+        "databricks-exclude-workspaces"
+      ]
     }
   ],
   "displayName": "Databricks",

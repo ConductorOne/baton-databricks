@@ -34,7 +34,11 @@ var (
 	)
 	WorkspacesField = field.StringSliceField(
 		"workspaces",
-		field.WithDescription("Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens."),
+		field.WithDescription(
+			"Limit syncing to the specified workspaces, by deployment name, not workspace ID. "+
+				"Required when using workspace tokens, in the same order as workspace-tokens. "+
+				"Mutually exclusive with databricks-exclude-workspaces.",
+		),
 		field.WithDisplayName("Workspaces"),
 	)
 	WorkspaceTokensField = field.StringSliceField(
@@ -63,7 +67,7 @@ var (
 	)
 	ExcludeWorkspacesField = field.StringSliceField(
 		"databricks-exclude-workspaces",
-		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID"),
+		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
 	configFields = []field.SchemaField{
@@ -85,6 +89,7 @@ var Config = field.NewConfiguration(
 	field.WithConnectorDisplayName("Databricks"),
 	field.WithHelpUrl("/docs/baton/databricks"),
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
+	field.WithConstraints(field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField)),
 	field.WithFieldGroups([]field.SchemaFieldGroup{
 		{
 			Name:        DatabricksOAuth2Group,
