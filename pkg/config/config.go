@@ -89,7 +89,10 @@ var Config = field.NewConfiguration(
 	field.WithConnectorDisplayName("Databricks"),
 	field.WithHelpUrl("/docs/baton/databricks"),
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
-	field.WithConstraints(field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField)),
+	field.WithConstraints(
+		field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField),
+		field.FieldsDependentOn([]field.SchemaField{WorkspaceTokensField}, []field.SchemaField{WorkspacesField}),
+	),
 	field.WithFieldGroups([]field.SchemaFieldGroup{
 		{
 			Name:        DatabricksOAuth2Group,
@@ -111,10 +114,8 @@ var Config = field.NewConfiguration(
 	}),
 )
 
-// ValidateConfig checks constraints that field groups can't express: OAuth2 and
-// workspace-token credentials are mutually exclusive when the auth method isn't
-// explicitly selected, and a workspace token must be paired with the workspace
-// it belongs to when workspace-token auth is the selected auth method.
+// ValidateConfig enforces what field groups can't: OAuth/token exclusion when no
+// auth method is set, and equal-length workspaces/workspace-tokens.
 func ValidateConfig(ctx context.Context, cfg *Databricks, authMethod string) error {
 	// A merged/stored config can carry both groups' fields; once authMethod picks one,
 	// prepareClientAuth only reads that group, so the other group's leftovers are inert.

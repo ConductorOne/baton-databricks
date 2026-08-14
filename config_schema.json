@@ -172,6 +172,15 @@
         "workspaces",
         "databricks-exclude-workspaces"
       ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
+      "fieldNames": [
+        "workspace-tokens"
+      ],
+      "secondaryFieldNames": [
+        "workspaces"
+      ]
     }
   ],
   "displayName": "Databricks",
