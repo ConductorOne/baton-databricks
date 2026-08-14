@@ -141,13 +141,81 @@
       }
     },
     {
+      "name": "workspaces",
+      "displayName": "Workspaces",
+      "description": "Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. Mutually exclusive with databricks-exclude-workspaces.",
+      "stringSliceField": {}
+    },
+    {
+      "name": "workspace-tokens",
+      "displayName": "Workspace Tokens",
+      "description": "The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API",
+      "isRequired": true,
+      "isSecret": true,
+      "stringSliceField": {
+        "rules": {
+          "isRequired": true
+        }
+      }
+    },
+    {
       "name": "databricks-exclude-workspaces",
       "displayName": "Exclude Workspaces",
-      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID",
+      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces.",
       "stringSliceField": {}
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "workspaces",
+        "databricks-exclude-workspaces"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
+      "fieldNames": [
+        "workspace-tokens"
+      ],
+      "secondaryFieldNames": [
+        "workspaces"
+      ]
     }
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg"
+  "iconUrl": "/static/app-icons/databricks.svg",
+  "fieldGroups": [
+    {
+      "name": "oauth2",
+      "displayName": "OAuth2",
+      "helpText": "Authenticate as a service principal using an OAuth2 client ID and secret.",
+      "fields": [
+        "account-id",
+        "databricks-client-id",
+        "databricks-client-secret",
+        "hostname",
+        "account-hostname",
+        "workspaces",
+        "base-url",
+        "databricks-exclude-workspaces"
+      ],
+      "default": true
+    },
+    {
+      "name": "workspace-token",
+      "displayName": "Workspace token",
+      "helpText": "Authenticate with a personal access token scoped to each workspace.",
+      "fields": [
+        "account-id",
+        "workspaces",
+        "workspace-tokens",
+        "hostname",
+        "account-hostname",
+        "base-url",
+        "databricks-exclude-workspaces"
+      ]
+    }
+  ]
 }

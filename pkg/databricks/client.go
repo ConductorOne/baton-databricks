@@ -118,6 +118,18 @@ func (c *Client) isWorkspaceExcluded(w Workspace) ([]string, bool) {
 	return keys, len(keys) > 0
 }
 
+// IsWorkspaceNameExcluded reports whether deploymentName matches the
+// databricks-exclude-workspaces set. Checks the name only, not via
+// isWorkspaceExcluded: that also matches on ID, and a zero-value ID here would
+// let an exclude entry of "0" match every workspace.
+func (c *Client) IsWorkspaceNameExcluded(deploymentName string) bool {
+	if len(c.excludeWorkspaces) == 0 {
+		return false
+	}
+	_, ok := c.excludeWorkspaces[strings.ToLower(deploymentName)]
+	return ok
+}
+
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
 	return &url.URL{
 		Scheme: "https",
@@ -136,6 +148,11 @@ func (c *Client) IsAccountAPIAvailable() bool {
 func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {
 	c.isAccAPIAvailable = accAPI
 	c.isWSAPIAvailable = wsAPI
+}
+
+func (c *Client) IsTokenAuth() bool {
+	_, ok := c.auth.(*TokenAuth)
+	return ok
 }
 
 func (c *Client) UpdateEtag(etag string) {

@@ -16,7 +16,8 @@ import (
 )
 
 type Databricks struct {
-	client *databricks.Client
+	client     *databricks.Client
+	workspaces []string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -26,7 +27,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client),
+		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
 	}
 
@@ -108,22 +109,33 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	isAccAPIAvailable := false
 	isWSAPIAvailable := false
 
-	// Check if we can list users from Account API.
-	_, _, err := d.client.ListRoles(ctx, "", "", "")
-	if err == nil {
-		isAccAPIAvailable = true
+	// The Account API is unreachable with workspace tokens, so only probe it for OAuth.
+	if !d.client.IsTokenAuth() {
+		_, _, err := d.client.ListRoles(ctx, "", "", "")
+		if err == nil {
+			isAccAPIAvailable = true
+		}
 	}
 
-	// Validate that credentials are valid for every workspace.
-	workspaces, _, err := d.client.ListWorkspaces(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+	// With an explicit workspace list (always the case for token auth), validate each
+	// configured workspace. Otherwise discover every workspace from the Account API.
+	workspaceNames := d.workspaces
+	if len(workspaceNames) == 0 {
+		workspaces, _, err := d.client.ListWorkspaces(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		}
+
+		workspaceNames = make([]string, 0, len(workspaces))
+		for _, workspace := range workspaces {
+			workspaceNames = append(workspaceNames, workspace.DeploymentName)
+		}
 	}
 
-	for _, workspace := range workspaces {
-		_, _, err := d.client.ListRoles(ctx, workspace.DeploymentName, "", "")
+	for _, workspace := range workspaceNames {
+		_, _, err := d.client.ListRoles(ctx, workspace, "", "")
 		if err != nil && !isAccAPIAvailable {
-			return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace.DeploymentName, err)
+			return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
 		}
 
 		isWSAPIAvailable = true
@@ -148,6 +160,7 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
+	workspaces []string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -160,7 +173,8 @@ func New(
 	}
 
 	return &Databricks{
-		client: client,
+		client:     client,
+		workspaces: workspaces,
 	}, nil
 }
 
@@ -168,8 +182,17 @@ func New(
 func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	l := ctxzap.Extract(ctx)
 
+	authMethod := ""
+	if opts != nil {
+		authMethod = opts.SelectedAuthMethod
+	}
+
+	if err := config.ValidateConfig(ctx, cfg, authMethod); err != nil {
+		return nil, nil, err
+	}
+
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(ctx, cfg, l)
+	auth := prepareClientAuth(ctx, cfg, authMethod, l)
 
 	cb, err := New(
 		ctx,
@@ -179,26 +202,27 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
+		cfg.Workspaces,
 	)
 	if err != nil {
-		l.Warn("error creating connector", zap.Error(err))
 		return nil, nil, err
 	}
 
 	return cb, nil, nil
 }
 
-func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
-	accountID := cfg.AccountId
-	databricksClientId := cfg.DatabricksClientId
-	databricksClientSecret := cfg.DatabricksClientSecret
-	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+func prepareClientAuth(_ context.Context, cfg *config.Databricks, authMethod string, l *zap.Logger) databricks.Auth {
+	if authMethod == config.DatabricksWorkspaceTokenGroup {
+		l.Debug("using workspace token auth", zap.String("account-id", cfg.AccountId))
+		return databricks.NewTokenAuth(cfg.Workspaces, cfg.WorkspaceTokens)
+	}
 
+	l.Debug("using oauth", zap.String("account-id", cfg.AccountId))
 	return databricks.NewOAuth2(
-		accountID,
-		databricksClientId,
-		databricksClientSecret,
-		accountHostname,
+		cfg.AccountId,
+		cfg.DatabricksClientId,
+		cfg.DatabricksClientSecret,
+		getAccountHostname(cfg, cfg.Hostname),
 	)
 }
 
