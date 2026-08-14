@@ -78,6 +78,11 @@ func TestIsGroupNotFoundError(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "mixed case still matches",
+			err:  &databricks.APIError{StatusCode: http.StatusBadRequest, Message: "GROUP 12345 Not Found"},
+			want: true,
+		},
+		{
 			name: "non-APIError",
 			err:  errors.New("connection reset"),
 			want: false,

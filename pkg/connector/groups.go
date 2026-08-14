@@ -149,7 +149,7 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 	// get all assignable roles for this specific group resource
 	roles, _, err := g.client.ListRoles(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
-		if isGroupNotFoundError(err) {
+		if workspaceId != "" && isGroupNotFoundError(err) {
 			ctxzap.Extract(ctx).Warn("databricks-connector: skipping roles for group not recognized by the rule-sets API",
 				zap.String("group_id", groupId.Resource),
 			)
@@ -236,7 +236,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.S
 	// role permissions grants
 	ruleSets, rateLimitDataRuleSets, err := g.client.ListRuleSets(ctx, workspaceId, GroupsType, groupId.Resource)
 	if err != nil {
-		if isGroupNotFoundError(err) {
+		if isWorkspaceGroup && isGroupNotFoundError(err) {
 			l.Warn("databricks-connector: skipping role rule sets for group not recognized by the rule-sets API",
 				zap.String("group_id", groupId.Resource),
 			)

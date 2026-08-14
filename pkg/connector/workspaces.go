@@ -86,7 +86,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	if w.client.IsTokenAuth() {
 		for workspace := range w.workspaces {
-			if w.client.IsWorkspaceExcluded(workspace) {
+			if w.client.IsWorkspaceNameExcluded(workspace) {
 				continue
 			}
 
@@ -101,12 +101,8 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		}
 
 		if len(w.workspaces) > 0 && len(rv) == 0 {
-			configured := make([]string, 0, len(w.workspaces))
-			for workspace := range w.workspaces {
-				configured = append(configured, workspace)
-			}
 			ctxzap.Extract(ctx).Warn("databricks-connector: all configured workspaces are excluded, sync will be empty",
-				zap.Strings("workspaces", configured),
+				zap.Strings("workspaces", configuredWorkspaceNames(w.workspaces)),
 			)
 		}
 
@@ -141,19 +137,15 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	l := ctxzap.Extract(ctx)
 	if len(w.workspaces) > 0 && len(matchedConfigured) == 0 {
-		configured := make([]string, 0, len(w.workspaces))
-		for workspace := range w.workspaces {
-			configured = append(configured, workspace)
-		}
 		l.Warn("databricks-connector: none of the configured workspaces matched any account workspace, sync will be empty",
-			zap.Strings("workspaces", configured),
+			zap.Strings("workspaces", configuredWorkspaceNames(w.workspaces)),
 		)
 	}
 	for workspace := range w.workspaces {
 		if _, ok := matchedConfigured[workspace]; ok {
 			continue
 		}
-		if w.client.IsWorkspaceExcluded(workspace) {
+		if w.client.IsWorkspaceNameExcluded(workspace) {
 			l.Debug("databricks-connector: configured workspace was excluded from sync",
 				zap.String("workspace", workspace),
 			)
@@ -167,8 +159,16 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	return rv, nil, nil
 }
 
+func configuredWorkspaceNames(configured map[string]struct{}) []string {
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	return names
+}
+
 // matchConfiguredWorkspace looks up a workspace by deployment name, name, or numeric
-// ID case-insensitively (mirroring Client.IsWorkspaceExcluded), returning the matched
+// ID case-insensitively (mirroring Client.IsWorkspaceNameExcluded), returning the matched
 // key so warnings can report the value the user configured.
 func matchConfiguredWorkspace(configured map[string]struct{}, candidates ...string) (string, bool) {
 	for _, candidate := range candidates {

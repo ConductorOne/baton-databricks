@@ -119,29 +119,26 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	// With an explicit workspace list (always the case for token auth), validate each
 	// configured workspace. Otherwise discover every workspace from the Account API.
-	if len(d.workspaces) > 0 {
-		for _, workspace := range d.workspaces {
-			_, _, err := d.client.ListRoles(ctx, workspace, "", "")
-			if err != nil && !isAccAPIAvailable {
-				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
-			}
-
-			isWSAPIAvailable = true
-		}
-	} else {
+	workspaceNames := d.workspaces
+	if len(workspaceNames) == 0 {
 		workspaces, _, err := d.client.ListWorkspaces(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 		}
 
+		workspaceNames = make([]string, 0, len(workspaces))
 		for _, workspace := range workspaces {
-			_, _, err := d.client.ListRoles(ctx, workspace.DeploymentName, "", "")
-			if err != nil && !isAccAPIAvailable {
-				return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace.DeploymentName, err)
-			}
-
-			isWSAPIAvailable = true
+			workspaceNames = append(workspaceNames, workspace.DeploymentName)
 		}
+	}
+
+	for _, workspace := range workspaceNames {
+		_, _, err := d.client.ListRoles(ctx, workspace, "", "")
+		if err != nil && !isAccAPIAvailable {
+			return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
+		}
+
+		isWSAPIAvailable = true
 	}
 
 	// Resolve the result.

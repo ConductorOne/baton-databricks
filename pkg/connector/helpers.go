@@ -38,7 +38,9 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 }
 
 // Mirrors how groupBuilder parents synced groups: account when its API is
-// reachable, otherwise the workspace (token auth).
+// reachable, otherwise the workspace (token auth). accountResource() in
+// account.go encodes the same condition for its child-resource-type list;
+// keep both in sync.
 func groupGrantParent(accountAPIAvailable bool, accountId, workspaceId string) (*v2.ResourceId, error) {
 	if accountAPIAvailable {
 		return rs.NewResourceID(accountResourceType, accountId)
@@ -163,9 +165,10 @@ func isGroupNotFoundError(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return false
 	}
+	msg := strings.ToLower(apiErr.Message)
 	return apiErr.StatusCode == http.StatusBadRequest &&
-		strings.Contains(apiErr.Message, "not found") &&
-		strings.Contains(strings.ToLower(apiErr.Message), "group")
+		strings.Contains(msg, "not found") &&
+		strings.Contains(msg, "group")
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {

@@ -42,6 +42,7 @@ func (a *accountBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return accountResourceType
 }
 
+// The Account API check below mirrors groupGrantParent (helpers.go); keep both in sync.
 func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error) {
 	accountId := a.client.GetAccountId()
 	children := []protoreflect.ProtoMessage{
