@@ -18,20 +18,18 @@ right top corner that will open a dropdown menu with the account ID along other
 options.
 
 Another requirement is to have valid credentials to run the connector with. This
-will decide how connector will be executed. You can use either OAuth client
-credentials flow or Basic auth flow (username and password) or Bearer auth flow.
-Both OAuth and Basic can be used across account and all workspaces you have
-access to. Bearer auth can be used only for a specific workspace.
+will decide how connector will be executed. You can use either the OAuth client
+credentials flow or the Bearer auth flow. OAuth can be used across account and
+all workspaces you have access to. Bearer auth can be used only for a specific
+workspace.
 
 To use the OAuth, you need to create a service principal and add OAuth secret
 (client id and secret) to it. You can do that by going to the user management
 tab and clicking on the Service Principals tab. Then click on the Add Service
 principal button and name it. You then need to add OAuth secret to it by
 clicking on the Generate secret button. You can use this secret to authenticate
-across all workspaces that service principal has access to. To use basic auth,
-you just need to provide a username and password of a user that has access to
-the Databricks API. Both methods require admin access to the Databricks account
-and each workspace you want to sync.
+across all workspaces that service principal has access to. This requires admin
+access to the Databricks account and each workspace you want to sync.
 
 To use bearer auth, you need to provide a Databricks workspace access token. You
 can create a new token by logging into the workspace and going into user
@@ -55,14 +53,14 @@ baton-databricks --hostname "azuredatabricks.net"
 ```
 brew install conductorone/baton/baton conductorone/baton/baton-databricks
 
-BATON_ACCOUNT_ID=account_id BATON_USERNAME=username BATON_PASSWORD=password baton-databricks
+BATON_ACCOUNT_ID=account_id BATON_DATABRICKS_CLIENT_ID=client_id BATON_DATABRICKS_CLIENT_SECRET=client_secret baton-databricks
 baton resources
 ```
 
 ## docker
 
 ```
-docker run --rm -v $(pwd):/out -e BATON_ACCOUNT_ID=account_id BATON_USERNAME=username BATON_PASSWORD=password ghcr.io/conductorone/baton-databricks:latest -f "/out/sync.c1z"
+docker run --rm -v $(pwd):/out -e BATON_ACCOUNT_ID=account_id BATON_DATABRICKS_CLIENT_ID=client_id BATON_DATABRICKS_CLIENT_SECRET=client_secret ghcr.io/conductorone/baton-databricks:latest -f "/out/sync.c1z"
 docker run --rm -v $(pwd):/out ghcr.io/conductorone/baton:latest -f "/out/sync.c1z" resources
 ```
 
@@ -72,7 +70,7 @@ docker run --rm -v $(pwd):/out ghcr.io/conductorone/baton:latest -f "/out/sync.c
 go install github.com/conductorone/baton/cmd/baton@main
 go install github.com/conductorone/baton-databricks/cmd/baton-databricks@main
 
-BATON_ACCOUNT_ID=account_id BATON_USERNAME=username BATON_PASSWORD=password baton-databricks
+BATON_ACCOUNT_ID=account_id BATON_DATABRICKS_CLIENT_ID=client_id BATON_DATABRICKS_CLIENT_SECRET=client_secret baton-databricks
 baton resources
 ```
 
