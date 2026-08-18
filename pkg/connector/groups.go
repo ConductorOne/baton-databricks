@@ -260,6 +260,36 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.S
 	return rv, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
+// Get re-fetches a single group, used to re-sync it after a RESOURCE_CHANGE event.
+func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	parentId, groupId, err := parseResourceId(resourceId.Resource)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
+	}
+
+	var workspaceId string
+	if parentId != nil && parentId.ResourceType == workspaceResourceType.Id {
+		workspaceId = parentId.Resource
+	}
+
+	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
+	}
+
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+
+	resource, err := groupResource(ctx, group, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resource, annos, nil
+}
+
 func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 

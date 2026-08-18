@@ -16,7 +16,9 @@ import (
 )
 
 type Databricks struct {
-	client *databricks.Client
+	client                *databricks.Client
+	enableIncrementalSync bool
+	sqlWarehouseID        string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -31,6 +33,14 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 	}
 
 	return syncers
+}
+
+// EventFeeds registers the audit-log event feed unconditionally; enable-incremental-sync
+// gates its behavior inside ListEvents instead.
+func (d *Databricks) EventFeeds(ctx context.Context) []connectorbuilder.EventFeed {
+	return []connectorbuilder.EventFeed{
+		newAuditEventFeed(d.client, d.enableIncrementalSync, d.sqlWarehouseID),
+	}
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
@@ -136,6 +146,24 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
+	if d.enableIncrementalSync {
+		if d.sqlWarehouseID == "" {
+			return nil, fmt.Errorf("databricks-connector: sql-warehouse-id is required when incremental sync is enabled")
+		}
+
+		if len(workspaces) == 0 {
+			return nil, fmt.Errorf("databricks-connector: incremental sync requires at least one workspace to query system.access.audit")
+		}
+
+		queryWorkspaceId, _ := sqlQueryWorkspace(workspaces)
+		if err := d.client.ValidateAuditLogAccess(ctx, queryWorkspaceId, d.sqlWarehouseID); err != nil {
+			return nil, fmt.Errorf(
+				"databricks-connector: incremental sync is enabled but the connector cannot query system.access.audit via warehouse %s: %w",
+				d.sqlWarehouseID, err,
+			)
+		}
+	}
+
 	return nil, nil
 }
 
@@ -148,6 +176,8 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
+	enableIncrementalSync bool,
+	sqlWarehouseID string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -160,7 +190,9 @@ func New(
 	}
 
 	return &Databricks{
-		client: client,
+		client:                client,
+		enableIncrementalSync: enableIncrementalSync,
+		sqlWarehouseID:        sqlWarehouseID,
 	}, nil
 }
 
@@ -179,6 +211,8 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
+		cfg.EnableIncrementalSync,
+		cfg.SqlWarehouseId,
 	)
 	if err != nil {
 		l.Warn("error creating connector", zap.Error(err))

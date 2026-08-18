@@ -103,6 +103,31 @@ To instead exclude specific workspaces from the sync, pass them to the
 list. Each entry can be a workspace name, deployment name, or numeric workspace
 ID. Excluded workspaces and their roles are skipped entirely.
 
+## Incremental sync
+
+By default, `baton-databricks` does a full resync of every resource on every run.
+You can opt into an additional, cheap pathway that polls a Databricks audit log
+between full syncs to pick up access changes early, by setting
+`--enable-incremental-sync` (or `BATON_ENABLE_INCREMENTAL_SYNC`). Full syncs
+still run as the correctness backstop; incremental sync does not detect
+deletions, which are only caught by the next full sync.
+
+Incremental sync requires:
+
+- `--sql-warehouse-id` (or `BATON_SQL_WAREHOUSE_ID`), the ID of a Databricks SQL
+  warehouse the connector can use to query the `system.access.audit` table. A
+  small serverless warehouse is recommended to minimize cold-start latency.
+- A one-time setup performed by a Databricks admin, which the connector cannot
+  do on its own:
+  - An account admin must [enable the `access` system
+    schema](https://docs.databricks.com/en/admin/system-tables/index.html) for
+    the account's Unity Catalog metastore.
+  - A metastore admin must grant `SELECT` on `system.access` to the service
+    principal or user the connector authenticates as.
+
+Once enabled, ongoing polling only needs that `SELECT` grant plus warehouse
+access; no further elevated privilege is required.
+
 ## Group povisioning limitations
 provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
 this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.
@@ -139,6 +164,7 @@ Flags:
       --databricks-client-id string       The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string   The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings   Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --enable-incremental-sync           Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync. ($BATON_ENABLE_INCREMENTAL_SYNC)
   -f, --file string                       The path to the c1z file to sync with ($BATON_FILE) (default "sync.c1z")
   -h, --help                              help for baton-databricks
       --hostname string                   The Databricks hostname used to connect to the Databricks API ($BATON_HOSTNAME) (default "cloud.databricks.com")
@@ -146,6 +172,7 @@ Flags:
       --log-level string                  The log level: debug, info, warn, error ($BATON_LOG_LEVEL) (default "info")
   -p, --provisioning                      This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-full-sync                    This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
+      --sql-warehouse-id string           ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled. ($BATON_SQL_WAREHOUSE_ID)
       --ticketing                         This must be set to enable ticketing support ($BATON_TICKETING)
   -v, --version                           version for baton-databricks
 

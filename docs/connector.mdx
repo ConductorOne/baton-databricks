@@ -18,6 +18,12 @@ sidebarTitle: "Databricks"
 
 The Databricks connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
 
+### Optional: faster updates between syncs
+
+By default, the Databricks connector picks up access changes on its regular sync schedule. You can optionally turn on incremental sync, which checks Databricks' activity log between full syncs so that changes like new group members show up in C1 sooner. Full syncs still run as usual and remain the source of truth; removed access is only reflected after the next full sync.
+
+Turning this on requires a small Databricks SQL warehouse and a one-time setup step performed by a Databricks admin (granting the connector read access to Databricks' `system.access` activity log). Ask your connector operator or C1 support contact to enable it for you.
+
 ## Gather Databricks credentials
 
 Configuring the connector requires you to pass in credentials generated in Databricks. Gather these credentials before you move on.

@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -292,6 +293,27 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 	}
 
 	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+}
+
+// Get rebuilds a single role resource, used to re-sync it after a RESOURCE_CHANGE event.
+// Roles are synthetic (not fetched from an API), so this just reconstructs the resource
+// from its resource ID the same way List does.
+func (r *roleBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	roleName := resourceId.Resource
+	if parentResourceId.GetResourceType() == workspaceResourceType.Id {
+		_, name, found := strings.Cut(resourceId.Resource, ":")
+		if !found {
+			return nil, nil, fmt.Errorf("databricks-connector: invalid workspace role resource id: %s", resourceId.Resource)
+		}
+		roleName = name
+	}
+
+	resource, err := roleResource(ctx, roleName, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resource, nil, nil
 }
 
 func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {

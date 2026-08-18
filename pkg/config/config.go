@@ -46,6 +46,17 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID"),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
+	EnableIncrementalSyncField = field.BoolField(
+		"enable-incremental-sync",
+		field.WithDescription("Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync."),
+		field.WithDisplayName("Enable Incremental Sync"),
+		field.WithDefaultValue(false),
+	)
+	SQLWarehouseIDField = field.StringField(
+		"sql-warehouse-id",
+		field.WithDescription("ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled."),
+		field.WithDisplayName("SQL Warehouse ID"),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -54,6 +65,8 @@ var (
 		HostnameField,
 		BaseURLField,
 		ExcludeWorkspacesField,
+		EnableIncrementalSyncField,
+		SQLWarehouseIDField,
 	}
 )
 

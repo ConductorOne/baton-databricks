@@ -214,6 +214,31 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 	return rv, nil, nil
 }
 
+// Get re-fetches a single service principal, used to re-sync it after a RESOURCE_CHANGE event.
+func (s *servicePrincipalBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	var workspaceId string
+	if parentResourceId.GetResourceType() == workspaceResourceType.Id {
+		workspaceId = parentResourceId.Resource
+	}
+
+	servicePrincipal, rateLimitData, err := s.client.GetServicePrincipal(ctx, workspaceId, resourceId.Resource)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get service principal %s: %w", resourceId.Resource, err)
+	}
+
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+
+	resource, err := s.servicePrincipalResource(ctx, servicePrincipal, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resource, annos, nil
+}
+
 func (s *servicePrincipalBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
