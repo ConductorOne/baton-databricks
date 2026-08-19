@@ -46,4 +46,18 @@ var (
 		Id:          "account",
 		DisplayName: "Account",
 	}
+
+	// servicePrincipalSecretResourceType represents SP OAuth client secrets (TRAIT_SECRET).
+	servicePrincipalSecretResourceType = &v2.ResourceType{
+		Id:          "service_principal_secret",
+		DisplayName: "Service Principal Secret",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_SECRET},
+	}
+
+	// workspacePATResourceType represents workspace personal access tokens (TRAIT_SECRET).
+	workspacePATResourceType = &v2.ResourceType{
+		Id:          "workspace_pat",
+		DisplayName: "Workspace Personal Access Token",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_SECRET},
+	}
 )
