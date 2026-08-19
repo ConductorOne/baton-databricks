@@ -42,21 +42,22 @@ func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return roleResourceType
 }
 
+// roleResourceId builds a role's resource ID, namespaced by workspace for workspace roles.
+func roleResourceId(role string, parent *v2.ResourceId) string {
+	if parent.GetResourceType() == workspaceResourceType.Id {
+		return fmt.Sprintf("%s:%s", parent.Resource, role)
+	}
+	return role
+}
+
 func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.Resource, error) {
-	var roleID string
 	profile := map[string]interface{}{
 		"role_name":   role,
 		"parent_type": parent.ResourceType,
 		"parent_id":   parent.Resource,
 	}
 
-	// To differentiate between what type of role does the resource represent.
-	switch parent.ResourceType {
-	case workspaceResourceType.Id:
-		roleID = fmt.Sprintf("%s:%s", parent.Resource, role)
-	case accountResourceType.Id:
-		roleID = role
-	}
+	roleID := roleResourceId(role, parent)
 
 	resource, err := rs.NewRoleResource(
 		role,

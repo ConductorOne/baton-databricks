@@ -132,14 +132,20 @@ func TestMapAuditRowToResource(t *testing.T) {
 	workspaceLookup := map[int64]string{123: "my-workspace"}
 	accountId := "acct-1"
 
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
+	workspaceParent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "my-workspace"}
+
+	type wantResource struct {
+		resourceType string
+		resource     string
+		parentType   string
+		parentID     string
+	}
+
 	cases := []struct {
-		name             string
-		row              auditLogRow
-		wantOK           bool
-		wantResourceType string
-		wantResource     string
-		wantParentType   string
-		wantParentID     string
+		name string
+		row  auditLogRow
+		want []wantResource
 	}{
 		{
 			name: "account-level group create",
@@ -148,30 +154,48 @@ func TestMapAuditRowToResource(t *testing.T) {
 				WorkspaceID:   0,
 				RequestParams: map[string]string{"targetGroupId": "g-1"},
 			},
-			wantOK:           true,
-			wantResourceType: groupResourceType.Id,
-			wantResource:     groupResourceId(context.Background(), "g-1", &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}),
-			wantParentType:   accountResourceType.Id,
-			wantParentID:     accountId,
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
+			},
 		},
 		{
-			name: "workspace-scoped acl change",
+			name: "workspace-scoped acl change also refreshes the workspace-access role",
 			row: auditLogRow{
 				ActionName:  "changeDatabricksWorkspaceAcl",
 				WorkspaceID: 123,
 			},
-			wantOK:           true,
-			wantResourceType: workspaceResourceType.Id,
-			wantResource:     "my-workspace",
-			wantParentType:   accountResourceType.Id,
-			wantParentID:     accountId,
+			want: []wantResource{
+				{workspaceResourceType.Id, "my-workspace", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "setAdmin refreshes the user and the account-admin role",
+			row: auditLogRow{
+				ActionName:    "setAdmin",
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(AccountAdminRole, accountParent), accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name: "updateUser also refreshes workspace entitlement roles",
+			row: auditLogRow{
+				ActionName:    "updateUser",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
 		},
 		{
 			name: "unknown action is skipped",
-			row: auditLogRow{
-				ActionName: "someUnityCatalogAction",
-			},
-			wantOK: false,
+			row:  auditLogRow{ActionName: "someUnityCatalogAction"},
 		},
 		{
 			name: "unresolvable workspace is skipped",
@@ -180,32 +204,26 @@ func TestMapAuditRowToResource(t *testing.T) {
 				WorkspaceID:   999,
 				RequestParams: map[string]string{"targetUserId": "u-1"},
 			},
-			wantOK: false,
 		},
 		{
 			name: "missing id param is skipped",
-			row: auditLogRow{
-				ActionName:  "createUser",
-				WorkspaceID: 0,
-			},
-			wantOK: false,
+			row:  auditLogRow{ActionName: "createUser", WorkspaceID: 0},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resourceId, parentResourceId, ok := mapAuditRowToResource(tc.row, accountId, workspaceLookup)
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			got := mapAuditRowToResource(tc.row, accountId, workspaceLookup)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d affected resources, want %d: %+v", len(got), len(tc.want), got)
 			}
-			if !tc.wantOK {
-				return
-			}
-			if resourceId.ResourceType != tc.wantResourceType || resourceId.Resource != tc.wantResource {
-				t.Errorf("resourceId = %+v, want type=%s id=%s", resourceId, tc.wantResourceType, tc.wantResource)
-			}
-			if parentResourceId.ResourceType != tc.wantParentType || parentResourceId.Resource != tc.wantParentID {
-				t.Errorf("parentResourceId = %+v, want type=%s id=%s", parentResourceId, tc.wantParentType, tc.wantParentID)
+			for i, w := range tc.want {
+				if got[i].resourceId.ResourceType != w.resourceType || got[i].resourceId.Resource != w.resource {
+					t.Errorf("[%d] resourceId = %+v, want type=%s id=%s", i, got[i].resourceId, w.resourceType, w.resource)
+				}
+				if got[i].parentResourceId.ResourceType != w.parentType || got[i].parentResourceId.Resource != w.parentID {
+					t.Errorf("[%d] parentResourceId = %+v, want type=%s id=%s", i, got[i].parentResourceId, w.parentType, w.parentID)
+				}
 			}
 		})
 	}

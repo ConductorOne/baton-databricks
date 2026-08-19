@@ -20,8 +20,8 @@ import (
 const (
 	auditEventFeedId = "databricks_audit_log"
 
-	// Databricks audit log delivery can lag up to 24h, so the first poll looks back that far.
-	auditLogLookback = 24 * time.Hour
+	// The first poll looks back this far since there's no prior watermark yet.
+	auditLogLookback = 1 * time.Hour
 
 	// Trail the watermark by this much instead of the newest event seen, since slower-indexing
 	// areas of the audited system could otherwise have events skipped permanently.
@@ -30,23 +30,42 @@ const (
 	auditLogPageLimit = 1000
 )
 
-// auditLogActions maps audit log action_name values to the resource type they affect and
-// the request_params key holding the native resource ID. Not yet verified against a live workspace.
-var auditLogActions = map[string]struct {
+// auditActionMapping describes what an audit log action_name affects: an optional primary
+// resource (resourceType + the request_params key holding its native ID), an optional
+// account-scoped role, and/or optional workspace-scoped roles/entitlements.
+type auditActionMapping struct {
 	resourceType *v2.ResourceType
 	idParam      string
-}{
-	"createGroup":                  {groupResourceType, "targetGroupId"},
-	"addPrincipalToGroup":          {groupResourceType, "targetGroupId"},
-	"removePrincipalFromGroup":     {groupResourceType, "targetGroupId"},
-	"deleteGroup":                  {groupResourceType, "targetGroupId"},
-	"createUser":                   {userResourceType, "targetUserId"},
-	"updateUser":                   {userResourceType, "targetUserId"},
-	"deleteUser":                   {userResourceType, "targetUserId"},
-	"createServicePrincipal":       {servicePrincipalResourceType, "targetServicePrincipalId"},
-	"updateServicePrincipal":       {servicePrincipalResourceType, "targetServicePrincipalId"},
-	"deleteServicePrincipal":       {servicePrincipalResourceType, "targetServicePrincipalId"},
-	"changeDatabricksWorkspaceAcl": {workspaceResourceType, ""},
+	accountRole  string
+	roleNames    []string
+}
+
+// auditLogActions maps audit log action_name values to the resources they affect.
+var auditLogActions = map[string]auditActionMapping{
+	"createGroup":              {resourceType: groupResourceType, idParam: "targetGroupId"},
+	"addPrincipalToGroup":      {resourceType: groupResourceType, idParam: "targetGroupId"},
+	"removePrincipalFromGroup": {resourceType: groupResourceType, idParam: "targetGroupId"},
+	"deleteGroup":              {resourceType: groupResourceType, idParam: "targetGroupId"},
+	"updateGroup": {
+		resourceType: groupResourceType, idParam: "targetGroupId",
+		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+	},
+	"createUser": {resourceType: userResourceType, idParam: "targetUserId"},
+	"updateUser": {
+		resourceType: userResourceType, idParam: "targetUserId",
+		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+	},
+	"deleteUser":             {resourceType: userResourceType, idParam: "targetUserId"},
+	"createServicePrincipal": {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	"updateServicePrincipal": {
+		resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId",
+		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+	},
+	"deleteServicePrincipal":       {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	"changeDatabricksWorkspaceAcl": {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
+	"changeDatabricksSqlAcl":       {roleNames: []string{SQLAccessRole}},
+	"setAdmin":                     {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	"removeAdmin":                  {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
 }
 
 func auditLogActionNames() []string {
@@ -172,8 +191,8 @@ func (f *auditEventFeed) ListEvents(
 			continue
 		}
 
-		resourceId, parentResourceId, ok := mapAuditRowToResource(row, f.client.GetAccountId(), workspaceLookup)
-		if !ok {
+		affected := mapAuditRowToResource(row, f.client.GetAccountId(), workspaceLookup)
+		if len(affected) == 0 {
 			l.Debug("databricks-connector: skipping audit row with no resource mapping",
 				zap.String("action_name", row.ActionName),
 				zap.String("event_id", row.EventID),
@@ -181,16 +200,18 @@ func (f *auditEventFeed) ListEvents(
 			continue
 		}
 
-		events = append(events, &v2.Event{
-			Id:         row.EventID,
-			OccurredAt: timestamppb.New(row.EventTime),
-			Event: &v2.Event_ResourceChangeEvent{
-				ResourceChangeEvent: &v2.ResourceChangeEvent{
-					ResourceId:       resourceId,
-					ParentResourceId: parentResourceId,
+		for i, a := range affected {
+			events = append(events, &v2.Event{
+				Id:         fmt.Sprintf("%s/%d", row.EventID, i),
+				OccurredAt: timestamppb.New(row.EventTime),
+				Event: &v2.Event_ResourceChangeEvent{
+					ResourceChangeEvent: &v2.ResourceChangeEvent{
+						ResourceId:       a.resourceId,
+						ParentResourceId: a.parentResourceId,
+					},
 				},
-			},
-		})
+			})
+		}
 	}
 
 	hasMore := len(rows) >= auditLogPageLimit
@@ -239,43 +260,75 @@ func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool
 	return eventPageCursor{StartAt: target, LatestEventSeen: latest, LastEventIDs: idsAtTarget}
 }
 
-// mapAuditRowToResource maps an audit row to the Baton resource it affects, returning
-// ok=false if the action isn't tracked or the ID/workspace can't be resolved.
-func mapAuditRowToResource(row auditLogRow, accountId string, workspaceLookup map[int64]string) (*v2.ResourceId, *v2.ResourceId, bool) {
+// affectedResource is one resource a mapped audit row's action changed.
+type affectedResource struct {
+	resourceId       *v2.ResourceId
+	parentResourceId *v2.ResourceId
+}
+
+// mapAuditRowToResource maps an audit row to every Baton resource its action affects
+// (a principal, an account role, and/or workspace roles), skipping anything unresolvable.
+func mapAuditRowToResource(row auditLogRow, accountId string, workspaceLookup map[int64]string) []affectedResource {
 	mapping, ok := auditLogActions[row.ActionName]
 	if !ok {
-		return nil, nil, false
+		return nil
 	}
 
 	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
 
-	if mapping.resourceType == workspaceResourceType {
-		deploymentName, found := workspaceLookup[row.WorkspaceID]
-		if !found {
-			return nil, nil, false
-		}
-		return &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: deploymentName}, accountParent, true
-	}
-
-	parentResourceId := accountParent
+	var workspaceParent *v2.ResourceId
 	if row.WorkspaceID != 0 {
 		deploymentName, found := workspaceLookup[row.WorkspaceID]
 		if !found {
-			return nil, nil, false
+			return nil
 		}
-		parentResourceId = &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: deploymentName}
+		workspaceParent = &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: deploymentName}
 	}
 
-	nativeId, ok := row.RequestParams[mapping.idParam]
-	if !ok || nativeId == "" {
-		return nil, nil, false
+	var affected []affectedResource
+
+	switch {
+	case mapping.resourceType == workspaceResourceType:
+		if workspaceParent == nil {
+			return nil
+		}
+		affected = append(affected, affectedResource{resourceId: workspaceParent, parentResourceId: accountParent})
+	case mapping.resourceType != nil:
+		parent := accountParent
+		if workspaceParent != nil {
+			parent = workspaceParent
+		}
+
+		nativeId, ok := row.RequestParams[mapping.idParam]
+		if !ok || nativeId == "" {
+			return nil
+		}
+
+		resourceId := &v2.ResourceId{ResourceType: mapping.resourceType.Id, Resource: nativeId}
+		if mapping.resourceType == groupResourceType {
+			resourceId.Resource = groupResourceId(context.Background(), nativeId, parent)
+		}
+
+		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: parent})
 	}
 
-	if mapping.resourceType == groupResourceType {
-		return &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: groupResourceId(context.Background(), nativeId, parentResourceId)}, parentResourceId, true
+	if mapping.accountRole != "" {
+		affected = append(affected, affectedResource{
+			resourceId:       &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: roleResourceId(mapping.accountRole, accountParent)},
+			parentResourceId: accountParent,
+		})
 	}
 
-	return &v2.ResourceId{ResourceType: mapping.resourceType.Id, Resource: nativeId}, parentResourceId, true
+	if workspaceParent != nil {
+		for _, roleName := range mapping.roleNames {
+			affected = append(affected, affectedResource{
+				resourceId:       &v2.ResourceId{ResourceType: roleResourceType.Id, Resource: roleResourceId(roleName, workspaceParent)},
+				parentResourceId: workspaceParent,
+			})
+		}
+	}
+
+	return affected
 }
 
 // sqlQueryWorkspace deterministically picks the workspace used to run the audit log query
