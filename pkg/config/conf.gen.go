@@ -9,6 +9,8 @@ type Databricks struct {
 	DatabricksClientId string `mapstructure:"databricks-client-id"`
 	DatabricksClientSecret string `mapstructure:"databricks-client-secret"`
 	Hostname string `mapstructure:"hostname"`
+	Workspaces []string `mapstructure:"workspaces"`
+	WorkspaceTokens []string `mapstructure:"workspace-tokens"`
 	BaseUrl string `mapstructure:"base-url"`
 	DatabricksExcludeWorkspaces []string `mapstructure:"databricks-exclude-workspaces"`
 	EnableIncrementalSync bool `mapstructure:"enable-incremental-sync"`

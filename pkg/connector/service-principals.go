@@ -197,7 +197,8 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
-				groupResourceStr := groupResourceId(ctx, resourceId.Resource, resource.ParentResourceId)
+				groupParentResourceId := &v2.ResourceId{ResourceType: parentType, Resource: parentID}
+				groupResourceStr := groupResourceId(ctx, resourceId.Resource, groupParentResourceId)
 				annotations = append(annotations, &v2.GrantExpandable{
 					EntitlementIds: []string{fmt.Sprintf("group:%s:%s", groupResourceStr, groupMemberEntitlement)},
 				})

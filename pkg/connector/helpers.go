@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -33,6 +35,17 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	}
 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
+}
+
+// Mirrors how groupBuilder parents synced groups: account when its API is
+// reachable, otherwise the workspace (token auth). accountResource() in
+// account.go encodes the same condition for its child-resource-type list;
+// keep both in sync.
+func groupGrantParent(accountAPIAvailable bool, accountId, workspaceId string) (*v2.ResourceId, error) {
+	if accountAPIAvailable {
+		return rs.NewResourceID(accountResourceType, accountId)
+	}
+	return rs.NewResourceID(workspaceResourceType, workspaceId)
 }
 
 func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {
@@ -142,6 +155,20 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	}
 
 	return result, nil
+}
+
+// isGroupNotFoundError matches the rule-sets/roles API's response for a group ID
+// it doesn't recognize (e.g. an orphaned or stale workspace SCIM group), distinct
+// from other 400s.
+func isGroupNotFoundError(err error) bool {
+	var apiErr *databricks.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return apiErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(msg, "not found") &&
+		strings.Contains(msg, "group")
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {
