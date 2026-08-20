@@ -15,6 +15,7 @@ const (
 
 	statementWaitTimeout  = "30s"
 	statementPollInterval = 2 * time.Second
+	statementPollMaxWait  = 5 * time.Minute
 )
 
 type StatementState string
@@ -124,14 +125,30 @@ func (c *Client) ExecuteStatement(
 }
 
 // pollStatement blocks until the statement reaches a terminal state, for the case of a
-// cold warehouse start still running after the initial statementWaitTimeout.
+// cold warehouse start still running after the initial statementWaitTimeout. Capped at
+// statementPollMaxWait so a warehouse stuck PENDING/RUNNING can't hang the caller
+// indefinitely; on giving up (or on ctx cancellation) it cancels the statement so it stops
+// occupying the warehouse.
 func (c *Client) pollStatement(ctx context.Context, workspaceId string, res statementResponse) (statementResponse, error) {
 	l := ctxzap.Extract(ctx)
 
+	pollCtx, cancel := context.WithTimeout(ctx, statementPollMaxWait)
+	defer cancel()
+
 	for res.Status.State == StatementStatePending || res.Status.State == StatementStateRunning {
 		select {
-		case <-ctx.Done():
-			return res, ctx.Err()
+		case <-pollCtx.Done():
+			if err := ctx.Err(); err != nil {
+				c.cancelStatement(workspaceId, res.StatementID)
+				return res, err
+			}
+			l.Warn("sql statement did not reach a terminal state before poll timeout, canceling",
+				zap.String("statement_id", res.StatementID),
+				zap.String("state", string(res.Status.State)),
+				zap.Duration("max_wait", statementPollMaxWait),
+			)
+			c.cancelStatement(workspaceId, res.StatementID)
+			return res, fmt.Errorf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait)
 		case <-time.After(statementPollInterval):
 		}
 
@@ -139,13 +156,25 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 
 		u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, res.StatementID)
 		var polled statementResponse
-		if _, err := c.Get(ctx, u, &polled); err != nil {
+		if _, err := c.Get(pollCtx, u, &polled); err != nil {
 			return res, fmt.Errorf("failed to poll statement %s: %w", res.StatementID, err)
 		}
 		res = polled
 	}
 
 	return res, nil
+}
+
+// cancelStatement best-effort cancels a statement we've given up polling on, using a fresh
+// context since ctx/pollCtx may already be done.
+func (c *Client) cancelStatement(workspaceId, statementId string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, statementId)
+	if _, err := c.Delete(ctx, u); err != nil {
+		ctxzap.Extract(ctx).Warn("failed to cancel timed-out sql statement", zap.String("statement_id", statementId), zap.Error(err))
+	}
 }
 
 func (c *Client) collectStatementResult(ctx context.Context, workspaceId string, res statementResponse) (*StatementResult, error) {
