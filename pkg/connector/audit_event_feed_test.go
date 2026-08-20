@@ -11,9 +11,9 @@ import (
 
 func TestEventCursorRoundTrip(t *testing.T) {
 	want := eventPageCursor{
-		StartAt:         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		LatestEventSeen: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC),
-		LastEventIDs:    []string{"a", "b"},
+		StartAt:           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LatestEventSeen:   time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC),
+		StartAfterEventID: "b",
 	}
 
 	encoded, err := encodeEventCursor(want)
@@ -22,7 +22,7 @@ func TestEventCursorRoundTrip(t *testing.T) {
 	}
 
 	got := decodeEventCursor(encoded)
-	if !got.StartAt.Equal(want.StartAt) || !got.LatestEventSeen.Equal(want.LatestEventSeen) || len(got.LastEventIDs) != 2 {
+	if !got.StartAt.Equal(want.StartAt) || !got.LatestEventSeen.Equal(want.LatestEventSeen) || got.StartAfterEventID != want.StartAfterEventID {
 		t.Errorf("decodeEventCursor() = %+v, want %+v", got, want)
 	}
 }
@@ -52,8 +52,8 @@ func TestAdvanceEventCursorFullPageAdvancesWithoutTrailingLag(t *testing.T) {
 	if !next.StartAt.Equal(wantStart) {
 		t.Errorf("StartAt = %v, want %v (no trailing lag while more pages remain)", next.StartAt, wantStart)
 	}
-	if len(next.LastEventIDs) != 1 || next.LastEventIDs[0] != "2" {
-		t.Errorf("LastEventIDs = %v, want [2]", next.LastEventIDs)
+	if next.StartAfterEventID != "2" {
+		t.Errorf("StartAfterEventID = %q, want %q", next.StartAfterEventID, "2")
 	}
 }
 
@@ -73,8 +73,8 @@ func TestAdvanceEventCursorDrainedPageAppliesTrailingLag(t *testing.T) {
 		t.Errorf("StartAt = %v, want %v", next.StartAt, wantStart)
 	}
 	// The trailing lag pushes the boundary well before the only row seen, so nothing ties.
-	if len(next.LastEventIDs) != 0 {
-		t.Errorf("LastEventIDs = %v, want empty", next.LastEventIDs)
+	if next.StartAfterEventID != "" {
+		t.Errorf("StartAfterEventID = %q, want empty", next.StartAfterEventID)
 	}
 }
 
@@ -93,8 +93,8 @@ func TestAdvanceEventCursorTieAtFlooredBoundaryIsRemembered(t *testing.T) {
 	if !next.StartAt.Equal(startAt) {
 		t.Errorf("StartAt = %v, want unchanged %v", next.StartAt, startAt)
 	}
-	if len(next.LastEventIDs) != 1 || next.LastEventIDs[0] != "1" {
-		t.Errorf("LastEventIDs = %v, want [1]", next.LastEventIDs)
+	if next.StartAfterEventID != "1" {
+		t.Errorf("StartAfterEventID = %q, want %q", next.StartAfterEventID, "1")
 	}
 }
 

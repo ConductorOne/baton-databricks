@@ -76,12 +76,14 @@ func auditLogActionNames() []string {
 	return names
 }
 
-// eventPageCursor is the opaque state persisted between ListEvents calls. StartAt only
-// ever advances forward, and LastEventIDs dedupes rows tied exactly on that boundary.
+// eventPageCursor is the opaque state persisted between ListEvents calls. (StartAt,
+// StartAfterEventID) form a composite boundary: unprocessed rows are those with
+// event_time > StartAt, or event_time == StartAt AND event_id > StartAfterEventID. This
+// keeps the boundary well-ordered even when many rows share the same event_time.
 type eventPageCursor struct {
-	StartAt         time.Time `json:"start_at"`
-	LatestEventSeen time.Time `json:"latest_event_seen"`
-	LastEventIDs    []string  `json:"last_event_ids"`
+	StartAt           time.Time `json:"start_at"`
+	StartAfterEventID string    `json:"start_after_event_id"`
+	LatestEventSeen   time.Time `json:"latest_event_seen"`
 }
 
 func encodeEventCursor(c eventPageCursor) (string, error) {
@@ -180,17 +182,8 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to query audit log: %w", err)
 	}
 
-	seen := make(map[string]struct{}, len(cursor.LastEventIDs))
-	for _, id := range cursor.LastEventIDs {
-		seen[id] = struct{}{}
-	}
-
 	var events []*v2.Event
 	for _, row := range rows {
-		if _, ok := seen[row.EventID]; ok {
-			continue
-		}
-
 		affected := mapAuditRowToResource(row, f.client.GetAccountId(), workspaceLookup)
 		if len(affected) == 0 {
 			l.Debug("databricks-connector: skipping audit row with no resource mapping",
@@ -225,23 +218,20 @@ func (f *auditEventFeed) ListEvents(
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, nil, nil
 }
 
-// advanceEventCursor advances only to the last row processed while a page is full, and
-// once drained, trails the newest event seen (or wall-clock time if empty) by auditLogTrailingLag.
+// advanceEventCursor advances only to the last row processed (by the well-ordered
+// (event_time, event_id) boundary) while a page is full, and once drained, trails the
+// newest event seen (or wall-clock time if empty) by auditLogTrailingLag.
 func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool, now time.Time) eventPageCursor {
 	latest := cursor.StartAt
-	var latestIDs []string
-	for _, row := range rows {
-		switch {
-		case row.EventTime.After(latest):
-			latest = row.EventTime
-			latestIDs = []string{row.EventID}
-		case row.EventTime.Equal(latest):
-			latestIDs = append(latestIDs, row.EventID)
-		}
+	lastEventID := cursor.StartAfterEventID
+	if len(rows) > 0 {
+		last := rows[len(rows)-1]
+		latest = last.EventTime
+		lastEventID = last.EventID
 	}
 
 	if hasMore {
-		return eventPageCursor{StartAt: latest, LatestEventSeen: latest, LastEventIDs: latestIDs}
+		return eventPageCursor{StartAt: latest, StartAfterEventID: lastEventID, LatestEventSeen: latest}
 	}
 
 	target := latest.Add(-auditLogTrailingLag)
@@ -252,12 +242,12 @@ func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool
 		target = cursor.StartAt
 	}
 
-	var idsAtTarget []string
+	startAfterEventID := ""
 	if target.Equal(latest) {
-		idsAtTarget = latestIDs
+		startAfterEventID = lastEventID
 	}
 
-	return eventPageCursor{StartAt: target, LatestEventSeen: latest, LastEventIDs: idsAtTarget}
+	return eventPageCursor{StartAt: target, StartAfterEventID: startAfterEventID, LatestEventSeen: latest}
 }
 
 // affectedResource is one resource a mapped audit row's action changed.
@@ -347,13 +337,16 @@ func sqlQueryWorkspace(workspaces []databricks.Workspace) (string, map[int64]str
 }
 
 func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor) ([]auditLogRow, error) {
+	// The (event_time, event_id) tiebreaker keeps ordering deterministic and lets us page
+	// with a composite > predicate, so progress never stalls even if many rows share one
+	// event_time (see advanceEventCursor).
 	statement := fmt.Sprintf(`
 		SELECT event_id, event_time, workspace_id, action_name, request_params
 		FROM system.access.audit
 		WHERE event_date >= :start_date
-		  AND event_time >= :start_time
+		  AND (event_time > :start_time OR (event_time = :start_time AND event_id > :start_after_event_id))
 		  AND action_name IN (%s)
-		ORDER BY event_time ASC
+		ORDER BY event_time ASC, event_id ASC
 		LIMIT %d
 	`, quotedInClause(auditLogActionNames()), auditLogPageLimit)
 
@@ -362,8 +355,9 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		workspaceId,
 		f.sqlWarehouseID,
 		statement,
-		databricks.StatementParameter{Name: "start_date", Value: cursor.StartAt.Format("2006-01-02"), Type: "DATE"},
-		databricks.StatementParameter{Name: "start_time", Value: cursor.StartAt.Format(time.RFC3339), Type: "TIMESTAMP"},
+		databricks.StatementParameter{Name: "start_date", Value: cursor.StartAt.UTC().Format("2006-01-02"), Type: "DATE"},
+		databricks.StatementParameter{Name: "start_time", Value: cursor.StartAt.UTC().Format(time.RFC3339), Type: "TIMESTAMP"},
+		databricks.StatementParameter{Name: "start_after_event_id", Value: cursor.StartAfterEventID, Type: "STRING"},
 	)
 	if err != nil {
 		return nil, err
