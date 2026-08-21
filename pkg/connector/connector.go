@@ -16,8 +16,11 @@ import (
 )
 
 type Databricks struct {
-	client     *databricks.Client
-	workspaces []string
+	client                *databricks.Client
+	workspaces            []string
+	enableIncrementalSync bool
+	sqlWarehouseID        string
+	sqlWarehouseWorkspace string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -32,6 +35,14 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 	}
 
 	return syncers
+}
+
+// EventFeeds registers the audit-log event feed unconditionally; enable-incremental-sync
+// gates its behavior inside ListEvents instead.
+func (d *Databricks) EventFeeds(ctx context.Context) []connectorbuilder.EventFeed {
+	return []connectorbuilder.EventFeed{
+		newAuditEventFeed(d.client, d.workspaces, d.enableIncrementalSync, d.sqlWarehouseID, d.sqlWarehouseWorkspace),
+	}
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
@@ -148,6 +159,31 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
+	if d.enableIncrementalSync {
+		if d.sqlWarehouseID == "" {
+			return nil, fmt.Errorf("databricks-connector: sql-warehouse-id is required when incremental sync is enabled")
+		}
+
+		auditWorkspaces, err := resolveSQLWorkspaces(ctx, d.client, d.workspaces)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-connector: incremental sync requires the account API to list workspaces: %w", err)
+		}
+		if len(auditWorkspaces) == 0 {
+			return nil, fmt.Errorf("databricks-connector: incremental sync requires at least one workspace to query system.access.audit")
+		}
+
+		queryWorkspaceId, _, err := resolveQueryWorkspace(ctx, auditWorkspaces, d.sqlWarehouseWorkspace)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.client.ValidateAuditLogAccess(ctx, queryWorkspaceId, d.sqlWarehouseID); err != nil {
+			return nil, fmt.Errorf(
+				"databricks-connector: incremental sync is enabled but the connector cannot query system.access.audit via warehouse %s: %w",
+				d.sqlWarehouseID, err,
+			)
+		}
+	}
+
 	return nil, nil
 }
 
@@ -161,6 +197,9 @@ func New(
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
+	enableIncrementalSync bool,
+	sqlWarehouseID string,
+	sqlWarehouseWorkspace string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -173,8 +212,11 @@ func New(
 	}
 
 	return &Databricks{
-		client:     client,
-		workspaces: workspaces,
+		client:                client,
+		workspaces:            workspaces,
+		enableIncrementalSync: enableIncrementalSync,
+		sqlWarehouseID:        sqlWarehouseID,
+		sqlWarehouseWorkspace: sqlWarehouseWorkspace,
 	}, nil
 }
 
@@ -203,6 +245,9 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
+		cfg.EnableIncrementalSync,
+		cfg.SqlWarehouseId,
+		cfg.SqlWarehouseWorkspace,
 	)
 	if err != nil {
 		return nil, nil, err

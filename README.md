@@ -106,6 +106,36 @@ To instead exclude specific workspaces from the sync, pass them to the
 list. Each entry can be a workspace name, deployment name, or numeric workspace
 ID. Excluded workspaces and their roles are skipped entirely.
 
+## Incremental sync
+
+By default, `baton-databricks` does a full resync of every resource on every run.
+You can opt into an additional, cheap pathway that polls a Databricks audit log
+between full syncs to pick up access changes early, by setting
+`--enable-incremental-sync` (or `BATON_ENABLE_INCREMENTAL_SYNC`). Full syncs
+still run as the correctness backstop; incremental sync does not detect
+deletions, which are only caught by the next full sync.
+
+Incremental sync requires:
+
+- `--sql-warehouse-id` (or `BATON_SQL_WAREHOUSE_ID`), the ID of a Databricks SQL
+  warehouse the connector can use to query the `system.access.audit` table. A
+  small serverless warehouse is recommended to minimize cold-start latency.
+- `--sql-warehouse-workspace` (or `BATON_SQL_WAREHOUSE_WORKSPACE`), the
+  deployment name of the workspace that hosts that SQL warehouse. SQL
+  warehouses only exist in one workspace, so this is required whenever more
+  than one workspace is available; with only one workspace it's inferred
+  automatically.
+- A one-time setup performed by a Databricks admin, which the connector cannot
+  do on its own:
+  - An account admin must [enable the `access` system
+    schema](https://docs.databricks.com/en/admin/system-tables/index.html) for
+    the account's Unity Catalog metastore.
+  - A metastore admin must grant `SELECT` on `system.access` to the service
+    principal or user the connector authenticates as.
+
+Once enabled, ongoing polling only needs that `SELECT` grant plus warehouse
+access; no further elevated privilege is required.
+
 ## Group povisioning limitations
 provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
 this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.
@@ -144,7 +174,8 @@ Flags:
       --client-secret string                             The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
-      --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --enable-incremental-sync                          Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync. ($BATON_ENABLE_INCREMENTAL_SYNC)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)
@@ -164,6 +195,8 @@ Flags:
   -p, --provisioning                                     This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
+      --sql-warehouse-id string                          ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled. ($BATON_SQL_WAREHOUSE_ID)
+      --sql-warehouse-workspace string                   Deployment name of the workspace that hosts the SQL warehouse (sql-warehouse-id), since SQL warehouses only exist in one workspace. Required when incremental sync is enabled and more than one workspace is available; if omitted with only one workspace available, that workspace is used automatically. ($BATON_SQL_WAREHOUSE_WORKSPACE)
       --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Leave unset to use the baton-sdk default. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)
@@ -172,7 +205,7 @@ Flags:
   -v, --version                                          version for baton-databricks
       --workers int                                      The number of sync workers to use. -1 for auto-detect, 0 for sequential, >0 for parallel ($BATON_WORKERS)
       --workspace-tokens strings                         required: The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API ($BATON_WORKSPACE_TOKENS)
-      --workspaces strings                               Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. ($BATON_WORKSPACES)
+      --workspaces strings                               Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. Mutually exclusive with databricks-exclude-workspaces. ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```

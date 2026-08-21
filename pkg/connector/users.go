@@ -61,8 +61,9 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 		rs.WithResourceProfile(profile),
 		rs.WithResourceStatus(status, ""),
 	}
+	
 	// keep the parent resource id, only if the parent resource is account
-	if parent.ResourceType == accountResourceType.Id {
+	if parent.GetResourceType() == accountResourceType.Id {
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 
@@ -229,6 +230,31 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		Resource:              resource,
 		IsCreateAccountResult: true,
 	}, nil, nil, nil
+}
+
+// Get re-fetches a single user, used to re-sync it after a RESOURCE_CHANGE event.
+func (u *userBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	var workspaceId string
+	if parentResourceId.GetResourceType() == workspaceResourceType.Id {
+		workspaceId = parentResourceId.Resource
+	}
+
+	user, rateLimitData, err := u.client.GetUser(ctx, workspaceId, resourceId.Resource)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get user %s: %w", resourceId.Resource, err)
+	}
+
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+
+	resource, err := u.userResource(ctx, user, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resource, annos, nil
 }
 
 func (o *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (annotations.Annotations, error) {

@@ -163,6 +163,24 @@
       "displayName": "Exclude Workspaces",
       "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces.",
       "stringSliceField": {}
+    },
+    {
+      "name": "enable-incremental-sync",
+      "displayName": "Enable Incremental Sync",
+      "description": "Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync.",
+      "boolField": {}
+    },
+    {
+      "name": "sql-warehouse-id",
+      "displayName": "SQL Warehouse ID",
+      "description": "ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled.",
+      "stringField": {}
+    },
+    {
+      "name": "sql-warehouse-workspace",
+      "displayName": "SQL Warehouse Workspace",
+      "description": "Deployment name of the workspace that hosts the SQL warehouse (sql-warehouse-id), since SQL warehouses only exist in one workspace. Required when incremental sync is enabled and more than one workspace is available; if omitted with only one workspace available, that workspace is used automatically.",
+      "stringField": {}
     }
   ],
   "constraints": [
