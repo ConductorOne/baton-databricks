@@ -40,7 +40,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 // gates its behavior inside ListEvents instead.
 func (d *Databricks) EventFeeds(ctx context.Context) []connectorbuilder.EventFeed {
 	return []connectorbuilder.EventFeed{
-		newAuditEventFeed(d.client, d.enableIncrementalSync, d.sqlWarehouseID),
+		newAuditEventFeed(d.client, d.workspaces, d.enableIncrementalSync, d.sqlWarehouseID),
 	}
 }
 
@@ -163,7 +163,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 			return nil, fmt.Errorf("databricks-connector: sql-warehouse-id is required when incremental sync is enabled")
 		}
 
-		auditWorkspaces, _, err := d.client.ListWorkspaces(ctx)
+		auditWorkspaces, err := resolveSQLWorkspaces(ctx, d.client, d.workspaces)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: incremental sync requires the account API to list workspaces: %w", err)
 		}

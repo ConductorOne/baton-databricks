@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -124,13 +125,15 @@ type auditLogRow struct {
 
 type auditEventFeed struct {
 	client                *databricks.Client
+	workspaces            []string
 	enableIncrementalSync bool
 	sqlWarehouseID        string
 }
 
-func newAuditEventFeed(client *databricks.Client, enableIncrementalSync bool, sqlWarehouseID string) *auditEventFeed {
+func newAuditEventFeed(client *databricks.Client, workspaces []string, enableIncrementalSync bool, sqlWarehouseID string) *auditEventFeed {
 	return &auditEventFeed{
 		client:                client,
+		workspaces:            workspaces,
 		enableIncrementalSync: enableIncrementalSync,
 		sqlWarehouseID:        sqlWarehouseID,
 	}
@@ -167,7 +170,7 @@ func (f *auditEventFeed) ListEvents(
 		cursor = eventPageCursor{StartAt: start}
 	}
 
-	workspaces, _, err := f.client.ListWorkspaces(ctx)
+	workspaces, err := resolveSQLWorkspaces(ctx, f.client, f.workspaces)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
@@ -328,6 +331,27 @@ func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId strin
 	return affected
 }
 
+// resolveSQLWorkspaces returns the workspaces available to run the audit-log SQL query
+// against. The Account API (ListWorkspaces) is unreachable under workspace-token auth, so
+// this builds minimal workspaces from the configured deployment names instead of calling
+// it, mirroring workspaceBuilder.List's token-auth branch. Those minimal workspaces have no
+// numeric ID (token auth never learns one), so workspace-scoped audit rows can't be
+// resolved back to a deployment name via sqlQueryWorkspace's lookup and are skipped by
+// mapAuditRowToResource — a known limitation of token auth, not a regression, since
+// incremental sync couldn't run under token auth at all before this.
+func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, configuredWorkspaces []string) ([]databricks.Workspace, error) {
+	if client.IsTokenAuth() {
+		workspaces := make([]databricks.Workspace, 0, len(configuredWorkspaces))
+		for _, name := range configuredWorkspaces {
+			workspaces = append(workspaces, databricks.Workspace{DeploymentName: name})
+		}
+		return workspaces, nil
+	}
+
+	workspaces, _, err := client.ListWorkspaces(ctx)
+	return workspaces, err
+}
+
 // sqlQueryWorkspace deterministically picks the workspace used to run the audit log query
 // and builds the workspace-ID-to-deployment-name lookup used to resolve audit rows.
 func sqlQueryWorkspace(workspaces []databricks.Workspace) (string, map[int64]string) {
@@ -379,14 +403,7 @@ func quotedInClause(values []string) string {
 		quoted[i] = "'" + v + "'"
 	}
 
-	out := ""
-	for i, v := range quoted {
-		if i > 0 {
-			out += ", "
-		}
-		out += v
-	}
-	return out
+	return strings.Join(quoted, ", ")
 }
 
 const (

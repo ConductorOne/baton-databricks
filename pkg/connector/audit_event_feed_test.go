@@ -2,12 +2,39 @@ package connector
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 )
+
+// TestResolveSQLWorkspacesTokenAuth ensures the audit-log workspace lookup never calls the
+// Account API under workspace-token auth (unreachable in that mode), building minimal
+// workspaces from the configured deployment names instead.
+func TestResolveSQLWorkspacesTokenAuth(t *testing.T) {
+	auth := databricks.NewTokenAuth([]string{"dbc-1", "dbc-2"}, []string{"token-1", "token-2"})
+	client, err := databricks.NewClient(context.Background(), &http.Client{}, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "", "", auth, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	got, err := resolveSQLWorkspaces(context.Background(), client, []string{"dbc-1", "dbc-2"})
+	if err != nil {
+		t.Fatalf("resolveSQLWorkspaces() error = %v", err)
+	}
+
+	want := []databricks.Workspace{{DeploymentName: "dbc-1"}, {DeploymentName: "dbc-2"}}
+	if len(got) != len(want) {
+		t.Fatalf("got %d workspaces, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].DeploymentName != want[i].DeploymentName || got[i].ID != 0 {
+			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
 
 func TestEventCursorRoundTrip(t *testing.T) {
 	want := eventPageCursor{
