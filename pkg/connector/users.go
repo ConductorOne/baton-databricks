@@ -61,8 +61,9 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 		rs.WithResourceProfile(profile),
 		rs.WithResourceStatus(status, ""),
 	}
+	
 	// keep the parent resource id, only if the parent resource is account
-	if parent.ResourceType == accountResourceType.Id {
+	if parent.GetResourceType() == accountResourceType.Id {
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 

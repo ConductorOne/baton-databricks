@@ -29,15 +29,16 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 	profile := map[string]interface{}{
 		"application_id": servicePrincipal.ApplicationID,
 		"display_name":   servicePrincipal.DisplayName,
-		"parent_type":    parent.ResourceType,
-		"parent_id":      parent.Resource,
+		"parent_type":    parent.GetResourceType(),
+		"parent_id":      parent.GetResource(),
 	}
 
 	options := []rs.ResourceOption{
 		rs.WithResourceProfile(profile),
 	}
+
 	// keep the parent resource id, only if the parent resource is account
-	if parent.ResourceType == accountResourceType.Id {
+	if parent.GetResourceType() == accountResourceType.Id {
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 
