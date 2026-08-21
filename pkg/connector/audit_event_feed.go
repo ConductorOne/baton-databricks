@@ -184,7 +184,7 @@ func (f *auditEventFeed) ListEvents(
 
 	var events []*v2.Event
 	for _, row := range rows {
-		affected := mapAuditRowToResource(row, f.client.GetAccountId(), workspaceLookup)
+		affected := mapAuditRowToResource(ctx, row, f.client.GetAccountId(), f.client.IsAccountAPIAvailable(), workspaceLookup)
 		if len(affected) == 0 {
 			l.Debug("databricks-connector: skipping audit row with no resource mapping",
 				zap.String("action_name", row.ActionName),
@@ -258,7 +258,11 @@ type affectedResource struct {
 
 // mapAuditRowToResource maps an audit row to every Baton resource its action affects
 // (a principal, an account role, and/or workspace roles), skipping anything unresolvable.
-func mapAuditRowToResource(row auditLogRow, accountId string, workspaceLookup map[int64]string) []affectedResource {
+// The principal's parent mirrors how it's actually synced (see groupGrantParent in
+// helpers.go): account when the Account API is reachable, the specific workspace
+// otherwise — not whichever scope the audit row happened to occur in. Getting this wrong
+// produces a resource ID that was never synced, so the real resource never gets refreshed.
+func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId string, accountAPIAvailable bool, workspaceLookup map[int64]string) []affectedResource {
 	mapping, ok := auditLogActions[row.ActionName]
 	if !ok {
 		return nil
@@ -285,7 +289,10 @@ func mapAuditRowToResource(row auditLogRow, accountId string, workspaceLookup ma
 		affected = append(affected, affectedResource{resourceId: workspaceParent, parentResourceId: accountParent})
 	case mapping.resourceType != nil:
 		parent := accountParent
-		if workspaceParent != nil {
+		if !accountAPIAvailable {
+			if workspaceParent == nil {
+				return nil
+			}
 			parent = workspaceParent
 		}
 
@@ -296,7 +303,7 @@ func mapAuditRowToResource(row auditLogRow, accountId string, workspaceLookup ma
 
 		resourceId := &v2.ResourceId{ResourceType: mapping.resourceType.Id, Resource: nativeId}
 		if mapping.resourceType == groupResourceType {
-			resourceId.Resource = groupResourceId(context.Background(), nativeId, parent)
+			resourceId.Resource = groupResourceId(ctx, nativeId, parent)
 		}
 
 		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: parent})

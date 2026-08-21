@@ -143,12 +143,14 @@ func TestMapAuditRowToResource(t *testing.T) {
 	}
 
 	cases := []struct {
-		name string
-		row  auditLogRow
-		want []wantResource
+		name                string
+		row                 auditLogRow
+		accountAPIAvailable bool
+		want                []wantResource
 	}{
 		{
-			name: "account-level group create",
+			name:                "account-level group create",
+			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "createGroup",
 				WorkspaceID:   0,
@@ -159,7 +161,34 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name: "workspace-scoped acl change also refreshes the workspace-access role",
+			name:                "workspace-scoped group change stays account-parented when the Account API is available",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "addPrincipalToGroup",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				// Groups are only ever synced as children of the account when the Account
+				// API is reachable, regardless of which workspace the change occurred in.
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "workspace-scoped group change is workspace-parented under token auth",
+			accountAPIAvailable: false,
+			row: auditLogRow{
+				ActionName:    "addPrincipalToGroup",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name:                "workspace-scoped acl change also refreshes the workspace-access role",
+			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:  "changeDatabricksWorkspaceAcl",
 				WorkspaceID: 123,
@@ -170,7 +199,8 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name: "setAdmin refreshes the user and the account-admin role",
+			name:                "setAdmin refreshes the user and the account-admin role",
+			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "setAdmin",
 				RequestParams: map[string]string{"targetUserId": "u-1"},
@@ -181,7 +211,22 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name: "updateUser also refreshes workspace entitlement roles",
+			name:                "updateUser stays account-parented when the Account API is available, but workspace roles still refresh",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "updateUser",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name:                "updateUser is workspace-parented under token auth",
+			accountAPIAvailable: false,
 			row: auditLogRow{
 				ActionName:    "updateUser",
 				WorkspaceID:   123,
@@ -198,7 +243,8 @@ func TestMapAuditRowToResource(t *testing.T) {
 			row:  auditLogRow{ActionName: "someUnityCatalogAction"},
 		},
 		{
-			name: "unresolvable workspace is skipped",
+			name:                "unresolvable workspace is skipped",
+			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "createUser",
 				WorkspaceID:   999,
@@ -213,7 +259,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mapAuditRowToResource(tc.row, accountId, workspaceLookup)
+			got := mapAuditRowToResource(context.Background(), tc.row, accountId, tc.accountAPIAvailable, workspaceLookup)
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d affected resources, want %d: %+v", len(got), len(tc.want), got)
 			}
