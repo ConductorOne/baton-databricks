@@ -128,14 +128,22 @@ type auditEventFeed struct {
 	workspaces            []string
 	enableIncrementalSync bool
 	sqlWarehouseID        string
+	sqlWarehouseWorkspace string
 }
 
-func newAuditEventFeed(client *databricks.Client, workspaces []string, enableIncrementalSync bool, sqlWarehouseID string) *auditEventFeed {
+func newAuditEventFeed(
+	client *databricks.Client,
+	workspaces []string,
+	enableIncrementalSync bool,
+	sqlWarehouseID string,
+	sqlWarehouseWorkspace string,
+) *auditEventFeed {
 	return &auditEventFeed{
 		client:                client,
 		workspaces:            workspaces,
 		enableIncrementalSync: enableIncrementalSync,
 		sqlWarehouseID:        sqlWarehouseID,
+		sqlWarehouseWorkspace: sqlWarehouseWorkspace,
 	}
 }
 
@@ -178,7 +186,10 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, nil, fmt.Errorf("databricks-connector: no workspace available to query system.access.audit")
 	}
 
-	queryWorkspaceId, workspaceLookup := sqlQueryWorkspace(workspaces)
+	queryWorkspaceId, workspaceLookup, err := resolveQueryWorkspace(ctx, workspaces, f.sqlWarehouseWorkspace)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	rows, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor)
 	if err != nil {
@@ -350,6 +361,47 @@ func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, config
 
 	workspaces, _, err := client.ListWorkspaces(ctx)
 	return workspaces, err
+}
+
+// resolveQueryWorkspace picks the workspace whose SQL warehouse runs the audit-log query,
+// and builds the workspace-ID-to-deployment-name lookup used to resolve audit rows. SQL
+// warehouses only exist in one workspace, so sqlWarehouseWorkspace should be set to pin the
+// workspace that actually hosts sql-warehouse-id; querying the wrong workspace's endpoint
+// with that ID 404s. When unset, sqlQueryWorkspace's arbitrary (alphabetically-first) pick
+// is used instead, which only happens to be correct when there's a single workspace.
+func resolveQueryWorkspace(ctx context.Context, workspaces []databricks.Workspace, sqlWarehouseWorkspace string) (string, map[int64]string, error) {
+	queryWorkspaceId, lookup := sqlQueryWorkspace(workspaces)
+
+	if sqlWarehouseWorkspace != "" {
+		found := false
+		for _, w := range workspaces {
+			if strings.EqualFold(w.DeploymentName, sqlWarehouseWorkspace) {
+				queryWorkspaceId = w.DeploymentName
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", nil, fmt.Errorf(
+				"databricks-connector: sql-warehouse-workspace %q is not one of the available workspaces",
+				sqlWarehouseWorkspace,
+			)
+		}
+		return queryWorkspaceId, lookup, nil
+	}
+
+	if len(workspaces) > 1 {
+		ctxzap.Extract(ctx).Debug(
+			"databricks-connector: sql-warehouse-workspace is not set and more than one workspace is available, so "+
+				"the workspace used to query system.access.audit was picked arbitrarily; this will fail if "+
+				"sql-warehouse-id does not live in the picked workspace — set sql-warehouse-workspace to the "+
+				"deployment name of the workspace that actually hosts the SQL warehouse to fix this deterministically",
+			zap.String("picked_workspace", queryWorkspaceId),
+			zap.Int("available_workspace_count", len(workspaces)),
+		)
+	}
+
+	return queryWorkspaceId, lookup, nil
 }
 
 // sqlQueryWorkspace deterministically picks the workspace used to run the audit log query

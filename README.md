@@ -120,6 +120,11 @@ Incremental sync requires:
 - `--sql-warehouse-id` (or `BATON_SQL_WAREHOUSE_ID`), the ID of a Databricks SQL
   warehouse the connector can use to query the `system.access.audit` table. A
   small serverless warehouse is recommended to minimize cold-start latency.
+- `--sql-warehouse-workspace` (or `BATON_SQL_WAREHOUSE_WORKSPACE`), the
+  deployment name of the workspace that hosts that SQL warehouse. SQL
+  warehouses only exist in one workspace, so this is required whenever more
+  than one workspace is available; with only one workspace it's inferred
+  automatically.
 - A one-time setup performed by a Databricks admin, which the connector cannot
   do on its own:
   - An account admin must [enable the `access` system
@@ -191,6 +196,7 @@ Flags:
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
       --sql-warehouse-id string                          ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled. ($BATON_SQL_WAREHOUSE_ID)
+      --sql-warehouse-workspace string                   Deployment name of the workspace that hosts the SQL warehouse (sql-warehouse-id), since SQL warehouses only exist in one workspace. Required when incremental sync is enabled and more than one workspace is available; if omitted with only one workspace available, that workspace is used automatically. ($BATON_SQL_WAREHOUSE_WORKSPACE)
       --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Leave unset to use the baton-sdk default. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)

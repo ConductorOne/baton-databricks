@@ -36,6 +36,63 @@ func TestResolveSQLWorkspacesTokenAuth(t *testing.T) {
 	}
 }
 
+func TestResolveQueryWorkspace(t *testing.T) {
+	workspaces := []databricks.Workspace{
+		{ID: 1, DeploymentName: "dbc-zzz"},
+		{ID: 2, DeploymentName: "dbc-aaa"},
+	}
+
+	t.Run("pinned workspace is used regardless of alphabetical order", func(t *testing.T) {
+		got, lookup, err := resolveQueryWorkspace(context.Background(), workspaces, "dbc-zzz")
+		if err != nil {
+			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+		}
+		if got != "dbc-zzz" {
+			t.Errorf("queryWorkspaceId = %q, want %q", got, "dbc-zzz")
+		}
+		if lookup[1] != "dbc-zzz" || lookup[2] != "dbc-aaa" {
+			t.Errorf("lookup = %+v, want ids 1 and 2 mapped to their deployment names", lookup)
+		}
+	})
+
+	t.Run("pinned workspace match is case-insensitive", func(t *testing.T) {
+		got, _, err := resolveQueryWorkspace(context.Background(), workspaces, "DBC-ZZZ")
+		if err != nil {
+			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+		}
+		if got != "dbc-zzz" {
+			t.Errorf("queryWorkspaceId = %q, want %q", got, "dbc-zzz")
+		}
+	})
+
+	t.Run("unknown pinned workspace is a clear config error", func(t *testing.T) {
+		_, _, err := resolveQueryWorkspace(context.Background(), workspaces, "dbc-does-not-exist")
+		if err == nil {
+			t.Fatal("resolveQueryWorkspace() error = nil, want error for unresolvable sql-warehouse-workspace")
+		}
+	})
+
+	t.Run("no pin falls back to the arbitrary alphabetical pick", func(t *testing.T) {
+		got, _, err := resolveQueryWorkspace(context.Background(), workspaces, "")
+		if err != nil {
+			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+		}
+		if got != "dbc-aaa" {
+			t.Errorf("queryWorkspaceId = %q, want %q (sqlQueryWorkspace's default)", got, "dbc-aaa")
+		}
+	})
+
+	t.Run("single workspace needs no pin", func(t *testing.T) {
+		got, _, err := resolveQueryWorkspace(context.Background(), workspaces[:1], "")
+		if err != nil {
+			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+		}
+		if got != "dbc-zzz" {
+			t.Errorf("queryWorkspaceId = %q, want %q", got, "dbc-zzz")
+		}
+	})
+}
+
 func TestEventCursorRoundTrip(t *testing.T) {
 	want := eventPageCursor{
 		StartAt:           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
