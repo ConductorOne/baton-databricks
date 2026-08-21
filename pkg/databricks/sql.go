@@ -111,9 +111,7 @@ func (c *Client) ExecuteStatement(
 		return nil, err
 	}
 
-	switch res.Status.State {
-	case StatementStateSucceeded:
-	default:
+	if res.Status.State != StatementStateSucceeded {
 		msg := ""
 		if res.Status.Error != nil {
 			msg = res.Status.Error.Message
