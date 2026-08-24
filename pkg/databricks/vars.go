@@ -167,3 +167,18 @@ func NewNameVars(name string, etag string) *NameVars {
 		Etag:    etag,
 	}
 }
+
+// PageTokenVars carries a cursor-based page token for APIs that use next_page_token pagination.
+type PageTokenVars struct {
+	Token string
+}
+
+func (p *PageTokenVars) Apply(params *url.Values) {
+	if p.Token != "" {
+		params.Set("page_token", p.Token)
+	}
+}
+
+func NewPageTokenVars(token string) *PageTokenVars {
+	return &PageTokenVars{Token: token}
+}
