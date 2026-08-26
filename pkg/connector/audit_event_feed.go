@@ -104,13 +104,13 @@ func decodeEventCursor(ctx context.Context, s string) eventPageCursor {
 
 	raw, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
-		ctxzap.Extract(ctx).Debug("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
+		ctxzap.Extract(ctx).Warn("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
 		return eventPageCursor{}
 	}
 
 	var c eventPageCursor
 	if err := json.Unmarshal(raw, &c); err != nil {
-		ctxzap.Extract(ctx).Debug("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
+		ctxzap.Extract(ctx).Warn("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
 		return eventPageCursor{}
 	}
 
