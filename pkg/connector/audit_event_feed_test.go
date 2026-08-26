@@ -105,7 +105,7 @@ func TestEventCursorRoundTrip(t *testing.T) {
 		t.Fatalf("encodeEventCursor() error = %v", err)
 	}
 
-	got := decodeEventCursor(encoded)
+	got := decodeEventCursor(context.Background(), encoded)
 	if !got.StartAt.Equal(want.StartAt) || !got.LatestEventSeen.Equal(want.LatestEventSeen) || got.StartAfterEventID != want.StartAfterEventID {
 		t.Errorf("decodeEventCursor() = %+v, want %+v", got, want)
 	}
@@ -114,7 +114,7 @@ func TestEventCursorRoundTrip(t *testing.T) {
 func TestDecodeEventCursorSelfHeals(t *testing.T) {
 	cases := []string{"", "not-base64!!!", "aW52YWxpZC1qc29u"} // last one is base64("invalid-json")
 	for _, c := range cases {
-		got := decodeEventCursor(c)
+		got := decodeEventCursor(context.Background(), c)
 		if !got.StartAt.IsZero() {
 			t.Errorf("decodeEventCursor(%q) = %+v, want zero-value cursor", c, got)
 		}

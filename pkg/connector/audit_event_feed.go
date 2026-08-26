@@ -97,18 +97,20 @@ func encodeEventCursor(c eventPageCursor) (string, error) {
 
 // decodeEventCursor returns a zero-value cursor when missing or corrupt, so callers
 // self-heal by resetting to the lookback default.
-func decodeEventCursor(s string) eventPageCursor {
+func decodeEventCursor(ctx context.Context, s string) eventPageCursor {
 	if s == "" {
 		return eventPageCursor{}
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
+		ctxzap.Extract(ctx).Debug("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
 		return eventPageCursor{}
 	}
 
 	var c eventPageCursor
 	if err := json.Unmarshal(raw, &c); err != nil {
+		ctxzap.Extract(ctx).Debug("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
 		return eventPageCursor{}
 	}
 
@@ -168,7 +170,7 @@ func (f *auditEventFeed) ListEvents(
 		return nil, &pagination.StreamState{}, nil, nil
 	}
 
-	cursor := decodeEventCursor(pToken.Cursor)
+	cursor := decodeEventCursor(ctx, pToken.Cursor)
 	now := time.Now()
 
 	if cursor.StartAt.IsZero() {
