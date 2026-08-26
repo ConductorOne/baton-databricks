@@ -162,6 +162,7 @@ func (f *auditEventFeed) ListEvents(
 	pToken *pagination.StreamToken,
 ) ([]*v2.Event, *pagination.StreamState, annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
+	annos := annotations.Annotations{}
 
 	if !f.enableIncrementalSync {
 		return nil, &pagination.StreamState{}, nil, nil
@@ -191,9 +192,16 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, nil, err
 	}
 
-	rows, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor)
+	rows, rateLimit, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to query audit log: %w", err)
+		if rateLimit != nil {
+			annos.WithRateLimiting(rateLimit)
+		}
+		return nil, nil, annos, fmt.Errorf("databricks-connector: failed to query audit log: %w", err)
+	}
+
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
 	}
 
 	var events []*v2.Event
@@ -229,7 +237,7 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to encode event cursor: %w", err)
 	}
 
-	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, nil, nil
+	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
 }
 
 // advanceEventCursor advances only to the last row processed (by the well-ordered
@@ -343,13 +351,7 @@ func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId strin
 }
 
 // resolveSQLWorkspaces returns the workspaces available to run the audit-log SQL query
-// against. The Account API (ListWorkspaces) is unreachable under workspace-token auth, so
-// this builds minimal workspaces from the configured deployment names instead of calling
-// it, mirroring workspaceBuilder.List's token-auth branch. Those minimal workspaces have no
-// numeric ID (token auth never learns one), so workspace-scoped audit rows can't be
-// resolved back to a deployment name via sqlQueryWorkspace's lookup and are skipped by
-// mapAuditRowToResource — a known limitation of token auth, not a regression, since
-// incremental sync couldn't run under token auth at all before this.
+// against, without calling the Account API under token auth (unreachable there).
 func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, configuredWorkspaces []string) ([]databricks.Workspace, error) {
 	if client.IsTokenAuth() {
 		workspaces := make([]databricks.Workspace, 0, len(configuredWorkspaces))
@@ -363,12 +365,9 @@ func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, config
 	return workspaces, err
 }
 
-// resolveQueryWorkspace picks the workspace whose SQL warehouse runs the audit-log query,
-// and builds the workspace-ID-to-deployment-name lookup used to resolve audit rows. SQL
-// warehouses only exist in one workspace, so sqlWarehouseWorkspace should be set to pin the
-// workspace that actually hosts sql-warehouse-id; querying the wrong workspace's endpoint
-// with that ID 404s. When unset, sqlQueryWorkspace's arbitrary (alphabetically-first) pick
-// is used instead, which only happens to be correct when there's a single workspace.
+// resolveQueryWorkspace picks the workspace to run the audit-log query against, preferring
+// sqlWarehouseWorkspace (SQL warehouses only exist in one workspace) and falling back to
+// sqlQueryWorkspace's arbitrary pick otherwise.
 func resolveQueryWorkspace(ctx context.Context, workspaces []databricks.Workspace, sqlWarehouseWorkspace string) (string, map[int64]string, error) {
 	queryWorkspaceId, lookup := sqlQueryWorkspace(workspaces)
 
@@ -419,7 +418,7 @@ func sqlQueryWorkspace(workspaces []databricks.Workspace) (string, map[int64]str
 	return best.DeploymentName, lookup
 }
 
-func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor) ([]auditLogRow, error) {
+func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor) ([]auditLogRow, *v2.RateLimitDescription, error) {
 	// The (event_time, event_id) tiebreaker keeps ordering deterministic and lets us page
 	// with a composite > predicate, so progress never stalls even if many rows share one
 	// event_time (see advanceEventCursor).
@@ -433,20 +432,23 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		LIMIT %d
 	`, quotedInClause(auditLogActionNames()), auditLogPageLimit)
 
-	result, err := f.client.ExecuteStatement(
+	result, rateLimit, err := f.client.ExecuteStatement(
 		ctx,
 		workspaceId,
 		f.sqlWarehouseID,
 		statement,
 		databricks.StatementParameter{Name: "start_date", Value: cursor.StartAt.UTC().Format("2006-01-02"), Type: "DATE"},
-		databricks.StatementParameter{Name: "start_time", Value: cursor.StartAt.UTC().Format(time.RFC3339), Type: "TIMESTAMP"},
+		// RFC3339Nano, not RFC3339: the (event_time, event_id) tiebreaker needs start_time
+		// to round-trip at the same sub-second precision parseAuditLogRows parses.
+		databricks.StatementParameter{Name: "start_time", Value: cursor.StartAt.UTC().Format(time.RFC3339Nano), Type: "TIMESTAMP"},
 		databricks.StatementParameter{Name: "start_after_event_id", Value: cursor.StartAfterEventID, Type: "STRING"},
 	)
 	if err != nil {
-		return nil, err
+		return nil, rateLimit, err
 	}
 
-	return parseAuditLogRows(result)
+	rows, err := parseAuditLogRows(result)
+	return rows, rateLimit, err
 }
 
 func quotedInClause(values []string) string {

@@ -164,6 +164,14 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 			return nil, fmt.Errorf("databricks-connector: sql-warehouse-id is required when incremental sync is enabled")
 		}
 
+		// Under token auth no numeric workspace ID is ever learned, so audit rows can never
+		// be resolved back to a synced resource (see mapAuditRowToResource) — every poll
+		// would silently produce zero events. Fail loudly instead of polling forever for
+		// nothing.
+		if d.client.IsTokenAuth() {
+			return nil, fmt.Errorf("databricks-connector: incremental sync is not supported with workspace token auth")
+		}
+
 		auditWorkspaces, err := resolveSQLWorkspaces(ctx, d.client, d.workspaces)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: incremental sync requires the account API to list workspaces: %w", err)

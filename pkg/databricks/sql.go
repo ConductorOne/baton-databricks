@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 )
@@ -82,14 +83,15 @@ type StatementResult struct {
 	Rows    [][]string
 }
 
-// ExecuteStatement runs a SQL statement via the Statement Execution API and returns every row.
+// ExecuteStatement runs a SQL statement via the Statement Execution API and returns every
+// row, along with the rate-limit info from the last call that reported any.
 func (c *Client) ExecuteStatement(
 	ctx context.Context,
 	workspaceId string,
 	warehouseId string,
 	statement string,
 	params ...StatementParameter,
-) (*StatementResult, error) {
+) (*StatementResult, *v2.RateLimitDescription, error) {
 	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint)
 
 	body := statementRequestBody{
@@ -102,13 +104,17 @@ func (c *Client) ExecuteStatement(
 	}
 
 	var res statementResponse
-	if _, err := c.Post(ctx, u, body, &res); err != nil {
-		return nil, fmt.Errorf("failed to submit statement: %w", err)
+	rateLimit, err := c.Post(ctx, u, body, &res)
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("failed to submit statement: %w", err)
 	}
 
-	res, err := c.pollStatement(ctx, workspaceId, res)
+	res, polledRateLimit, err := c.pollStatement(ctx, workspaceId, res)
+	if polledRateLimit != nil {
+		rateLimit = polledRateLimit
+	}
 	if err != nil {
-		return nil, err
+		return nil, rateLimit, err
 	}
 
 	if res.Status.State != StatementStateSucceeded {
@@ -116,10 +122,14 @@ func (c *Client) ExecuteStatement(
 		if res.Status.Error != nil {
 			msg = res.Status.Error.Message
 		}
-		return nil, fmt.Errorf("statement %s did not succeed: state=%s message=%s", res.StatementID, res.Status.State, msg)
+		return nil, rateLimit, fmt.Errorf("statement %s did not succeed: state=%s message=%s", res.StatementID, res.Status.State, msg)
 	}
 
-	return c.collectStatementResult(ctx, workspaceId, res)
+	result, resultRateLimit, err := c.collectStatementResult(ctx, workspaceId, res)
+	if resultRateLimit != nil {
+		rateLimit = resultRateLimit
+	}
+	return result, rateLimit, err
 }
 
 // pollStatement blocks until the statement reaches a terminal state, for the case of a
@@ -127,18 +137,19 @@ func (c *Client) ExecuteStatement(
 // statementPollMaxWait so a warehouse stuck PENDING/RUNNING can't hang the caller
 // indefinitely; on giving up (or on ctx cancellation) it cancels the statement so it stops
 // occupying the warehouse.
-func (c *Client) pollStatement(ctx context.Context, workspaceId string, res statementResponse) (statementResponse, error) {
+func (c *Client) pollStatement(ctx context.Context, workspaceId string, res statementResponse) (statementResponse, *v2.RateLimitDescription, error) {
 	l := ctxzap.Extract(ctx)
 
 	pollCtx, cancel := context.WithTimeout(ctx, statementPollMaxWait)
 	defer cancel()
 
+	var rateLimit *v2.RateLimitDescription
 	for res.Status.State == StatementStatePending || res.Status.State == StatementStateRunning {
 		select {
 		case <-pollCtx.Done():
 			if err := ctx.Err(); err != nil {
 				c.cancelStatement(workspaceId, res.StatementID)
-				return res, err
+				return res, rateLimit, err
 			}
 			l.Warn("sql statement did not reach a terminal state before poll timeout, canceling",
 				zap.String("statement_id", res.StatementID),
@@ -146,7 +157,7 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 				zap.Duration("max_wait", statementPollMaxWait),
 			)
 			c.cancelStatement(workspaceId, res.StatementID)
-			return res, fmt.Errorf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait)
+			return res, rateLimit, fmt.Errorf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait)
 		case <-time.After(statementPollInterval):
 		}
 
@@ -154,13 +165,17 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 
 		u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, res.StatementID)
 		var polled statementResponse
-		if _, err := c.Get(pollCtx, u, &polled); err != nil {
-			return res, fmt.Errorf("failed to poll statement %s: %w", res.StatementID, err)
+		polledRateLimit, err := c.Get(pollCtx, u, &polled)
+		if polledRateLimit != nil {
+			rateLimit = polledRateLimit
+		}
+		if err != nil {
+			return res, rateLimit, fmt.Errorf("failed to poll statement %s: %w", res.StatementID, err)
 		}
 		res = polled
 	}
 
-	return res, nil
+	return res, rateLimit, nil
 }
 
 // cancelStatement best-effort cancels a statement we've given up polling on, using a fresh
@@ -175,7 +190,7 @@ func (c *Client) cancelStatement(workspaceId, statementId string) {
 	}
 }
 
-func (c *Client) collectStatementResult(ctx context.Context, workspaceId string, res statementResponse) (*StatementResult, error) {
+func (c *Client) collectStatementResult(ctx context.Context, workspaceId string, res statementResponse) (*StatementResult, *v2.RateLimitDescription, error) {
 	columns := make([]string, len(res.Manifest.Schema.Columns))
 	for i, col := range res.Manifest.Schema.Columns {
 		columns[i] = col.Name
@@ -184,24 +199,29 @@ func (c *Client) collectStatementResult(ctx context.Context, workspaceId string,
 	rows := make([][]string, 0, len(res.Result.DataArray))
 	rows = append(rows, res.Result.DataArray...)
 
+	var rateLimit *v2.RateLimitDescription
 	nextChunk := res.Result.NextChunkIndex
 	for nextChunk != nil {
 		u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, res.StatementID, "result", "chunks", strconv.Itoa(*nextChunk))
 		var chunk statementResultChunk
-		if _, err := c.Get(ctx, u, &chunk); err != nil {
-			return nil, fmt.Errorf("failed to fetch statement result chunk %d: %w", *nextChunk, err)
+		chunkRateLimit, err := c.Get(ctx, u, &chunk)
+		if chunkRateLimit != nil {
+			rateLimit = chunkRateLimit
+		}
+		if err != nil {
+			return nil, rateLimit, fmt.Errorf("failed to fetch statement result chunk %d: %w", *nextChunk, err)
 		}
 		rows = append(rows, chunk.DataArray...)
 		nextChunk = chunk.NextChunkIndex
 	}
 
-	return &StatementResult{Columns: columns, Rows: rows}, nil
+	return &StatementResult{Columns: columns, Rows: rows}, rateLimit, nil
 }
 
 // ValidateAuditLogAccess confirms the configured warehouse can query system.access.audit,
 // which requires a one-time SELECT grant from a metastore admin (see README).
 func (c *Client) ValidateAuditLogAccess(ctx context.Context, workspaceId, warehouseId string) error {
-	if _, err := c.ExecuteStatement(ctx, workspaceId, warehouseId, "SELECT 1 FROM system.access.audit LIMIT 1"); err != nil {
+	if _, _, err := c.ExecuteStatement(ctx, workspaceId, warehouseId, "SELECT 1 FROM system.access.audit LIMIT 1"); err != nil {
 		return fmt.Errorf("failed to query system.access.audit: %w", err)
 	}
 	return nil

@@ -124,6 +124,7 @@ var Config = field.NewConfiguration(
 			Fields: []field.SchemaField{
 				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
 				HostnameField, AccountHostnameField, WorkspacesField, BaseURLField, ExcludeWorkspacesField,
+				EnableIncrementalSyncField, SQLWarehouseIDField, SQLWarehouseWorkspaceField,
 			},
 			Default: true,
 		},
@@ -131,7 +132,10 @@ var Config = field.NewConfiguration(
 			Name:        DatabricksWorkspaceTokenGroup,
 			DisplayName: "Workspace token",
 			HelpText:    "Authenticate with a personal access token scoped to each workspace.",
-			Fields:      []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField, ExcludeWorkspacesField},
+			Fields: []field.SchemaField{
+				AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField, ExcludeWorkspacesField,
+				EnableIncrementalSyncField, SQLWarehouseIDField, SQLWarehouseWorkspaceField,
+			},
 			Default:     false,
 		},
 	}),

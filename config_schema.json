@@ -217,7 +217,10 @@
         "account-hostname",
         "workspaces",
         "base-url",
-        "databricks-exclude-workspaces"
+        "databricks-exclude-workspaces",
+        "enable-incremental-sync",
+        "sql-warehouse-id",
+        "sql-warehouse-workspace"
       ],
       "default": true
     },
@@ -232,7 +235,10 @@
         "hostname",
         "account-hostname",
         "base-url",
-        "databricks-exclude-workspaces"
+        "databricks-exclude-workspaces",
+        "enable-incremental-sync",
+        "sql-warehouse-id",
+        "sql-warehouse-workspace"
       ]
     }
   ]
