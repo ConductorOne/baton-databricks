@@ -19,6 +19,10 @@ sidebarTitle: "Databricks"
 
 The Databricks connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
 
+<Note>
+Group provisioning requires OAuth authentication. It is not available when authenticating with a workspace token, because the Databricks API does not allow provisioning groups from a workspace token.
+</Note>
+
 ## Gather Databricks credentials
 
 Configuring the connector requires you to pass in credentials generated in Databricks. Gather these credentials before you move on.
@@ -56,7 +60,7 @@ You have two authentication choices when setting up the Databricks connector:
     </Step>
   </Steps>
 
-- **Personal access token** (syncs info from a single Databricks workspace)
+- **Personal access token** (syncs info from one or more Databricks workspaces)
 
   <Steps>
     <Step>
@@ -79,8 +83,8 @@ You have two authentication choices when setting up the Databricks connector:
 OR
 
 - Account ID
-- Personal access token
-- Deployment name of the Databricks workspace you're syncing (the subdomain in the workspace URL, not the workspace ID)
+- One or more personal access tokens
+- Deployment name of each Databricks workspace you're syncing (the subdomain in the workspace URL, not the workspace ID), listed in the same order as the corresponding tokens
 
 Next, move on to the instructions for your chosen setup method.
 
