@@ -209,23 +209,33 @@ stringData:
   BATON_CLIENT_ID: <C1 client ID>
   BATON_CLIENT_SECRET: <C1 client secret>
   
-  # Databricks credentials, option 1
+  # Databricks credentials, option 1: OAuth (syncs the account and all workspaces)
   BATON_ACCOUNT_ID: <Databricks account ID>
   BATON_DATABRICKS_CLIENT_ID: <OAuth client ID>
   BATON_DATABRICKS_CLIENT_SECRET: <OAuth client secret>
+  # Optional (OAuth only): comma-separated workspaces to exclude from sync
+  # (workspace name, deployment name, or numeric ID). Cannot be combined with BATON_WORKSPACES.
+  BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
 
-  # Databricks credentials, option 2
+  # Databricks credentials, option 2: workspace token (syncs only the listed workspaces)
   BATON_ACCOUNT_ID: <Databricks account ID>
   BATON_AUTH_METHOD: workspace-token
-  BATON_WORKSPACE_TOKENS: <Personal access token>
-  BATON_WORKSPACES: <Deployment name of the Databricks workspace you're syncing, not the workspace ID>
-
-  # Optional: comma-separated workspaces to exclude from sync (workspace name, deployment name, or numeric ID)
-  BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
+  # BATON_WORKSPACE_TOKENS and BATON_WORKSPACES pair up by position: the Nth token
+  # authenticates the Nth workspace, so both lists must have the same length and order.
+  BATON_WORKSPACE_TOKENS: <token for workspace-a,token for workspace-b>
+  BATON_WORKSPACES: <deployment name of workspace-a,deployment name of workspace-b>
 
   # Optional: include if you want C1 to provision access using this connector
   BATON_PROVISIONING: true
 ```
+
+<Note>
+**Choose one credential option, not both.** Use OAuth (option 1) or workspace tokens (option 2). `BATON_DATABRICKS_EXCLUDE_WORKSPACES` is mutually exclusive with `BATON_WORKSPACES`, so it only applies to OAuth.
+</Note>
+
+<Warning>
+**Workspace-token auth syncs less than OAuth.** A workspace token cannot reach the Databricks account API, so the sync is scoped to the listed workspaces only: it emits no account-level entitlements or grants and no workspace-membership entitlements, and users, groups, service principals and roles are parented under their workspace instead of the account. For full account and cross-workspace coverage, use OAuth.
+</Warning>
 
 See the connector's README or run `--help` to see all available configuration flags and environment variables.
 

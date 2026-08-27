@@ -85,20 +85,25 @@ baton resources
 - Users
 - Roles
 
-By default, connector will fetch all resources from the account and all
-workspaces. You can limit the scope of the sync by providing a list of
-workspaces to sync with. You can do that by providing a comma-separated list of
-workspace hostnames to the `--workspaces` flag. You can also provide a list of
-workspace access tokens to the `--workspace-tokens` flag. This will limit the
-sync to only workspaces that are associated with those tokens. You can also use
-both flags at the same time. If you do that, connector will sync with all
-workspaces that are associated with provided tokens and all workspaces that are
-in the list of workspaces.
+By default (OAuth), the connector fetches all resources from the account and all
+workspaces. To limit the scope, pass a comma-separated list of workspace
+deployment names to the `--workspaces` flag.
 
 When authenticating with `--workspace-tokens` instead of the OAuth client ID and
 secret, also pass `--auth-method workspace-token` (or set
 `BATON_AUTH_METHOD=workspace-token`), otherwise the connector validates against
-the OAuth fields by default and rejects the config.
+the OAuth fields by default and rejects the config. In this mode `--workspaces`
+is required and pairs with `--workspace-tokens` by position: the Nth token
+authenticates the Nth workspace, so the two lists must have the same length and
+order. `--workspaces` and `--workspace-tokens` are not unioned, and a
+length mismatch is rejected at startup.
+
+Workspace-token auth cannot reach the Databricks account API, so it syncs less
+than OAuth: no account-level entitlements or grants and no workspace-membership
+entitlements, and users, groups, service principals and roles are parented under
+their workspace instead of the account. The connector logs a warning at startup
+when the account API is unreachable. Use OAuth for full account and
+cross-workspace coverage.
 
 To instead exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
