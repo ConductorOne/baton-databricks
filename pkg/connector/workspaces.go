@@ -284,6 +284,35 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	return rv, nil, nil
 }
 
+// Get re-fetches a single workspace, used to re-sync it after a RESOURCE_CHANGE event.
+func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	if w.client.IsTokenAuth() {
+		if _, ok := w.workspaces[resourceId.Resource]; !ok {
+			return nil, nil, fmt.Errorf("databricks-connector: workspace %s is not configured", resourceId.Resource)
+		}
+
+		ws := &databricks.Workspace{DeploymentName: resourceId.Resource}
+		resource, err := minimalWorkspaceResource(ctx, ws, parentResourceId)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return resource, nil, nil
+	}
+
+	workspace, _, err := w.client.GetWorkspace(ctx, resourceId.Resource)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to get workspace %s: %w", resourceId.Resource, err)
+	}
+
+	resource, err := workspaceResource(ctx, workspace, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resource, nil, nil
+}
+
 func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
