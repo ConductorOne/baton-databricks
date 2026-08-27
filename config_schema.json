@@ -198,7 +198,6 @@
         "hostname",
         "account-hostname",
         "workspaces",
-        "base-url",
         "databricks-exclude-workspaces"
       ],
       "default": true
@@ -213,7 +212,6 @@
         "workspace-tokens",
         "hostname",
         "account-hostname",
-        "base-url",
         "databricks-exclude-workspaces"
       ]
     }
