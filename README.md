@@ -115,7 +115,11 @@ between full syncs to pick up access changes early, by setting
 still run as the correctness backstop; incremental sync does not detect
 deletions, which are only caught by the next full sync.
 
-Incremental sync requires:
+Incremental sync requires OAuth2 (service principal) authentication — it's not
+available with workspace tokens, since the Account API needed to resolve audit
+events back to synced resources is unreachable that way.
+
+Incremental sync also requires:
 
 - `--sql-warehouse-id` (or `BATON_SQL_WAREHOUSE_ID`), the ID of a Databricks SQL
   warehouse the connector can use to query the `system.access.audit` table. A

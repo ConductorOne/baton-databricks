@@ -132,11 +132,12 @@ var Config = field.NewConfiguration(
 			Name:        DatabricksWorkspaceTokenGroup,
 			DisplayName: "Workspace token",
 			HelpText:    "Authenticate with a personal access token scoped to each workspace.",
+			// Incremental sync requires the Account API, which workspace tokens can't reach
+			// (see Validate) — omitted here so the UI doesn't offer an option that can never work.
 			Fields: []field.SchemaField{
 				AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField, ExcludeWorkspacesField,
-				EnableIncrementalSyncField, SQLWarehouseIDField, SQLWarehouseWorkspaceField,
 			},
-			Default:     false,
+			Default: false,
 		},
 	}),
 )
