@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	azureHost = "azuredatabricks.net"
-	gcpHost   = "gcp.databricks.com"
+	defaultHost = "cloud.databricks.com" // aws
+	azureHost   = "azuredatabricks.net"
+	gcpHost     = "gcp.databricks.com"
 
 	// Some of these are case sensitive.
 	usersEndpoint             = "/api/2.0/preview/scim/v2/Users"
@@ -57,14 +58,16 @@ func hostMatches(hostname, suffix string) bool {
 }
 
 func GetAccountHostname(hostname string) string {
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
 	switch {
 	case hostMatches(hostname, azureHost):
 		return "accounts." + azureHost
 	case hostMatches(hostname, gcpHost):
 		return "accounts." + gcpHost
+	case hostMatches(hostname, defaultHost):
+		return "accounts." + defaultHost
 	default:
-		// AWS and unknown hosts have no canonical account suffix to normalise to,
-		// so prefix the host as given.
+		// Unknown hosts have no canonical account suffix, so prefix as given.
 		return "accounts." + hostname
 	}
 }

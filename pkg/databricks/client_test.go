@@ -52,8 +52,11 @@ func TestGetAccountHostname(t *testing.T) {
 	}{
 		{"azure subdomain", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net"},
 		{"azure bare host", "azuredatabricks.net", "accounts.azuredatabricks.net"},
+		{"azure mixed case", "MyOrg.AzureDatabricks.net", "accounts.azuredatabricks.net"},
+		{"azure trailing dot", "myorg.azuredatabricks.net.", "accounts.azuredatabricks.net"},
 		{"gcp subdomain", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com"},
-		{"aws falls through unnormalised", "myorg.cloud.databricks.com", "accounts.myorg.cloud.databricks.com"},
+		{"aws workspace host normalises to account host", "dbc-1234abcd.cloud.databricks.com", "accounts.cloud.databricks.com"},
+		{"unknown host falls through unnormalised", "myorg.example.com", "accounts.myorg.example.com"},
 		// CXH-2349: a bare-suffix match would resolve this to the Azure account host.
 		{"azure lookalike does not match", "evilazuredatabricks.net", "accounts.evilazuredatabricks.net"},
 		{"gcp lookalike does not match", "evilgcp.databricks.com", "accounts.evilgcp.databricks.com"},
