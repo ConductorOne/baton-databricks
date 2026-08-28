@@ -16,9 +16,8 @@ import (
 )
 
 const (
-	defaultHost = "cloud.databricks.com" // aws
-	azureHost   = "azuredatabricks.net"
-	gcpHost     = "gcp.databricks.com"
+	azureHost = "azuredatabricks.net"
+	gcpHost   = "gcp.databricks.com"
 
 	// Some of these are case sensitive.
 	usersEndpoint             = "/api/2.0/preview/scim/v2/Users"
@@ -50,13 +49,24 @@ type Client struct {
 	isWSAPIAvailable  bool
 }
 
+// hostMatches reports whether hostname equals suffix or sits under it at a DNS
+// label boundary. Plain strings.HasSuffix would let evilazuredatabricks.net
+// match azuredatabricks.net; requiring the leading dot prevents that.
+func hostMatches(hostname, suffix string) bool {
+	return hostname == suffix || strings.HasSuffix(hostname, "."+suffix)
+}
+
 func GetAccountHostname(hostname string) string {
-	if strings.HasSuffix(hostname, azureHost) {
+	switch {
+	case hostMatches(hostname, azureHost):
 		return "accounts." + azureHost
-	} else if strings.HasSuffix(hostname, gcpHost) {
+	case hostMatches(hostname, gcpHost):
 		return "accounts." + gcpHost
+	default:
+		// AWS and unknown hosts have no canonical account suffix to normalise to,
+		// so prefix the host as given.
+		return "accounts." + hostname
 	}
-	return "accounts." + hostname
 }
 
 func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth, excludeWorkspaces []string) (*Client, error) {

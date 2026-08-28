@@ -44,6 +44,29 @@ func TestIsWorkspaceExcluded(t *testing.T) {
 	}
 }
 
+func TestGetAccountHostname(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		want     string
+	}{
+		{"azure subdomain", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net"},
+		{"azure bare host", "azuredatabricks.net", "accounts.azuredatabricks.net"},
+		{"gcp subdomain", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com"},
+		{"aws falls through unnormalised", "myorg.cloud.databricks.com", "accounts.myorg.cloud.databricks.com"},
+		// CXH-2349: a bare-suffix match would resolve this to the Azure account host.
+		{"azure lookalike does not match", "evilazuredatabricks.net", "accounts.evilazuredatabricks.net"},
+		{"gcp lookalike does not match", "evilgcp.databricks.com", "accounts.evilgcp.databricks.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetAccountHostname(tt.hostname); got != tt.want {
+				t.Errorf("GetAccountHostname(%q) = %q, want %q", tt.hostname, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsWorkspaceExcludedReturnsEveryMatchedKey(t *testing.T) {
 	ws := Workspace{ID: 12345, Name: "prod", DeploymentName: "dbc-abc"}
 	c := newTestClient(t, []string{"prod", "dbc-abc", "staging"})
