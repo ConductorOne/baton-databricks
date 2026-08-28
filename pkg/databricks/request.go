@@ -3,6 +3,7 @@ package databricks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,24 @@ func (e *APIError) Error() string {
 
 func (e *APIError) Unwrap() error {
 	return e.Err
+}
+
+// nameWorkspace403Remedy enriches a 403 from a workspace-scoped call with the
+// fix: excluding the workspace scopes it out of the sync. workspaceId is empty
+// for account-scoped calls, where a 403 is not a per-workspace access problem,
+// so those pass through untouched.
+func nameWorkspace403Remedy(workspaceId string, err error) error {
+	if workspaceId == "" || err == nil {
+		return err
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
+		return fmt.Errorf(
+			"workspace %s is inaccessible (403); scope it out with --databricks-exclude-workspaces (BATON_DATABRICKS_EXCLUDE_WORKSPACES): %w",
+			workspaceId, err,
+		)
+	}
+	return err
 }
 
 func (c *Client) Get(
