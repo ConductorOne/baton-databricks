@@ -83,10 +83,10 @@ func levelFor(t *testing.T, buf *bytes.Buffer, want string) string {
 
 const accountUnreachableMsg = "account API unreachable"
 
-// CXH-2350: the account-unreachable notice logs at two levels depending on cause.
-// Under workspace-token auth the account plane is out of scope by design and this fires
-// on every PAT sync, so it must stay at debug (repo convention forbids warn for expected state).
-func TestValidateWorkspaceTokenLogsAtDebug(t *testing.T) {
+// CXH-2350: dropping the whole account plane is a customer-visible degradation, so the
+// startup notice must be visible. It logs at warn, not debug (a debug line is invisible at
+// the default info level, which is the silent degradation the ticket was filed to fix).
+func TestValidateWorkspaceTokenLogsAtWarn(t *testing.T) {
 	buf := &bytes.Buffer{}
 	ctx := captureLogs(context.Background(), buf)
 	d := newValidateConnector(t, databricks.NewTokenAuth([]string{"ws1"}, []string{"tok"}), rolesTransport{})
@@ -95,13 +95,12 @@ func TestValidateWorkspaceTokenLogsAtDebug(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 
-	if got := levelFor(t, buf, accountUnreachableMsg); got != "debug" {
-		t.Errorf("token-auth notice logged at %q, want %q", got, "debug")
+	if got := levelFor(t, buf, accountUnreachableMsg); got != "warn" {
+		t.Errorf("token-auth notice logged at %q, want %q", got, "warn")
 	}
 }
 
-// Under OAuth the account plane was expected but the probe failed: a real whole-tenant
-// degradation, so it must log at warn (baton-admin skip-and-continue Rule 4).
+// OAuth with a failed account probe is the same whole-tenant drop, also at warn.
 func TestValidateOAuthProbeFailureLogsAtWarn(t *testing.T) {
 	buf := &bytes.Buffer{}
 	ctx := captureLogs(context.Background(), buf)
