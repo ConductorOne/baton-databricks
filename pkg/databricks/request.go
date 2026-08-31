@@ -52,7 +52,7 @@ func nameWorkspace403Remedy(workspaceId string, err error) error {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
 		return fmt.Errorf(
-			"workspace %s is inaccessible (403); remove it from --databricks-workspaces, or scope it out with --databricks-exclude-workspaces (BATON_DATABRICKS_EXCLUDE_WORKSPACES): %w",
+			"workspace %s is inaccessible (403); remove it from --workspaces (BATON_WORKSPACES) along with its paired workspace token, or scope it out with --databricks-exclude-workspaces (BATON_DATABRICKS_EXCLUDE_WORKSPACES): %w",
 			workspaceId, err,
 		)
 	}
