@@ -3,6 +3,7 @@ package databricks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,11 +13,25 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
+	"google.golang.org/grpc/codes"
 )
 
 const (
 	AlreadyExists = "AlreadyExists"
 )
+
+// wrapTransportAuthError maps an OAuth2 token-retrieval failure (bad client
+// id/secret) to a gRPC Unauthenticated status. That failure happens in the
+// oauth2 transport before any API response, so uhttp never sees an HTTP status
+// to map, and the error would otherwise surface as codes.Unknown.
+func wrapTransportAuthError(err error) error {
+	var retrieveErr *oauth2.RetrieveError
+	if errors.As(err, &retrieveErr) {
+		return uhttp.WrapErrors(codes.Unauthenticated, "databricks-connector: authentication failed", err)
+	}
+	return err
+}
 
 // APIError represents an error response from the Databricks API.
 type APIError struct {
@@ -163,7 +178,7 @@ func (c *Client) doRequest(
 		uhttp.WithRatelimitData(ratelimitData),
 	)
 	if resp == nil {
-		return ratelimitData, err
+		return ratelimitData, wrapTransportAuthError(err)
 	}
 
 	defer resp.Body.Close()
@@ -237,7 +252,7 @@ func (c *Client) doRequestNoResponse(
 		uhttp.WithRatelimitData(ratelimitData),
 	)
 	if resp == nil {
-		return ratelimitData, err
+		return ratelimitData, wrapTransportAuthError(err)
 	}
 
 	defer resp.Body.Close()
