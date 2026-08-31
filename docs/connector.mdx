@@ -14,9 +14,14 @@ sidebarTitle: "Databricks"
 | Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Service principals | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Users | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Workspaces | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 
 The Databricks connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
+
+<Note>
+Provisioning **account groups** requires OAuth authentication. It is not available when authenticating with a workspace token, because the Databricks API does not allow provisioning account groups from a workspace token. Workspace-scoped groups can still be provisioned with a workspace token.
+</Note>
 
 ## Gather Databricks credentials
 
@@ -55,7 +60,7 @@ You have two authentication choices when setting up the Databricks connector:
     </Step>
   </Steps>
 
-- **Personal access token** (syncs info from a single Databricks workspace)
+- **Personal access token** (syncs info from one or more Databricks workspaces)
 
   <Steps>
     <Step>
@@ -78,8 +83,8 @@ You have two authentication choices when setting up the Databricks connector:
 OR
 
 - Account ID
-- Personal access token
-- Deployment name of the Databricks workspace you're syncing (the subdomain in the workspace URL, not the workspace ID)
+- One or more personal access tokens
+- Deployment name of each Databricks workspace you're syncing (the subdomain in the workspace URL, not the workspace ID), listed in the same order as the corresponding tokens
 
 Next, move on to the instructions for your chosen setup method.
 

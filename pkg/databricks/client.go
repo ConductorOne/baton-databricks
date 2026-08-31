@@ -50,13 +50,26 @@ type Client struct {
 	isWSAPIAvailable  bool
 }
 
+// hostMatches reports whether hostname equals suffix or sits under it at a DNS
+// label boundary. Plain strings.HasSuffix would let evilazuredatabricks.net
+// match azuredatabricks.net; requiring the leading dot prevents that.
+func hostMatches(hostname, suffix string) bool {
+	return hostname == suffix || strings.HasSuffix(hostname, "."+suffix)
+}
+
 func GetAccountHostname(hostname string) string {
-	if strings.HasSuffix(hostname, azureHost) {
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	switch {
+	case hostMatches(hostname, azureHost):
 		return "accounts." + azureHost
-	} else if strings.HasSuffix(hostname, gcpHost) {
+	case hostMatches(hostname, gcpHost):
 		return "accounts." + gcpHost
+	case hostMatches(hostname, defaultHost):
+		return "accounts." + defaultHost
+	default:
+		// Unknown hosts have no canonical account suffix, so prefix as given.
+		return "accounts." + hostname
 	}
-	return "accounts." + hostname
 }
 
 func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth, excludeWorkspaces []string) (*Client, error) {
@@ -188,7 +201,7 @@ func (c *Client) ListUsers(
 	var res ListResponse[User]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, err
+		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -304,7 +317,7 @@ func (c *Client) ListGroups(
 	var res ListResponse[Group]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, err
+		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -416,7 +429,7 @@ func (c *Client) ListServicePrincipals(
 	var res ListResponse[ServicePrincipal]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, err
+		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -542,7 +555,7 @@ func (c *Client) ListRoles(
 
 	ratelimitData, err := c.Get(ctx, u, &res, NewResourceVars(resourcePayload))
 	if err != nil {
-		return nil, ratelimitData, err
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Roles, ratelimitData, nil
@@ -671,7 +684,7 @@ func (c *Client) ListRuleSets(
 	}
 	ratelimitData, err := c.Get(ctx, u, &res, NewNameVars(resourcePayload, c.etag))
 	if err != nil {
-		return nil, ratelimitData, err
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	c.UpdateEtag(res.Etag)
