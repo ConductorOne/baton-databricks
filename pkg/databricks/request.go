@@ -38,6 +38,8 @@ func wrapTransportAuthError(err error) error {
 		switch status := retrieveErr.Response.StatusCode; {
 		case status == http.StatusForbidden:
 			code = codes.PermissionDenied
+		case status == http.StatusTooManyRequests:
+			code = codes.ResourceExhausted
 		case status >= 500:
 			code = codes.Unavailable
 		}
