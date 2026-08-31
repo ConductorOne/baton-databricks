@@ -188,7 +188,7 @@ func (c *Client) ListUsers(
 	var res ListResponse[User]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, err
+		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -304,7 +304,7 @@ func (c *Client) ListGroups(
 	var res ListResponse[Group]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, err
+		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -416,7 +416,7 @@ func (c *Client) ListServicePrincipals(
 	var res ListResponse[ServicePrincipal]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, err
+		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -542,7 +542,7 @@ func (c *Client) ListRoles(
 
 	ratelimitData, err := c.Get(ctx, u, &res, NewResourceVars(resourcePayload))
 	if err != nil {
-		return nil, ratelimitData, err
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Roles, ratelimitData, nil
@@ -671,7 +671,7 @@ func (c *Client) ListRuleSets(
 	}
 	ratelimitData, err := c.Get(ctx, u, &res, NewNameVars(resourcePayload, c.etag))
 	if err != nil {
-		return nil, ratelimitData, err
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	c.UpdateEtag(res.Etag)
