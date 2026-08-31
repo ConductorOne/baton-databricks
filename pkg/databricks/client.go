@@ -50,13 +50,26 @@ type Client struct {
 	isWSAPIAvailable  bool
 }
 
+// hostMatches reports whether hostname equals suffix or sits under it at a DNS
+// label boundary. Plain strings.HasSuffix would let evilazuredatabricks.net
+// match azuredatabricks.net; requiring the leading dot prevents that.
+func hostMatches(hostname, suffix string) bool {
+	return hostname == suffix || strings.HasSuffix(hostname, "."+suffix)
+}
+
 func GetAccountHostname(hostname string) string {
-	if strings.HasSuffix(hostname, azureHost) {
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	switch {
+	case hostMatches(hostname, azureHost):
 		return "accounts." + azureHost
-	} else if strings.HasSuffix(hostname, gcpHost) {
+	case hostMatches(hostname, gcpHost):
 		return "accounts." + gcpHost
+	case hostMatches(hostname, defaultHost):
+		return "accounts." + defaultHost
+	default:
+		// Unknown hosts have no canonical account suffix, so prefix as given.
+		return "accounts." + hostname
 	}
-	return "accounts." + hostname
 }
 
 func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHostname, accountID, baseURL string, auth Auth, excludeWorkspaces []string) (*Client, error) {
