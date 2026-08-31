@@ -106,7 +106,7 @@ To instead exclude specific workspaces from the sync, pass them to the
 list. Each entry can be a workspace name, deployment name, or numeric workspace
 ID. Excluded workspaces and their roles are skipped entirely.
 
-## Group povisioning limitations
+## Group provisioning limitations
 provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
 this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.
 [here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.) are the different types of groups in Databricks
