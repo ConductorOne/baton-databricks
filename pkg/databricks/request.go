@@ -39,7 +39,7 @@ func wrapTransportAuthError(err error) error {
 		case status == http.StatusForbidden:
 			code = codes.PermissionDenied
 		case status == http.StatusTooManyRequests:
-			code = codes.ResourceExhausted
+			code = codes.Unavailable
 		case status >= 500:
 			code = codes.Unavailable
 		}

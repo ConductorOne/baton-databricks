@@ -28,7 +28,7 @@ func TestWrapTransportAuthError(t *testing.T) {
 		{"wrapped oauth2 retrieve error maps to unauthenticated", fmt.Errorf("get workspaces: %w", retrieveErr), codes.Unauthenticated},
 		{"401 maps to unauthenticated", retrieveWithStatus(http.StatusUnauthorized), codes.Unauthenticated},
 		{"403 maps to permission denied", retrieveWithStatus(http.StatusForbidden), codes.PermissionDenied},
-		{"429 maps to resource exhausted", retrieveWithStatus(http.StatusTooManyRequests), codes.ResourceExhausted},
+		{"429 stays retryable as unavailable", retrieveWithStatus(http.StatusTooManyRequests), codes.Unavailable},
 		{"503 stays retryable as unavailable", retrieveWithStatus(http.StatusServiceUnavailable), codes.Unavailable},
 		{"unrelated error is left unknown", errors.New("boom"), codes.Unknown},
 	}
