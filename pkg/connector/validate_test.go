@@ -15,9 +15,20 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-type rolesOKTransport struct{}
+// rolesTransport answers the assignable-roles calls Validate makes. failAccount
+// makes the account-plane probe (host "accounts.*") fail so isAccAPIAvailable stays
+// false while the workspace probe still succeeds.
+type rolesTransport struct{ failAccount bool }
 
-func (rolesOKTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t rolesTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.failAccount && strings.HasPrefix(req.URL.Host, "accounts.") {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":"boom"}`)),
+			Request:    req,
+		}, nil
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -26,7 +37,6 @@ func (rolesOKTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// captureLogs returns a ctx carrying a zap logger that writes JSON lines to buf.
 func captureLogs(ctx context.Context, buf *bytes.Buffer) context.Context {
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
@@ -36,11 +46,10 @@ func captureLogs(ctx context.Context, buf *bytes.Buffer) context.Context {
 	return ctxzap.ToContext(ctx, zap.New(core))
 }
 
-func newValidateConnector(t *testing.T, auth databricks.Auth) *Databricks {
+func newValidateConnector(t *testing.T, auth databricks.Auth, tr http.RoundTripper) *Databricks {
 	t.Helper()
-	httpClient := &http.Client{Transport: rolesOKTransport{}}
 	client, err := databricks.NewClient(
-		context.Background(), httpClient,
+		context.Background(), &http.Client{Transport: tr},
 		"cloud.databricks.com", "accounts.cloud.databricks.com",
 		"acct-1", "", auth, nil,
 	)
@@ -74,20 +83,36 @@ func levelFor(t *testing.T, buf *bytes.Buffer, want string) string {
 
 const accountUnreachableMsg = "account API unreachable"
 
-// CXH-2350: under workspace-token auth the account plane is unreachable but the
-// sync still proceeds workspace-scoped. That reduced-coverage notice is an operator
-// diagnostic and must log at debug, not warn (repo convention forbids warn).
+// CXH-2350: the account-unreachable notice logs at two levels depending on cause.
+// Under workspace-token auth the account plane is out of scope by design and this fires
+// on every PAT sync, so it must stay at debug (repo convention forbids warn for expected state).
 func TestValidateWorkspaceTokenLogsAtDebug(t *testing.T) {
 	buf := &bytes.Buffer{}
 	ctx := captureLogs(context.Background(), buf)
-	d := newValidateConnector(t, databricks.NewTokenAuth([]string{"ws1"}, []string{"tok"}))
+	d := newValidateConnector(t, databricks.NewTokenAuth([]string{"ws1"}, []string{"tok"}), rolesTransport{})
 
 	if _, err := d.Validate(ctx); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 
 	if got := levelFor(t, buf, accountUnreachableMsg); got != "debug" {
-		t.Errorf("account-unreachable notice logged at %q, want %q", got, "debug")
+		t.Errorf("token-auth notice logged at %q, want %q", got, "debug")
+	}
+}
+
+// Under OAuth the account plane was expected but the probe failed: a real whole-tenant
+// degradation, so it must log at warn (baton-admin skip-and-continue Rule 4).
+func TestValidateOAuthProbeFailureLogsAtWarn(t *testing.T) {
+	buf := &bytes.Buffer{}
+	ctx := captureLogs(context.Background(), buf)
+	d := newValidateConnector(t, &databricks.NoAuth{}, rolesTransport{failAccount: true})
+
+	if _, err := d.Validate(ctx); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	if got := levelFor(t, buf, accountUnreachableMsg); got != "warn" {
+		t.Errorf("OAuth-probe-failure notice logged at %q, want %q", got, "warn")
 	}
 }
 
@@ -95,13 +120,13 @@ func TestValidateWorkspaceTokenLogsAtDebug(t *testing.T) {
 func TestValidateAccountReachableNoNotice(t *testing.T) {
 	buf := &bytes.Buffer{}
 	ctx := captureLogs(context.Background(), buf)
-	d := newValidateConnector(t, &databricks.NoAuth{})
+	d := newValidateConnector(t, &databricks.NoAuth{}, rolesTransport{})
 
 	if _, err := d.Validate(ctx); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 
 	if got := levelFor(t, buf, accountUnreachableMsg); got != "" {
-		t.Errorf("account-unreachable notice fired (level %q) when account API was reachable", got)
+		t.Errorf("notice fired (level %q) when account API was reachable", got)
 	}
 }

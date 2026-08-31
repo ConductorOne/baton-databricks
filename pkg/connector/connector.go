@@ -148,14 +148,20 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
-	// Account plane down (always under token auth, possible under OAuth) silently drops
-	// account entitlements/grants and re-parents identities onto workspaces; log it for operators.
+	// Account plane down silently drops account entitlements/grants and re-parents identities
+	// onto workspaces. Same drop, two causes: token auth omits the account plane by design
+	// (expected every sync, so Debug), OAuth's probe genuinely failed (whole-tenant degradation,
+	// so Warn).
 	if !isAccAPIAvailable && isWSAPIAvailable {
-		ctxzap.Extract(ctx).Debug(
-			"databricks-connector: account API unreachable; syncing workspace-scoped data only. " +
-				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
-				"and identities are parented under their workspace instead of the account",
-		)
+		msg := "databricks-connector: account API unreachable; syncing workspace-scoped data only. " +
+			"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
+			"and identities are parented under their workspace instead of the account"
+		l := ctxzap.Extract(ctx)
+		if d.client.IsTokenAuth() {
+			l.Debug(msg)
+		} else {
+			l.Warn(msg)
+		}
 	}
 
 	return nil, nil
