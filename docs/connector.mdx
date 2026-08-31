@@ -56,6 +56,9 @@ You have two authentication choices when setting up the Databricks connector:
     Follow the [Databricks OAuth authentication documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and create an OAuth secret.
     </Step>
     <Step>
+    Assign the service principal as an admin to each Databricks workspace you want to sync. The connector can only sync and provision a workspace's data if the service principal has admin access to that workspace.
+    </Step>
+    <Step>
     Carefully copy and save the OAuth client ID and secret.
     </Step>
   </Steps>
