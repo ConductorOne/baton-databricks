@@ -110,9 +110,10 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	isWSAPIAvailable := false
 
 	// The Account API is unreachable with workspace tokens, so only probe it for OAuth.
+	var accProbeErr error
 	if !d.client.IsTokenAuth() {
-		_, _, err := d.client.ListRoles(ctx, "", "", "")
-		if err == nil {
+		_, _, accProbeErr = d.client.ListRoles(ctx, "", "", "")
+		if accProbeErr == nil {
 			isAccAPIAvailable = true
 		}
 	}
@@ -154,9 +155,10 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// degradation CXH-2350 was filed to fix.
 	if !isAccAPIAvailable && isWSAPIAvailable {
 		ctxzap.Extract(ctx).Warn(
-			"databricks-connector: account API unreachable; syncing workspace-scoped data only. " +
-				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
+			"databricks-connector: account API unreachable; syncing workspace-scoped data only. "+
+				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, "+
 				"and identities are parented under their workspace instead of the account",
+			zap.Error(accProbeErr),
 		)
 	}
 

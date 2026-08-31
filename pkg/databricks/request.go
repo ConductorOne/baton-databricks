@@ -21,16 +21,29 @@ const (
 	AlreadyExists = "AlreadyExists"
 )
 
-// wrapTransportAuthError maps an OAuth2 token-retrieval failure (bad client
-// id/secret) to a gRPC Unauthenticated status. That failure happens in the
-// oauth2 transport before any API response, so uhttp never sees an HTTP status
-// to map, and the error would otherwise surface as codes.Unknown.
+// wrapTransportAuthError maps an OAuth2 token-retrieval failure to a gRPC
+// status. It happens in the oauth2 transport before any API response, so uhttp
+// never sees an HTTP status and the error would otherwise surface as Unknown.
+// oauth2 returns RetrieveError for any non-2xx from the token endpoint, so a
+// transient 5xx must stay retryable (Unavailable) rather than look like bad
+// credentials. A missing Response falls back to Unauthenticated.
 func wrapTransportAuthError(err error) error {
 	var retrieveErr *oauth2.RetrieveError
-	if errors.As(err, &retrieveErr) {
-		return uhttp.WrapErrors(codes.Unauthenticated, "databricks-connector: authentication failed", err)
+	if !errors.As(err, &retrieveErr) {
+		return err
 	}
-	return err
+
+	code := codes.Unauthenticated
+	if retrieveErr.Response != nil {
+		switch status := retrieveErr.Response.StatusCode; {
+		case status == http.StatusForbidden:
+			code = codes.PermissionDenied
+		case status >= 500:
+			code = codes.Unavailable
+		}
+	}
+
+	return uhttp.WrapErrors(code, "databricks-connector: authentication failed", err)
 }
 
 // APIError represents an error response from the Databricks API.
