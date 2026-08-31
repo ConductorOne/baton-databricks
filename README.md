@@ -101,8 +101,7 @@ length mismatch is rejected at startup.
 Workspace-token auth cannot reach the Databricks account API, so it syncs less
 than OAuth: no account-level entitlements or grants and no workspace-membership
 entitlements, and users, groups, service principals and roles are parented under
-their workspace instead of the account. The connector logs a warning at startup
-when the account API is unreachable. Use OAuth for full account and
+their workspace instead of the account. Use OAuth for full account and
 cross-workspace coverage.
 
 To instead exclude specific workspaces from the sync, pass them to the

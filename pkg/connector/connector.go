@@ -149,9 +149,9 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
 	// Account plane down (always under token auth, possible under OAuth) silently drops
-	// account entitlements/grants and re-parents identities onto workspaces; surface it.
+	// account entitlements/grants and re-parents identities onto workspaces; log it for operators.
 	if !isAccAPIAvailable && isWSAPIAvailable {
-		ctxzap.Extract(ctx).Warn(
+		ctxzap.Extract(ctx).Debug(
 			"databricks-connector: account API unreachable; syncing workspace-scoped data only. " +
 				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
 				"and identities are parented under their workspace instead of the account",
