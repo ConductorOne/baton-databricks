@@ -109,13 +109,14 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	isAccAPIAvailable := false
 	isWSAPIAvailable := false
 
-	// The Account API is unreachable with workspace tokens, so only probe it for OAuth.
-	var accProbeErr error
+	// OAuth must reach the account API; a failed check here is a fixable misconfiguration,
+	// so fail instead of silently dropping account-level data (token auth, handled below,
+	// can't reach it by design).
 	if !d.client.IsTokenAuth() {
-		_, _, accProbeErr = d.client.ListRoles(ctx, "", "", "")
-		if accProbeErr == nil {
-			isAccAPIAvailable = true
+		if _, _, err := d.client.ListRoles(ctx, "", "", ""); err != nil {
+			return nil, fmt.Errorf("databricks-connector: account API validation failed: %w", err)
 		}
+		isAccAPIAvailable = true
 	}
 
 	// With an explicit workspace list (always the case for token auth), validate each
@@ -149,16 +150,14 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
 
-	// Account plane down (always under token auth, possible under OAuth) silently drops account
-	// entitlements/grants for the whole tenant and re-parents identities onto workspaces. Warn,
-	// not Debug: a Debug line is invisible at the default info level, which is the silent
-	// degradation CXH-2350 was filed to fix.
+	// Token auth can't reach the account plane: account entitlements/grants and
+	// workspace-membership entitlements go unsynced and identities re-parent onto the
+	// workspace. Warn, not Debug (invisible at info level), so this drop isn't silent.
 	if !isAccAPIAvailable && isWSAPIAvailable {
 		ctxzap.Extract(ctx).Warn(
-			"databricks-connector: account API unreachable; syncing workspace-scoped data only. "+
-				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, "+
+			"databricks-connector: account API unreachable under workspace-token auth; syncing workspace-scoped data only. " +
+				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
 				"and identities are parented under their workspace instead of the account",
-			zap.Error(accProbeErr),
 		)
 	}
 

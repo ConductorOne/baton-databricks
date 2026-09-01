@@ -16,8 +16,8 @@ import (
 )
 
 // rolesTransport answers the assignable-roles calls Validate makes. failAccount
-// makes the account-plane probe (host "accounts.*") fail so isAccAPIAvailable stays
-// false while the workspace probe still succeeds.
+// makes the account-plane check (host "accounts.*") fail so isAccAPIAvailable stays
+// false while the workspace check still succeeds.
 type rolesTransport struct{ failAccount bool }
 
 func (t rolesTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -100,18 +100,13 @@ func TestValidateWorkspaceTokenLogsAtWarn(t *testing.T) {
 	}
 }
 
-// OAuth with a failed account probe is the same whole-tenant drop, also at warn.
-func TestValidateOAuthProbeFailureLogsAtWarn(t *testing.T) {
-	buf := &bytes.Buffer{}
-	ctx := captureLogs(context.Background(), buf)
+// Under OAuth a failed account check is a fixable misconfiguration, so Validate
+// fails rather than silently dropping account-level data.
+func TestValidateOAuthAccountCheckFailureReturnsError(t *testing.T) {
 	d := newValidateConnector(t, &databricks.NoAuth{}, rolesTransport{failAccount: true})
 
-	if _, err := d.Validate(ctx); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-
-	if got := levelFor(t, buf, accountUnreachableMsg); got != "warn" {
-		t.Errorf("OAuth-probe-failure notice logged at %q, want %q", got, "warn")
+	if _, err := d.Validate(context.Background()); err == nil {
+		t.Fatal("Validate: want error on OAuth account check failure, got nil")
 	}
 }
 
