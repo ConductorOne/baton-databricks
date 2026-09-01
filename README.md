@@ -105,6 +105,10 @@ their workspace instead of the account. The connector logs a warning at startup
 when the account API is unreachable. Use OAuth for full account and
 cross-workspace coverage.
 
+OAuth requires a reachable account API. If the account API check fails at
+startup, the connector fails validation instead of falling back to a
+workspace-only sync, even when `--workspaces` is set.
+
 To instead exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
 `BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated

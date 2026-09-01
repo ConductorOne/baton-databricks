@@ -225,7 +225,6 @@ stringData:
   BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
 
   # Databricks credentials, option 2: workspace token (syncs only the listed workspaces)
-  BATON_ACCOUNT_ID: <Databricks account ID>
   BATON_AUTH_METHOD: workspace-token
   # BATON_WORKSPACE_TOKENS and BATON_WORKSPACES pair up by position: the Nth token
   # authenticates the Nth workspace, so both lists must have the same length and order.
@@ -242,6 +241,8 @@ stringData:
 
 <Warning>
 **Workspace-token auth syncs less than OAuth.** A workspace token cannot reach the Databricks account API, so the sync is scoped to the listed workspaces only: it emits no account-level entitlements or grants and no workspace-membership entitlements, and users, groups, service principals and roles are parented under their workspace instead of the account. For full account and cross-workspace coverage, use OAuth.
+
+OAuth requires a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
 </Warning>
 
 See the connector's README or run `--help` to see all available configuration flags and environment variables.
