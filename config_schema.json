@@ -205,14 +205,13 @@
     {
       "name": "workspace-token",
       "displayName": "Workspace token",
-      "helpText": "Authenticate with a personal access token scoped to each workspace.",
+      "helpText": "Authenticate with a personal access token scoped to each workspace. Does not sync account-level data (account entitlements and grants, and workspace-membership entitlements); use OAuth for full account coverage.",
       "fields": [
         "account-id",
         "workspaces",
         "workspace-tokens",
         "hostname",
-        "account-hostname",
-        "databricks-exclude-workspaces"
+        "account-hostname"
       ]
     }
   ]
