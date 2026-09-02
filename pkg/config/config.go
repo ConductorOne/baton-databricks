@@ -107,9 +107,11 @@ var Config = field.NewConfiguration(
 		{
 			Name:        DatabricksWorkspaceTokenGroup,
 			DisplayName: "Workspace token",
-			HelpText:    "Authenticate with a personal access token scoped to each workspace.",
-			Fields:      []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, ExcludeWorkspacesField},
-			Default:     false,
+			HelpText: "Authenticate with a personal access token scoped to each workspace. " +
+				"Does not sync account-level data (account entitlements and grants, and " +
+				"workspace-membership entitlements); use OAuth for full account coverage.",
+			Fields:  []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField},
+			Default: false,
 		},
 	}),
 )

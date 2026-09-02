@@ -109,12 +109,14 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	isAccAPIAvailable := false
 	isWSAPIAvailable := false
 
-	// The Account API is unreachable with workspace tokens, so only probe it for OAuth.
+	// OAuth must reach the account API; a failed check here is a fixable misconfiguration,
+	// so fail instead of silently dropping account-level data (token auth, handled below,
+	// can't reach it by design).
 	if !d.client.IsTokenAuth() {
-		_, _, err := d.client.ListRoles(ctx, "", "", "")
-		if err == nil {
-			isAccAPIAvailable = true
+		if _, _, err := d.client.ListRoles(ctx, "", "", ""); err != nil {
+			return nil, fmt.Errorf("databricks-connector: account API validation failed: %w", err)
 		}
+		isAccAPIAvailable = true
 	}
 
 	// With an explicit workspace list (always the case for token auth), validate each
@@ -147,6 +149,17 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	}
 
 	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
+
+	// Token auth can't reach the account plane: account entitlements/grants and
+	// workspace-membership entitlements go unsynced and identities re-parent onto the
+	// workspace. Warn, not Debug (invisible at info level), so this drop isn't silent.
+	if !isAccAPIAvailable && isWSAPIAvailable {
+		ctxzap.Extract(ctx).Warn(
+			"databricks-connector: account API unreachable under workspace-token auth; syncing workspace-scoped data only. " +
+				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
+				"and identities are parented under their workspace instead of the account",
+		)
+	}
 
 	return nil, nil
 }
