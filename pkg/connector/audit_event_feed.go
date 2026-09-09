@@ -30,6 +30,12 @@ const (
 	auditLogTrailingLag = 4 * time.Hour
 
 	auditLogPageLimit = 1000
+
+	// auditLogRetention mirrors system.access.audit's documented 365-day retention; a cursor
+	// older than this can no longer be satisfied by the table and is treated as stale.
+	auditLogRetention = 365 * 24 * time.Hour
+
+	auditServiceAccounts = "accounts"
 )
 
 // auditActionMapping describes what an audit log action_name affects: an optional primary
@@ -42,37 +48,66 @@ type auditActionMapping struct {
 	roleNames    []string
 }
 
-// auditLogActions maps audit log action_name values to the resources they affect.
-var auditLogActions = map[string]auditActionMapping{
-	"createGroup":              {resourceType: groupResourceType, idParam: "targetGroupId"},
-	"addPrincipalToGroup":      {resourceType: groupResourceType, idParam: "targetGroupId"},
-	"removePrincipalFromGroup": {resourceType: groupResourceType, idParam: "targetGroupId"},
-	"deleteGroup":              {resourceType: groupResourceType, idParam: "targetGroupId"},
-	"updateGroup": {
+// auditActionKey identifies an audit log action by (service_name, action_name), since
+// action_name alone is ambiguous across services (e.g. "delete" also means "cluster terminated").
+type auditActionKey struct {
+	Service string
+	Action  string
+}
+
+// auditLogActions maps (service_name, action_name) pairs to the resources they affect, per
+// https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
+var auditLogActions = map[auditActionKey]auditActionMapping{
+	{auditServiceAccounts, "createGroup"}:               {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "addPrincipalToGroup"}:       {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "removePrincipalFromGroup"}:  {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "addPrincipalsToGroup"}:      {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "removePrincipalsFromGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "removeGroup"}:               {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "updateGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	"createUser": {resourceType: userResourceType, idParam: "targetUserId"},
-	"updateUser": {
+	// "add"/"delete" are the real user-lifecycle events; deleteUser is a parameterless PII purge.
+	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "updateUser"}: {
 		resourceType: userResourceType, idParam: "targetUserId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	"deleteUser":             {resourceType: userResourceType, idParam: "targetUserId"},
-	"createServicePrincipal": {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
-	"updateServicePrincipal": {
+	{auditServiceAccounts, "delete"}:                 {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "createServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	{auditServiceAccounts, "updateServicePrincipal"}: {
 		resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	"deleteServicePrincipal":       {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
-	"changeDatabricksWorkspaceAcl": {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
-	"changeDatabricksSqlAcl":       {roleNames: []string{SQLAccessRole}},
-	"setAdmin":                     {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	"removeAdmin":                  {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	{auditServiceAccounts, "deleteServicePrincipal"}:       {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
+	{auditServiceAccounts, "changeDatabricksSqlAcl"}:       {roleNames: []string{SQLAccessRole}},
+	{auditServiceAccounts, "setAdmin"}:                     {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	// removeAdmin revokes *workspace* admin, not account admin, so only the user is refreshed.
+	{auditServiceAccounts, "removeAdmin"}: {resourceType: userResourceType, idParam: "targetUserId"},
 }
 
 func auditLogActionNames() []string {
-	names := make([]string, 0, len(auditLogActions))
-	for name := range auditLogActions {
+	seen := make(map[string]struct{}, len(auditLogActions))
+	for key := range auditLogActions {
+		seen[key.Action] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func auditLogServiceNames() []string {
+	seen := make(map[string]struct{}, len(auditLogActions))
+	for key := range auditLogActions {
+		seen[key.Service] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -86,7 +121,6 @@ func auditLogActionNames() []string {
 type eventPageCursor struct {
 	StartAt           time.Time `json:"start_at"`
 	StartAfterEventID string    `json:"start_after_event_id"`
-	LatestEventSeen   time.Time `json:"latest_event_seen"`
 }
 
 func encodeEventCursor(c eventPageCursor) (string, error) {
@@ -97,22 +131,32 @@ func encodeEventCursor(c eventPageCursor) (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-// decodeEventCursor returns a zero-value cursor when missing or corrupt, so callers
-// self-heal by resetting to the lookback default.
-func decodeEventCursor(ctx context.Context, s string) eventPageCursor {
+// decodeEventCursor returns a zero-value cursor (self-healing to the lookback default) when
+// missing, corrupt, or stale. Corrupt/missing is routine and logged at Debug; a stale-but-valid
+// cursor indicates a real data gap and is logged at Warn.
+func decodeEventCursor(ctx context.Context, s string, now time.Time) eventPageCursor {
+	l := ctxzap.Extract(ctx)
+
 	if s == "" {
 		return eventPageCursor{}
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
-		ctxzap.Extract(ctx).Warn("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
+		l.Debug("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
 		return eventPageCursor{}
 	}
 
 	var c eventPageCursor
 	if err := json.Unmarshal(raw, &c); err != nil {
-		ctxzap.Extract(ctx).Warn("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
+		l.Debug("databricks-connector: corrupt event cursor, resetting to lookback default", zap.Error(err))
+		return eventPageCursor{}
+	}
+
+	if !c.StartAt.IsZero() && now.Sub(c.StartAt) > auditLogRetention {
+		l.Warn("databricks-connector: event cursor is older than system.access.audit's retention window, resetting to lookback default",
+			zap.Time("cursor_start_at", c.StartAt),
+		)
 		return eventPageCursor{}
 	}
 
@@ -124,6 +168,7 @@ type auditLogRow struct {
 	EventTime     time.Time
 	WorkspaceID   int64
 	ActionName    string
+	ServiceName   string
 	RequestParams map[string]string
 }
 
@@ -172,8 +217,8 @@ func (f *auditEventFeed) ListEvents(
 		return nil, &pagination.StreamState{}, nil, nil
 	}
 
-	cursor := decodeEventCursor(ctx, pToken.Cursor)
 	now := time.Now()
+	cursor := decodeEventCursor(ctx, pToken.Cursor, now)
 
 	if cursor.StartAt.IsZero() {
 		start := now.Add(-auditLogLookback)
@@ -265,7 +310,7 @@ func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool
 			startAt = laggedFloor
 			startAfterEventID = ""
 		}
-		return eventPageCursor{StartAt: startAt, StartAfterEventID: startAfterEventID, LatestEventSeen: latest}
+		return eventPageCursor{StartAt: startAt, StartAfterEventID: startAfterEventID}
 	}
 
 	target := latest.Add(-auditLogTrailingLag)
@@ -281,7 +326,7 @@ func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool
 		startAfterEventID = lastEventID
 	}
 
-	return eventPageCursor{StartAt: target, StartAfterEventID: startAfterEventID, LatestEventSeen: latest}
+	return eventPageCursor{StartAt: target, StartAfterEventID: startAfterEventID}
 }
 
 // affectedResource is one resource a mapped audit row's action changed.
@@ -290,14 +335,11 @@ type affectedResource struct {
 	parentResourceId *v2.ResourceId
 }
 
-// mapAuditRowToResource maps an audit row to every Baton resource its action affects
-// (a principal, an account role, and/or workspace roles), skipping anything unresolvable.
-// The principal's parent mirrors how it's actually synced (see groupGrantParent in
-// helpers.go): account when the Account API is reachable, the specific workspace
-// otherwise — not whichever scope the audit row happened to occur in. Getting this wrong
-// produces a resource ID that was never synced, so the real resource never gets refreshed.
+// mapAuditRowToResource maps an audit row to every Baton resource its action affects, skipping
+// anything unresolvable. The principal's parent mirrors how it's actually synced (see
+// groupGrantParent in helpers.go), not the scope the audit row occurred in.
 func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId string, accountAPIAvailable bool, workspaceLookup map[int64]string) []affectedResource {
-	mapping, ok := auditLogActions[row.ActionName]
+	mapping, ok := auditLogActions[auditActionKey{Service: row.ServiceName, Action: row.ActionName}]
 	if !ok {
 		return nil
 	}
@@ -453,16 +495,18 @@ func sqlQueryWorkspace(workspaces []databricks.Workspace) (string, map[int64]str
 func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor) ([]auditLogRow, *v2.RateLimitDescription, error) {
 	// The (event_time, event_id) tiebreaker keeps ordering deterministic and lets us page
 	// with a composite > predicate, so progress never stalls even if many rows share one
-	// event_time (see advanceEventCursor).
+	// event_time (see advanceEventCursor); this holds as long as event_id compares consistently
+	// under Databricks SQL's ">"/ORDER BY, which is true for this table's opaque IDs.
 	statement := fmt.Sprintf(`
-		SELECT event_id, event_time, workspace_id, action_name, request_params
+		SELECT event_id, event_time, workspace_id, action_name, service_name, request_params
 		FROM system.access.audit
 		WHERE event_date >= :start_date
 		  AND (event_time > :start_time OR (event_time = :start_time AND event_id > :start_after_event_id))
+		  AND service_name IN (%s)
 		  AND action_name IN (%s)
 		ORDER BY event_time ASC, event_id ASC
 		LIMIT %d
-	`, quotedInClause(auditLogActionNames()), auditLogPageLimit)
+	`, quotedInClause(auditLogServiceNames()), quotedInClause(auditLogActionNames()), auditLogPageLimit)
 
 	result, rateLimit, err := f.client.ExecuteStatement(
 		ctx,
@@ -479,7 +523,7 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		return nil, rateLimit, err
 	}
 
-	rows, err := parseAuditLogRows(result)
+	rows, err := parseAuditLogRows(ctx, result)
 	return rows, rateLimit, err
 }
 
@@ -497,17 +541,20 @@ const (
 	colEventTime     = "event_time"
 	colWorkspaceID   = "workspace_id"
 	colActionName    = "action_name"
+	colServiceName   = "service_name"
 	colRequestParams = "request_params"
 )
 
-func parseAuditLogRows(result *databricks.StatementResult) ([]auditLogRow, error) {
+// parseAuditLogRows skips (and logs) any individual row that fails to parse instead of
+// failing the whole page; a missing expected column is a schema problem, so that still fails.
+func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) ([]auditLogRow, error) {
 	colIndex := make(map[string]int, len(result.Columns))
 	for i, name := range result.Columns {
 		colIndex[name] = i
 	}
 
 	maxColIndex := 0
-	for _, name := range []string{colEventID, colEventTime, colWorkspaceID, colActionName, colRequestParams} {
+	for _, name := range []string{colEventID, colEventTime, colWorkspaceID, colActionName, colServiceName, colRequestParams} {
 		idx, ok := colIndex[name]
 		if !ok {
 			return nil, fmt.Errorf("audit log query result missing column %q", name)
@@ -517,43 +564,55 @@ func parseAuditLogRows(result *databricks.StatementResult) ([]auditLogRow, error
 		}
 	}
 
+	l := ctxzap.Extract(ctx)
+
 	rows := make([]auditLogRow, 0, len(result.Rows))
 	for _, r := range result.Rows {
-		if len(r) <= maxColIndex {
-			return nil, fmt.Errorf("audit log query result row has %d columns, expected at least %d", len(r), maxColIndex+1)
-		}
-
-		eventTime, err := time.Parse("2006-01-02 15:04:05.999", r[colIndex[colEventTime]])
+		row, err := parseAuditLogRow(r, colIndex, maxColIndex)
 		if err != nil {
-			eventTime, err = time.Parse(time.RFC3339, r[colIndex[colEventTime]])
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse event_time %q: %w", r[colIndex[colEventTime]], err)
-			}
+			l.Warn("databricks-connector: skipping malformed audit log row", zap.Error(err))
+			continue
 		}
-
-		var workspaceId int64
-		if v := r[colIndex[colWorkspaceID]]; v != "" {
-			workspaceId, err = strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse workspace_id %q: %w", v, err)
-			}
-		}
-
-		requestParams := map[string]string{}
-		if v := r[colIndex[colRequestParams]]; v != "" {
-			if err := json.Unmarshal([]byte(v), &requestParams); err != nil {
-				return nil, fmt.Errorf("failed to parse request_params %q: %w", v, err)
-			}
-		}
-
-		rows = append(rows, auditLogRow{
-			EventID:       r[colIndex[colEventID]],
-			EventTime:     eventTime,
-			WorkspaceID:   workspaceId,
-			ActionName:    r[colIndex[colActionName]],
-			RequestParams: requestParams,
-		})
+		rows = append(rows, row)
 	}
 
 	return rows, nil
+}
+
+func parseAuditLogRow(r []string, colIndex map[string]int, maxColIndex int) (auditLogRow, error) {
+	if len(r) <= maxColIndex {
+		return auditLogRow{}, fmt.Errorf("audit log query result row has %d columns, expected at least %d", len(r), maxColIndex+1)
+	}
+
+	eventTime, err := time.Parse("2006-01-02 15:04:05.999", r[colIndex[colEventTime]])
+	if err != nil {
+		eventTime, err = time.Parse(time.RFC3339, r[colIndex[colEventTime]])
+		if err != nil {
+			return auditLogRow{}, fmt.Errorf("failed to parse event_time %q: %w", r[colIndex[colEventTime]], err)
+		}
+	}
+
+	var workspaceId int64
+	if v := r[colIndex[colWorkspaceID]]; v != "" {
+		workspaceId, err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return auditLogRow{}, fmt.Errorf("failed to parse workspace_id %q: %w", v, err)
+		}
+	}
+
+	requestParams := map[string]string{}
+	if v := r[colIndex[colRequestParams]]; v != "" {
+		if err := json.Unmarshal([]byte(v), &requestParams); err != nil {
+			return auditLogRow{}, fmt.Errorf("failed to parse request_params %q: %w", v, err)
+		}
+	}
+
+	return auditLogRow{
+		EventID:       r[colIndex[colEventID]],
+		EventTime:     eventTime,
+		WorkspaceID:   workspaceId,
+		ActionName:    r[colIndex[colActionName]],
+		ServiceName:   r[colIndex[colServiceName]],
+		RequestParams: requestParams,
+	}, nil
 }

@@ -2,12 +2,19 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/pagination"
 )
 
 // TestResolveSQLWorkspacesTokenAuth ensures the audit-log workspace lookup never calls the
@@ -96,7 +103,6 @@ func TestResolveQueryWorkspace(t *testing.T) {
 func TestEventCursorRoundTrip(t *testing.T) {
 	want := eventPageCursor{
 		StartAt:           time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		LatestEventSeen:   time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC),
 		StartAfterEventID: "b",
 	}
 
@@ -105,19 +111,48 @@ func TestEventCursorRoundTrip(t *testing.T) {
 		t.Fatalf("encodeEventCursor() error = %v", err)
 	}
 
-	got := decodeEventCursor(context.Background(), encoded)
-	if !got.StartAt.Equal(want.StartAt) || !got.LatestEventSeen.Equal(want.LatestEventSeen) || got.StartAfterEventID != want.StartAfterEventID {
+	got := decodeEventCursor(context.Background(), encoded, want.StartAt)
+	if !got.StartAt.Equal(want.StartAt) || got.StartAfterEventID != want.StartAfterEventID {
 		t.Errorf("decodeEventCursor() = %+v, want %+v", got, want)
 	}
 }
 
 func TestDecodeEventCursorSelfHeals(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	cases := []string{"", "not-base64!!!", "aW52YWxpZC1qc29u"} // last one is base64("invalid-json")
 	for _, c := range cases {
-		got := decodeEventCursor(context.Background(), c)
+		got := decodeEventCursor(context.Background(), c, now)
 		if !got.StartAt.IsZero() {
 			t.Errorf("decodeEventCursor(%q) = %+v, want zero-value cursor", c, got)
 		}
+	}
+}
+
+// TestDecodeEventCursorResetsStaleCursor covers a valid cursor whose StartAt has aged past
+// system.access.audit's retention window, which must self-heal like a corrupt cursor.
+func TestDecodeEventCursorResetsStaleCursor(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	stale := eventPageCursor{StartAt: now.Add(-auditLogRetention - time.Hour), StartAfterEventID: "x"}
+	encoded, err := encodeEventCursor(stale)
+	if err != nil {
+		t.Fatalf("encodeEventCursor() error = %v", err)
+	}
+
+	got := decodeEventCursor(context.Background(), encoded, now)
+	if !got.StartAt.IsZero() || got.StartAfterEventID != "" {
+		t.Errorf("decodeEventCursor() = %+v, want zero-value cursor for a stale StartAt", got)
+	}
+
+	fresh := eventPageCursor{StartAt: now.Add(-auditLogRetention + time.Hour), StartAfterEventID: "y"}
+	encoded, err = encodeEventCursor(fresh)
+	if err != nil {
+		t.Fatalf("encodeEventCursor() error = %v", err)
+	}
+
+	got = decodeEventCursor(context.Background(), encoded, now)
+	if !got.StartAt.Equal(fresh.StartAt) || got.StartAfterEventID != fresh.StartAfterEventID {
+		t.Errorf("decodeEventCursor() = %+v, want unchanged %+v (within retention)", got, fresh)
 	}
 }
 
@@ -282,6 +317,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "createGroup",
+				ServiceName:   "accounts",
 				WorkspaceID:   0,
 				RequestParams: map[string]string{"targetGroupId": "g-1"},
 			},
@@ -294,6 +330,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "addPrincipalToGroup",
+				ServiceName:   "accounts",
 				WorkspaceID:   123,
 				RequestParams: map[string]string{"targetGroupId": "g-1"},
 			},
@@ -308,6 +345,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: false,
 			row: auditLogRow{
 				ActionName:    "addPrincipalToGroup",
+				ServiceName:   "accounts",
 				WorkspaceID:   123,
 				RequestParams: map[string]string{"targetGroupId": "g-1"},
 			},
@@ -320,6 +358,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:  "changeDatabricksWorkspaceAcl",
+				ServiceName: "accounts",
 				WorkspaceID: 123,
 			},
 			want: []wantResource{
@@ -332,6 +371,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "setAdmin",
+				ServiceName:   "accounts",
 				RequestParams: map[string]string{"targetUserId": "u-1"},
 			},
 			want: []wantResource{
@@ -344,6 +384,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "updateUser",
+				ServiceName:   "accounts",
 				WorkspaceID:   123,
 				RequestParams: map[string]string{"targetUserId": "u-1"},
 			},
@@ -358,6 +399,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			accountAPIAvailable: false,
 			row: auditLogRow{
 				ActionName:    "updateUser",
+				ServiceName:   "accounts",
 				WorkspaceID:   123,
 				RequestParams: map[string]string{"targetUserId": "u-1"},
 			},
@@ -372,17 +414,22 @@ func TestMapAuditRowToResource(t *testing.T) {
 			row:  auditLogRow{ActionName: "someUnityCatalogAction"},
 		},
 		{
+			name: "known action_name under an unmapped service_name is skipped",
+			row:  auditLogRow{ActionName: "delete", ServiceName: "clusters"},
+		},
+		{
 			name:                "unresolvable workspace is skipped",
 			accountAPIAvailable: true,
 			row: auditLogRow{
-				ActionName:    "createUser",
+				ActionName:    "add",
+				ServiceName:   "accounts",
 				WorkspaceID:   999,
 				RequestParams: map[string]string{"targetUserId": "u-1"},
 			},
 		},
 		{
 			name: "missing id param is skipped",
-			row:  auditLogRow{ActionName: "createUser", WorkspaceID: 0},
+			row:  auditLogRow{ActionName: "add", ServiceName: "accounts", WorkspaceID: 0},
 		},
 	}
 
@@ -406,21 +453,21 @@ func TestMapAuditRowToResource(t *testing.T) {
 
 func TestParseAuditLogRowsDedupesNothingAndParsesFields(t *testing.T) {
 	result := &databricks.StatementResult{
-		Columns: []string{"event_id", "event_time", "workspace_id", "action_name", "request_params"},
+		Columns: []string{"event_id", "event_time", "workspace_id", "action_name", "service_name", "request_params"},
 		Rows: [][]string{
-			{"evt-1", "2026-01-01 00:00:00.000", "123", "createGroup", `{"targetGroupId":"g-1"}`},
-			{"evt-2", "2026-01-01T00:01:00Z", "0", "createUser", `{"targetUserId":"u-1"}`},
+			{"evt-1", "2026-01-01 00:00:00.000", "123", "createGroup", "accounts", `{"targetGroupId":"g-1"}`},
+			{"evt-2", "2026-01-01T00:01:00Z", "0", "add", "accounts", `{"targetUserId":"u-1"}`},
 		},
 	}
 
-	rows, err := parseAuditLogRows(result)
+	rows, err := parseAuditLogRows(context.Background(), result)
 	if err != nil {
 		t.Fatalf("parseAuditLogRows() error = %v", err)
 	}
 	if len(rows) != 2 {
 		t.Fatalf("len(rows) = %d, want 2", len(rows))
 	}
-	if rows[0].WorkspaceID != 123 || rows[0].RequestParams["targetGroupId"] != "g-1" {
+	if rows[0].WorkspaceID != 123 || rows[0].ServiceName != "accounts" || rows[0].RequestParams["targetGroupId"] != "g-1" {
 		t.Errorf("row[0] = %+v", rows[0])
 	}
 	if rows[1].WorkspaceID != 0 || rows[1].RequestParams["targetUserId"] != "u-1" {
@@ -434,7 +481,178 @@ func TestParseAuditLogRowsMissingColumnErrors(t *testing.T) {
 		Rows:    [][]string{{"evt-1", "2026-01-01 00:00:00.000"}},
 	}
 
-	if _, err := parseAuditLogRows(result); err == nil {
+	if _, err := parseAuditLogRows(context.Background(), result); err == nil {
 		t.Error("parseAuditLogRows() error = nil, want error for missing required column")
+	}
+}
+
+// TestParseAuditLogRowsSkipsMalformedRow verifies a single poisoned row (unparseable
+// event_time here) is skipped rather than failing the whole page.
+func TestParseAuditLogRowsSkipsMalformedRow(t *testing.T) {
+	result := &databricks.StatementResult{
+		Columns: []string{"event_id", "event_time", "workspace_id", "action_name", "service_name", "request_params"},
+		Rows: [][]string{
+			{"evt-1", "not-a-timestamp", "123", "createGroup", "accounts", `{"targetGroupId":"g-1"}`},
+			{"evt-2", "2026-01-01T00:01:00Z", "0", "add", "accounts", `{"targetUserId":"u-1"}`},
+		},
+	}
+
+	rows, err := parseAuditLogRows(context.Background(), result)
+	if err != nil {
+		t.Fatalf("parseAuditLogRows() error = %v, want the malformed row skipped instead", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1 (malformed row skipped)", len(rows))
+	}
+	if rows[0].EventID != "evt-2" {
+		t.Errorf("rows[0].EventID = %q, want %q", rows[0].EventID, "evt-2")
+	}
+}
+
+// TestAdvanceEventCursorLargeTiedBurstMakesProgress verifies more than auditLogPageLimit rows
+// sharing one event_time still make progress via the (event_time, event_id) cursor.
+func TestAdvanceEventCursorLargeTiedBurstMakesProgress(t *testing.T) {
+	tied := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cursor := eventPageCursor{StartAt: tied.Add(-time.Minute)}
+
+	rows := make([]auditLogRow, auditLogPageLimit)
+	for i := range rows {
+		rows[i] = auditLogRow{EventID: fmt.Sprintf("evt-%04d", i), EventTime: tied}
+	}
+
+	// now is far past the lag window so the intra-page clamp doesn't interfere.
+	now := tied.Add(auditLogTrailingLag + time.Hour)
+
+	next := advanceEventCursor(cursor, rows, true, now)
+	if !next.StartAt.Equal(tied) {
+		t.Fatalf("StartAt = %v, want %v (advances to the tied timestamp, not stuck before it)", next.StartAt, tied)
+	}
+	lastID := rows[len(rows)-1].EventID
+	if next.StartAfterEventID != lastID {
+		t.Fatalf("StartAfterEventID = %q, want %q (last row in the tied burst)", next.StartAfterEventID, lastID)
+	}
+
+	// A later, non-tied page must advance the cursor past the tied burst.
+	followUpLatest := tied.Add(5 * time.Hour)
+	followUp := []auditLogRow{{EventID: "evt-1000", EventTime: followUpLatest}}
+	drained := advanceEventCursor(next, followUp, false, followUpLatest.Add(5*time.Minute))
+	if !drained.StartAt.After(tied) {
+		t.Errorf("drained StartAt = %v did not advance past the tied burst's timestamp %v", drained.StartAt, tied)
+	}
+}
+
+// redirectTransport rewrites every outgoing request to target, since workspaceUrl always
+// builds a "<workspace>.<hostname>" subdomain a local httptest.Server can't listen on directly.
+type redirectTransport struct {
+	target *url.URL
+}
+
+func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Scheme = t.target.Scheme
+	req.URL.Host = t.target.Host
+	req.Host = t.target.Host
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// TestListEventsEndToEnd exercises ListEvents against a mocked Statement Execution API,
+// verifying the service_name query filter, resource mapping, and rate-limit propagation.
+func TestListEventsEndToEnd(t *testing.T) {
+	const wantLimit = 100
+	const wantRemaining = 42
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		var body struct {
+			Statement string `json:"statement"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode statement request body: %v", err)
+		}
+		if !strings.Contains(body.Statement, "service_name") {
+			t.Errorf("statement does not select/filter service_name: %s", body.Statement)
+		}
+		if !strings.Contains(body.Statement, "'accounts'") {
+			t.Errorf("statement does not filter service_name IN ('accounts', ...): %s", body.Statement)
+		}
+
+		w.Header().Set("X-Ratelimit-Limit", strconv.Itoa(wantLimit))
+		w.Header().Set("X-Ratelimit-Remaining", strconv.Itoa(wantRemaining))
+		w.Header().Set("Content-Type", "application/json")
+
+		resp := map[string]any{
+			"statement_id": "stmt-1",
+			"status":       map[string]any{"state": "SUCCEEDED"},
+			"manifest": map[string]any{
+				"schema": map[string]any{
+					"columns": []map[string]any{
+						{"name": "event_id"},
+						{"name": "event_time"},
+						{"name": "workspace_id"},
+						{"name": "action_name"},
+						{"name": "service_name"},
+						{"name": "request_params"},
+					},
+				},
+			},
+			"result": map[string]any{
+				"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "0", "add", "accounts", `{"targetUserId":"u-1"}`},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("failed to encode mock statement response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	auth := databricks.NewTokenAuth([]string{"ws1"}, []string{"token-1"})
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	// Mirrors what Validate() sets before any sync/event-feed call runs in production.
+	client.UpdateAvailability(true, true)
+
+	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1", "ws1")
+
+	events, streamState, annos, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1: %+v", len(events), events)
+	}
+
+	rc := events[0].GetResourceChangeEvent()
+	if rc.GetResourceId().GetResourceType() != userResourceType.Id || rc.GetResourceId().GetResource() != "u-1" {
+		t.Errorf("event resource = %+v, want type=%s id=u-1", rc.GetResourceId(), userResourceType.Id)
+	}
+	if streamState.Cursor == "" {
+		t.Error("StreamState.Cursor is empty, want an encoded cursor")
+	}
+
+	rld := &v2.RateLimitDescription{}
+	ok, err := annos.Pick(rld)
+	if err != nil {
+		t.Fatalf("annos.Pick() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("annotations do not carry a RateLimitDescription, want the rate-limit headers propagated")
+	}
+	if rld.GetLimit() != wantLimit || rld.GetRemaining() != wantRemaining {
+		t.Errorf("RateLimitDescription = %+v, want limit=%d remaining=%d", rld, wantLimit, wantRemaining)
 	}
 }
