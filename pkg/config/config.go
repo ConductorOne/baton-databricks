@@ -120,17 +120,23 @@ var Config = field.NewConfiguration(
 		//
 		// SCOPE — this disables workspace-token auth EVERYWHERE, not only in the C1 UI.
 		//
-		// With this group commented out, oauth2 is the only group left and it is
-		// Default: true, so its required fields (databricks-client-id and
-		// databricks-client-secret) now apply unconditionally. Passing
-		// --auth-method workspace-token on the CLI fails config validation with
-		// "field databricks-client-id ... is marked as required but it has a zero-value"
-		// before any API call. Verified, not assumed.
+		// Commenting out the group is necessary but NOT sufficient, and the gap is easy to
+		// miss: FieldGroupFields falls back to the default group for an unrecognised auth
+		// method, so a config that satisfies oauth2's required fields AND sets
+		// --auth-method workspace-token passes field.Validate (workspace-tokens is skipped
+		// because it is no longer in the selected group, so neither WithRequired nor
+		// DependentOn fires) and prepareClientAuth still returns NewTokenAuth — PAT auth,
+		// silently ignoring the supplied OAuth credentials. ValidateConfig below therefore
+		// rejects the auth method explicitly. Both halves are required.
+		//
+		// With only oauth2 left and Default: true, its required fields also apply
+		// unconditionally, so --auth-method workspace-token WITHOUT OAuth credentials
+		// fails earlier still, in field validation.
 		//
 		// The flags and pkg/databricks/auth.go's NewTokenAuth path still exist and still
-		// compile — they are simply unreachable, because no group offers them. So this is
-		// a BREAKING CHANGE for any self-hosted deployment currently authenticating with
-		// workspace tokens; they must move to OAuth2 or stay on the previous version.
+		// compile — they are simply unreachable. So this is a BREAKING CHANGE for any
+		// self-hosted deployment currently authenticating with workspace tokens; they must
+		// move to OAuth2 or stay on the previous version.
 		//
 		// Restore this block once CXE-1374 ships. Do NOT delete it, and do NOT remove the
 		// PAT documentation: this connector already lost PAT once in e84a1aef with the docs
@@ -151,6 +157,22 @@ var Config = field.NewConfiguration(
 // ValidateConfig enforces what field groups can't: OAuth/token exclusion when no
 // auth method is set, and equal-length workspaces/workspace-tokens.
 func ValidateConfig(ctx context.Context, cfg *Databricks, authMethod string) error {
+	// Workspace-token auth is temporarily disabled (see the commented-out field group
+	// above). Commenting out the group is NOT sufficient on its own: FieldGroupFields
+	// falls back to the default group for an unrecognised auth method, so a config that
+	// satisfies the oauth2 group's required fields AND sets
+	// --auth-method workspace-token passes field.Validate — workspace-tokens is skipped
+	// entirely because it is no longer in the selected group, so neither its
+	// WithRequired nor its DependentOn rule fires. prepareClientAuth would then still
+	// branch to NewTokenAuth and authenticate with PATs, silently ignoring the OAuth
+	// credentials the operator supplied. Reject it here so the disable is unconditional.
+	if authMethod == DatabricksWorkspaceTokenGroup {
+		return fmt.Errorf(
+			"databricks-connector: workspace-token authentication is temporarily unavailable; " +
+				"use OAuth (databricks-client-id and databricks-client-secret) instead",
+		)
+	}
+
 	// A merged/stored config can carry both groups' fields; once authMethod picks one,
 	// prepareClientAuth only reads that group, so the other group's leftovers are inert.
 	if authMethod == "" && len(cfg.WorkspaceTokens) > 0 && (cfg.DatabricksClientId != "" || cfg.DatabricksClientSecret != "") {

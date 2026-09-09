@@ -95,10 +95,10 @@ OAuth is the only authentication method currently available: an account-level
 service principal's client ID and secret.
 
 > **Workspace-token (PAT) authentication is temporarily unavailable.**
-> `--auth-method workspace-token` is not offered and a config specifying it is
-> rejected at startup, because the OAuth client ID and secret are required
-> unconditionally. `--workspaces` and `--workspace-tokens` still appear in
-> `--help`, but no authentication method consumes them.
+> `--auth-method workspace-token` is not offered, and a config specifying it is
+> rejected at startup with a clear error. `--workspace-tokens` still appears in
+> `--help` but no authentication method consumes it. `--workspaces` remains
+> supported under OAuth for limiting the sync scope, as described above.
 >
 > The implementation is intact and commented out in `pkg/config/config.go`
 > rather than deleted; it is withheld while a platform-side defect is resolved.

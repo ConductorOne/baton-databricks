@@ -53,7 +53,7 @@ A user with the **Account admin** role in each Databricks workspace you want to 
 
 ### Generate Databricks credentials
 
-You have two authentication choices when setting up the Databricks connector:
+The Databricks connector authenticates with OAuth:
 
 - **OAuth** (syncs info from all Databricks workspaces)
 
@@ -66,20 +66,6 @@ You have two authentication choices when setting up the Databricks connector:
     </Step>
   </Steps>
 
-- **Personal access token** (syncs info from one or more Databricks workspaces)
-
-  <Steps>
-    <Step>
-    In Databricks, navigate to **Settings** > **Developer** > **Access tokens** and click **Manage**.
-    </Step>
-    <Step>
-    Click **Generate new token** and create a new token.
-    </Step>
-    <Step>
-    Carefully copy and save the token.
-    </Step>
-  </Steps>
-
 **Done.** Here's the set of credentials you'll need when setting up the connector:
 
 - Account ID
@@ -87,7 +73,7 @@ You have two authentication choices when setting up the Databricks connector:
 - OAuth client secret
 
 <Note>
-Workspace-token (personal access token) authentication is **temporarily unavailable** and is not offered when configuring the connector. Use OAuth. See [Authentication methods](#authentication-methods) below.
+Personal access token (workspace token) authentication is **temporarily unavailable** and is not offered when configuring the connector, so there is no need to generate one. See [Authentication methods](#authentication-methods) above.
 </Note>
 
 Next, move on to the instructions for your chosen setup method.
@@ -131,13 +117,10 @@ To complete this task, you'll need:
   Find the **Settings** area of the page and click **Edit**.
   </Step>
   <Step>
-  Select whether you're authenticating with **OAuth** or a **Personal access token**.
-  </Step>
-  <Step>
   Paste the account ID you looked up in Step 1 into the **Account ID** field.
   </Step>
   <Step>
-  Enter the required OAuth or token credentials into the other two fields.
+  Enter your OAuth client ID and client secret into the **OAuth2 Client ID** and **OAuth2 Client Secret** fields.
   </Step>
   <Step>
   **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks account hostname and hostname in the relevant fields.
