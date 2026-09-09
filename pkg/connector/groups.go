@@ -272,7 +272,8 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.S
 	return rv, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
-// Get re-fetches a single group, used to re-sync it after a RESOURCE_CHANGE event.
+// Get re-fetches a single group, used to re-sync it after a RESOURCE_CHANGE event; fetched
+// without members since groupResource doesn't need them (Grants fetches them separately).
 func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
 	parentId, groupId, err := parseResourceId(resourceId.Resource)
 	if err != nil {
@@ -284,7 +285,7 @@ func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, paren
 		workspaceId = parentId.Resource
 	}
 
-	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
+	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 	}
