@@ -116,7 +116,7 @@ var Config = field.NewConfiguration(
 			HelpText:    "Authenticate as a service principal using an OAuth2 client ID and secret.",
 			Fields: []field.SchemaField{
 				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
-				HostnameField, AccountHostnameField, WorkspacesField, BaseURLField, ExcludeWorkspacesField,
+				HostnameField, AccountHostnameField, WorkspacesField, ExcludeWorkspacesField,
 				EnableIncrementalSyncField, SQLWarehouseIDField,
 			},
 			Default: true,
@@ -124,12 +124,12 @@ var Config = field.NewConfiguration(
 		{
 			Name:        DatabricksWorkspaceTokenGroup,
 			DisplayName: "Workspace token",
-			HelpText:    "Authenticate with a personal access token scoped to each workspace.",
+			HelpText: "Authenticate with a personal access token scoped to each workspace. " +
+				"Does not sync account-level data (account entitlements and grants, and " +
+				"workspace-membership entitlements); use OAuth for full account coverage.",
 			// Incremental sync requires the Account API, which workspace tokens can't reach
 			// (see Validate) — omitted here so the UI doesn't offer an option that can never work.
-			Fields: []field.SchemaField{
-				AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField, BaseURLField, ExcludeWorkspacesField,
-			},
+			Fields:  []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField},
 			Default: false,
 		},
 	}),

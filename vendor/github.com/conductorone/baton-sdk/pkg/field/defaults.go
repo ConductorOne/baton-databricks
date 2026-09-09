@@ -136,25 +136,6 @@ var (
 		WithDescription("The resource type IDs to sync"),
 		WithPersistent(true),
 		WithExportTarget(ExportTargetNone))
-	diffSyncsField = BoolField(
-		"diff-syncs",
-		WithDescription("Create a new partial SyncID from a base and applied sync."),
-		WithHidden(true),
-		WithPersistent(true),
-		WithExportTarget(ExportTargetNone),
-	)
-	diffSyncsBaseSyncField = StringField("base-sync-id",
-		WithDescription("The base sync to diff from."),
-		WithHidden(true),
-		WithPersistent(true),
-		WithExportTarget(ExportTargetNone),
-	)
-	diffSyncsAppliedSyncField = StringField("applied-sync-id",
-		WithDescription("The sync to show diffs when applied to the base sync."),
-		WithHidden(true),
-		WithPersistent(true),
-		WithExportTarget(ExportTargetNone),
-	)
 
 	compactSyncsField = BoolField("compact-syncs",
 		WithDescription("Provide a list of sync files to compact into a single c1z file and sync ID."),
@@ -355,10 +336,10 @@ var (
 		}))
 
 	// StorageEngineField selects the dotc1z storage engine for sync tasks.
-	// Empty uses the baton-sdk default (sqlite for new files).
+	// Empty uses the baton-sdk default (pebble for new files).
 	StorageEngineField = StringField("storage-engine",
 		WithDescription("The storage engine to use when opening the sync c1z file: sqlite or pebble. "+
-			"Leave unset to use the baton-sdk default."),
+			"Defaults to pebble when unset."),
 		WithPersistent(true),
 		WithExportTarget(ExportTargetNone),
 		WithString(func(r *StringRuler) {
@@ -439,9 +420,6 @@ var DefaultFields = append([]SchemaField{
 	externalResourceEntitlementIdFilter,
 	externalResourceTraitsField,
 	KeepPreviousSyncC1ZField,
-	diffSyncsField,
-	diffSyncsBaseSyncField,
-	diffSyncsAppliedSyncField,
 	compactSyncIDsField,
 	compactFilePathsField,
 	compactOutputDirectoryField,

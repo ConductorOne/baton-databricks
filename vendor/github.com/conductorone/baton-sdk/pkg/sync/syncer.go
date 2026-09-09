@@ -20,6 +20,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/bid"
 	"github.com/conductorone/baton-sdk/pkg/dotc1z"
 	"github.com/conductorone/baton-sdk/pkg/dotc1z/c1zstore"
+	enginepkg "github.com/conductorone/baton-sdk/pkg/dotc1z/engine/pebble"
 	"github.com/conductorone/baton-sdk/pkg/sync/expand"
 	"github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	batonGrant "github.com/conductorone/baton-sdk/pkg/types/grant"
@@ -206,19 +207,20 @@ type syncer struct {
 	// event (seed/dequeue/commit/abort/done) for post-hoc verification
 	// of the queue contract. Nil in production: one pointer check per
 	// queue operation.
-	testQueueAudit        *queueAudit
-	connector             types.ConnectorClient
-	state                 State
-	runDuration           time.Duration
-	transitionHandler     func(s Action)
-	progressHandler       func(p *Progress)
-	tmpDir                string
-	storageEngine         c1zstore.Engine
-	skipFullSync          bool
-	lastCheckPointTime    time.Time
-	counts                *progresslog.ProgressLog
-	targetedSyncResources []*v2.Resource
-	onlyExpandGrants      bool
+	testQueueAudit           *queueAudit
+	connector                types.ConnectorClient
+	state                    State
+	runDuration              time.Duration
+	transitionHandler        func(s Action)
+	progressHandler          func(p *Progress)
+	tmpDir                   string
+	storageEngine            c1zstore.Engine
+	skipFullSync             bool
+	lastCheckPointTime       time.Time
+	counts                   *progresslog.ProgressLog
+	targetedSyncResources    []*v2.Resource
+	onlyExpandGrants         bool
+	preserveEntitlementGraph bool
 	// compactionMergedStore marks the store as a pre-sealed artifact
 	// this process did not collect (WithCompactionMergedStore — the
 	// compactor's keep-newer merge and rollback-expansion's replay):
@@ -232,6 +234,7 @@ type syncer struct {
 	syncID                                string
 	skipEGForResourceType                 syncMap[string, bool]
 	skipEntitlementsForResourceType       syncMap[string, bool]
+	skipGrantsForResourceType             syncMap[string, bool]
 	typeScopedGrantsForResourceType       syncMap[string, bool]
 	typeScopedEntitlementsForResourceType syncMap[string, bool]
 	scheduledResourceTypes                syncMap[string, bool]
@@ -268,6 +271,44 @@ var _ Syncer = (*syncer)(nil)
 // a single narrow interface without knowing about C1ZStore.
 type expanderStoreAdapter struct {
 	store c1zstore.Store
+}
+
+// NewExpanderStore adapts a c1zstore.Store into an expand.ExpanderStore,
+// bridging engine differences (Pebble exposes StoreExpandedGrants on its
+// Grants() sub-store, SQLite at top level). Use this instead of type-asserting
+// the store, which is unsafe for Pebble.
+func NewExpanderStore(store c1zstore.Store) expand.ExpanderStore {
+	return expanderStoreAdapter{store: store}
+}
+
+// persistEntitlementGraphToStore binds the preserved graph to the exact sealed
+// grant generation and writes both into the c1z sidecar.
+func (s *syncer) persistEntitlementGraphToStore(ctx context.Context, syncID string, g *expand.EntitlementGraph) {
+	if g == nil {
+		return
+	}
+	gs, ok := s.store.(EntitlementGraphStore)
+	if !ok {
+		return
+	}
+	digestReader, ok := s.store.(c1zstore.GrantGenerationDigestReader)
+	if !ok {
+		return
+	}
+	digest, found, err := digestReader.GrantGenerationDigest(ctx)
+	if err != nil || !found {
+		ctxzap.Extract(ctx).Warn("preserve entitlement graph: sealed grant digest unavailable; graph will not be reusable", zap.Error(err))
+		return
+	}
+	data, err := expand.MarshalGraphBlobWithGrantDigest(syncID, g, digest)
+	if err != nil {
+		ctxzap.Extract(ctx).Warn("preserve entitlement graph: marshal failed", zap.Error(err))
+		return
+	}
+	if err := gs.PutEntitlementGraphBlob(ctx, data); err != nil {
+		ctxzap.Extract(ctx).Warn("preserve entitlement graph: sidecar write failed", zap.Error(err))
+		return
+	}
 }
 
 func (a expanderStoreAdapter) GetEntitlement(ctx context.Context, req *reader_v2.EntitlementsReaderServiceGetEntitlementRequest) (*reader_v2.EntitlementsReaderServiceGetEntitlementResponse, error) {
@@ -1058,8 +1099,22 @@ func (s *syncer) Sync(ctx context.Context) error {
 	}
 
 	// Force a checkpoint to clear completed actions & entitlement graph in sync_token.
-	s.state.ClearEntitlementGraph(ctx)
-
+	// preserveEntitlementGraph keeps the graph for a later incremental
+	// expansion: written to the c1z sidecar when the store supports it (token
+	// stays skinny — a whale graph is megabytes), else kept in the final token.
+	// Transient working state is stripped either way; a reload rebuilds it.
+	var graphToPersist *expand.EntitlementGraph
+	if s.preserveEntitlementGraph {
+		s.state.ClearEntitlementGraphTransientState(ctx)
+		_, hasGraphSidecar := s.store.(EntitlementGraphStore)
+		_, hasGrantDigest := s.store.(c1zstore.GrantGenerationDigestReader)
+		if hasGraphSidecar && hasGrantDigest {
+			graphToPersist = s.state.PeekEntitlementGraph()
+			s.state.ClearEntitlementGraph(ctx)
+		}
+	} else {
+		s.state.ClearEntitlementGraph(ctx)
+	}
 	err = s.Checkpoint(ctx, true)
 	if err != nil {
 		// Deliberately no detached rescue (RFC 0009 §4.2): the plan is
@@ -1083,6 +1138,10 @@ func (s *syncer) Sync(ctx context.Context) error {
 	if err != nil {
 		return s.returnSyncError(l, span, err)
 	}
+	// EndSync built the authoritative whole-file grant digest. Persisting the
+	// graph now binds it to that exact sealed grant generation. A crash before
+	// this write leaves no reusable graph and therefore fails safe.
+	s.persistEntitlementGraphToStore(ctx, syncID, graphToPersist)
 
 	// The sync is sealed: publish the verification the invariant pass
 	// staged. Marking only after EndSync keeps the marker off unfinished
@@ -1896,7 +1955,29 @@ func (s *syncer) shouldSkipGrants(ctx context.Context, r *v2.Resource) (bool, er
 		return true, nil
 	}
 
-	return s.shouldSkipEntitlementsAndGrants(ctx, r)
+	// Check SkipEntitlementsAndGrants at instance or resource-type scope.
+	ok, err := s.shouldSkipEntitlementsAndGrants(ctx, r)
+	if err != nil || ok {
+		return ok, err
+	}
+
+	// Check SkipGrants at resource-type scope.
+	if skip, ok := s.skipGrantsForResourceType.Load(r.GetId().GetResourceType()); ok {
+		return skip, nil
+	}
+
+	rt, err := s.store.GetResourceType(ctx, reader_v2.ResourceTypesReaderServiceGetResourceTypeRequest_builder{
+		ResourceTypeId: r.GetId().GetResourceType(),
+	}.Build())
+	if err != nil {
+		return false, err
+	}
+
+	rtAnnos := annotations.Annotations(rt.GetResourceType().GetAnnotations())
+	skipGrants := rtAnnos.Contains(&v2.SkipGrants{})
+	s.skipGrantsForResourceType.Store(r.GetId().GetResourceType(), skipGrants)
+
+	return skipGrants, nil
 }
 
 // No span here: shouldSkipEntitlements is called per-resource and almost
@@ -3967,21 +4048,27 @@ func WithExternalResourceC1ZPath(path string) SyncOpt {
 	}
 }
 
-// WithPreviousSyncC1ZPath points ETag-replay at a separate c1z holding
-// the previous sync, instead of reading a previous sync from inside the
-// live store.
+// WithPreviousSyncC1ZPath registers a separate c1z holding the previous sync
+// for replay features.
+//
+// Advanced: source-cache replay is advanced, opt-in functionality (see
+// pkg/sourcecache); most callers should not set this option.
 //
 // This is required for the single-sync v3 (Pebble) engine: a Pebble c1z
 // holds exactly one sync by contract, so there is no in-file "previous
-// sync" to replay from (StartNewSync replaces the prior sync). Supplying
-// the prior run's c1z here lets the syncer recover unchanged resources'
-// ETags and carry their grants forward across runs. When unset, replay
-// falls back to reading a previous sync from the live store (the SQLite
-// multi-sync behavior), so existing callers are unaffected.
+// sync" to replay from (StartNewSync replaces the prior sync). NewSyncer
+// currently validates and retains the eligible reader as orchestration
+// scaffolding; the ETag read/carry-forward path does not yet consume it.
 //
-// The file is opened read-only and engine-agnostically (the magic byte
-// selects SQLite or Pebble), so the previous-sync c1z may use either
-// engine.
+// The explicitly named file is strict: open, metadata-read, and close failures
+// are returned. A valid file whose run is simply ineligible warns and degrades
+// to a cold sync. Use WithOptionalPreviousSyncC1ZPath for cache-style inputs
+// where every unusable-file failure must degrade instead.
+//
+// The file is opened read-only and engine-agnostically so its format can be
+// diagnosed, but source-cache replay currently requires a Pebble artifact.
+// SQLite inputs are valid c1z files but are treated as cold inputs because they
+// do not carry the replay indexes and compaction provenance this gate requires.
 func WithPreviousSyncC1ZPath(path string) SyncOpt {
 	return func(s *syncer) {
 		s.previousSyncC1ZPath = path
@@ -3992,11 +4079,12 @@ func WithPreviousSyncC1ZPath(path string) SyncOpt {
 // WithOptionalPreviousSyncC1ZPath is WithPreviousSyncC1ZPath with
 // best-effort semantics: if the file is missing, corrupt, or written by
 // an incompatible SDK, NewSyncer logs and proceeds WITHOUT replay
-// instead of failing. Intended for cache-style replay sources the
+// instead of failing. Advanced, opt-in functionality like its strict
+// twin — see pkg/sourcecache. Intended for cache-style replay sources the
 // caller maintains automatically (the service-mode previous-sync spare)
 // — a bad cache file must never fail a sync. Callers that name a
 // specific file deliberately should use WithPreviousSyncC1ZPath, which
-// surfaces open failures.
+// surfaces open, metadata-read, and close failures.
 func WithOptionalPreviousSyncC1ZPath(path string) SyncOpt {
 	return func(s *syncer) {
 		s.previousSyncC1ZPath = path
@@ -4074,6 +4162,15 @@ func WithOnlyExpandGrants() SyncOpt {
 func WithCompactionMergedStore() SyncOpt {
 	return func(s *syncer) {
 		s.compactionMergedStore = true
+	}
+}
+
+// WithPreserveEntitlementGraph preserves the entitlement graph for later
+// incremental expansion. Pebble stores it in the c1z sidecar; stores without
+// that capability retain it in the final sync token as a legacy fallback.
+func WithPreserveEntitlementGraph() SyncOpt {
+	return func(s *syncer) {
+		s.preserveEntitlementGraph = true
 	}
 }
 
@@ -4219,14 +4316,63 @@ func NewSyncer(ctx context.Context, c types.ConnectorClient, opts ...SyncOpt) (S
 
 	if s.previousSyncC1ZPath != "" {
 		// Open the previous-sync c1z read-only and engine-agnostically
-		// (NewStore selects the engine from the file's magic byte), so a
-		// Pebble or SQLite prior run both work as a replay source.
+		// (NewStore selects the engine from the file's magic byte), then
+		// require Pebble: source-cache manifests and replay indexes are a
+		// Pebble capability, so SQLite artifacts are cold inputs.
 		previousSyncStore, err := dotc1z.NewStore(ctx, s.previousSyncC1ZPath,
 			dotc1z.WithReadOnly(true),
 			dotc1z.WithTmpDir(s.tmpDir),
 		)
 		switch {
 		case err == nil:
+			if _, ok := enginepkg.AsEngine(previousSyncStore); !ok {
+				if closeErr := previousSyncStore.Close(ctx); closeErr != nil {
+					if s.previousSyncC1ZPathOptional {
+						ctxzap.Extract(ctx).Warn("non-Pebble previous-sync c1z could not close cleanly; syncing without source-cache replay",
+							zap.String("previous_sync_c1z_path", s.previousSyncC1ZPath),
+							zap.Error(closeErr),
+						)
+						break
+					}
+					return nil, fmt.Errorf("error closing non-Pebble previous-sync c1z %q: %w", s.previousSyncC1ZPath, closeErr)
+				}
+				ctxzap.Extract(ctx).Warn("previous-sync c1z uses an engine that is not replay-eligible; syncing without source-cache replay",
+					zap.String("previous_sync_c1z_path", s.previousSyncC1ZPath),
+				)
+				break
+			}
+			run, metaErr := previousSyncStore.SyncMeta().LatestFinishedSyncOfAnyType(ctx)
+			if metaErr != nil {
+				closeErr := previousSyncStore.Close(ctx)
+				if s.previousSyncC1ZPathOptional {
+					ctxzap.Extract(ctx).Warn("previous-sync c1z metadata unusable; syncing without source-cache replay",
+						zap.String("previous_sync_c1z_path", s.previousSyncC1ZPath),
+						zap.Error(errors.Join(metaErr, closeErr)),
+					)
+					break
+				}
+				return nil, fmt.Errorf(
+					"error reading previous-sync c1z %q metadata: %w",
+					s.previousSyncC1ZPath,
+					errors.Join(metaErr, closeErr),
+				)
+			}
+			if run == nil || !run.UsableAsReplaySource() {
+				if closeErr := previousSyncStore.Close(ctx); closeErr != nil {
+					if s.previousSyncC1ZPathOptional {
+						ctxzap.Extract(ctx).Warn("ineligible previous-sync c1z could not close cleanly; syncing without source-cache replay",
+							zap.String("previous_sync_c1z_path", s.previousSyncC1ZPath),
+							zap.Error(closeErr),
+						)
+						break
+					}
+					return nil, fmt.Errorf("error closing ineligible previous-sync c1z %q: %w", s.previousSyncC1ZPath, closeErr)
+				}
+				ctxzap.Extract(ctx).Warn("previous-sync c1z is not replay-eligible; syncing without source-cache replay",
+					zap.String("previous_sync_c1z_path", s.previousSyncC1ZPath),
+				)
+				break
+			}
 			s.previousSyncReader = previousSyncStore
 		case s.previousSyncC1ZPathOptional:
 			// Best-effort replay source (see WithOptionalPreviousSyncC1ZPath):

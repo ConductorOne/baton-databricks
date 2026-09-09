@@ -3,6 +3,7 @@ package databricks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,11 +13,40 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
+	"google.golang.org/grpc/codes"
 )
 
 const (
 	AlreadyExists = "AlreadyExists"
 )
+
+// wrapTransportAuthError maps an OAuth2 token-retrieval failure to a gRPC
+// status. It happens in the oauth2 transport before any API response, so uhttp
+// never sees an HTTP status and the error would otherwise surface as Unknown.
+// oauth2 returns RetrieveError for any non-2xx from the token endpoint, so a
+// transient 5xx must stay retryable (Unavailable) rather than look like bad
+// credentials. A missing Response falls back to Unauthenticated.
+func wrapTransportAuthError(err error) error {
+	var retrieveErr *oauth2.RetrieveError
+	if !errors.As(err, &retrieveErr) {
+		return err
+	}
+
+	code := codes.Unauthenticated
+	if retrieveErr.Response != nil {
+		switch status := retrieveErr.Response.StatusCode; {
+		case status == http.StatusForbidden:
+			code = codes.PermissionDenied
+		case status == http.StatusTooManyRequests:
+			code = codes.Unavailable
+		case status >= 500:
+			code = codes.Unavailable
+		}
+	}
+
+	return uhttp.WrapErrors(code, "databricks-connector: authentication failed", err)
+}
 
 // APIError represents an error response from the Databricks API.
 type APIError struct {
@@ -38,6 +68,24 @@ func (e *APIError) Error() string {
 
 func (e *APIError) Unwrap() error {
 	return e.Err
+}
+
+// nameWorkspace403Remedy enriches a 403 from a workspace-scoped call with the
+// fix: excluding the workspace scopes it out of the sync. workspaceId is empty
+// for account-scoped calls, where a 403 is not a per-workspace access problem,
+// so those pass through untouched.
+func nameWorkspace403Remedy(workspaceId string, err error) error {
+	if workspaceId == "" || err == nil {
+		return err
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
+		return fmt.Errorf(
+			"workspace %s is inaccessible (403); remove it from --databricks-workspaces, or scope it out with --databricks-exclude-workspaces (BATON_DATABRICKS_EXCLUDE_WORKSPACES): %w",
+			workspaceId, err,
+		)
+	}
+	return err
 }
 
 func (c *Client) Get(
@@ -163,7 +211,7 @@ func (c *Client) doRequest(
 		uhttp.WithRatelimitData(ratelimitData),
 	)
 	if resp == nil {
-		return ratelimitData, err
+		return ratelimitData, wrapTransportAuthError(err)
 	}
 
 	defer resp.Body.Close()
@@ -237,7 +285,7 @@ func (c *Client) doRequestNoResponse(
 		uhttp.WithRatelimitData(ratelimitData),
 	)
 	if resp == nil {
-		return ratelimitData, err
+		return ratelimitData, wrapTransportAuthError(err)
 	}
 
 	defer resp.Body.Close()

@@ -108,6 +108,15 @@ func WithConvertTmpDir(dir string) ConvertOption {
 // goroutine). The default — min(4, GOMAXPROCS/2) — leaves headroom for
 // shared infrastructure; callers that own the machine can raise it, and
 // 1 fully serializes the grant scan. Values <= 0 are ignored.
+//
+// Sort memory is budgeted, not proportional to fan-out, up to a point:
+// the bulk import sizes its spill chunks from a fixed budget divided by
+// the arena count the lane count implies (see pebble's
+// bulkImportSortBudgetBytes), so up to ~14 lanes more lanes mean smaller
+// chunks and a wider final merge — more open chunk files and read buffers
+// at Finish — rather than more RSS during the scan. Past that the chunk
+// size hits its 16MiB floor and sort memory grows again, by roughly four
+// 16MiB arenas per additional lane.
 func WithConvertParallelism(n int) ConvertOption {
 	return func(c *convertConfig) {
 		if n > 0 {
@@ -171,17 +180,23 @@ type syncIDPreservingStarter interface {
 // .c1z written to outPath, which must not already exist.
 //
 // It uses the engine's BulkSyncImport SST fast path: each record table is
-// streamed out of SQLite once, in primary-key order via `ORDER BY` on the
-// key's tuple columns (SQLite BINARY collation is bytewise, and the engine's
-// tuple key codec is order-preserving, so SQL order == encoded-key order —
-// enforced at runtime by the importer's strictly-increasing check). Primary
-// records stream straight into one sorted SST per bucket; secondary index
-// keys are derived from the translated records and externally sorted into
-// one index SST; everything is ingested in a single pebble Ingest. No
-// memtable, no WAL, no L0 flush, no background compaction debt.
+// streamed out of SQLite once. Resource types are scanned in primary-key
+// order via `ORDER BY` on the key column (SQLite BINARY collation is
+// bytewise and the engine's tuple key codec is order-preserving, so SQL
+// order == encoded-key order — enforced at runtime by the importer's
+// strictly-increasing check) and stream straight into one sorted SST.
+// Resources, entitlements, and grants are keyed by tuples whose order the
+// scan cannot cheaply reproduce, so the importer spill-sorts them (and the
+// secondary index keys derived from them) into sorted runs and k-way
+// merges each family into one SST at Finish; everything is ingested in a
+// single pebble Ingest. No memtable, no WAL, no L0 flush, no background
+// compaction debt.
 //
 // SQLite's UNIQUE(external_id, sync_id) indexes provide the no-duplicates
-// guarantee the importer requires.
+// guarantee the importer requires for resource types, resources, and
+// entitlements. Grants are keyed by structural identity (entitlement +
+// principal refs), which that index does not cover; legacy rows sharing an
+// identity under distinct external ids fold at Finish with a warning.
 //
 // syncID selects the source sync to convert; the destination holds that one
 // sync and nothing else, so every other sync in the source is dropped. Those
@@ -200,9 +215,8 @@ type syncIDPreservingStarter interface {
 //
 // When the source has no sync runs at all, "" writes an empty Pebble c1z (so
 // convert-open succeeds on never-synced files). If sync runs exist but none
-// match the selected resolve behavior (e.g. diff-only under Newest), ""
-// returns an error rather than discarding data. Pass an explicit syncID to
-// convert a specific sync (including diff syncs for fixture seeding). The
+// match the selected resolve behavior, "" returns an error rather than
+// discarding data. Pass an explicit syncID to convert a specific sync. The
 // destination sync is written ended when the source was finished; when the
 // source was unfinished, EndSync still runs (indexes/digests/stats/flush) but
 // ended_at is cleared and the source sync_token is preserved so the sync
@@ -214,11 +228,10 @@ type syncIDPreservingStarter interface {
 // since nothing resumes a sealed sync and the connector lifecycle deletes them
 // at that point anyway.
 //
-// The sync's lineage columns — parent_sync_id, linked_sync_id, supports_diff —
-// are preserved too. They reference syncs that the single-sync destination
-// cannot hold, but those references are meaningful across files: dropping them
-// would make a converted partial read as a standalone snapshot and a
-// diff-capable sync read as non-diffable.
+// The sync's lineage columns — parent_sync_id, supports_diff — are preserved
+// too. The parent reference names a sync the single-sync destination cannot
+// hold, but it is meaningful across files: dropping it would make a converted
+// partial read as a standalone snapshot.
 //
 // The Pebble engine is registered statically with dotc1z; no extra
 // imports are needed before calling.
@@ -334,7 +347,7 @@ func (c *C1File) ToPebble(ctx context.Context, outPath string, syncID string, op
 	if !ok {
 		return nil, errors.New("to-pebble: destination store is not a pebble engine")
 	}
-	bi, err := destEng.StartBulkSyncImport(ctx, destSyncID, cfg.tmpDir)
+	bi, err := destEng.StartBulkSyncImport(ctx, destSyncID, cfg.tmpDir, cfg.grantScanLanes())
 	if err != nil {
 		return nil, fmt.Errorf("to-pebble: start bulk import: %w", err)
 	}
@@ -399,7 +412,6 @@ func (c *C1File) ToPebble(ctx context.Context, outPath string, syncID string, op
 	if err != nil {
 		return nil, fmt.Errorf("to-pebble: load destination sync metadata: %w", err)
 	}
-	rec.SetLinkedSyncId(sync.LinkedSyncID)
 	rec.SetSupportsDiff(sync.SupportsDiff)
 	// Localized on the way in: these scanned wall clocks become absolute
 	// instants in the Pebble record, and Pebble's resume cutoff compares
@@ -459,9 +471,7 @@ func (c *C1File) ToPebble(ctx context.Context, outPath string, syncID string, op
 }
 
 // discardedSyncs lists the source syncs a conversion that keeps keepSyncID
-// leaves behind, in sync_runs order. Diff-pair syncs are included: they are
-// dropped from the artifact too, and their absence is what an operator chasing
-// a missing delta needs to see.
+// leaves behind, in sync_runs order.
 //
 // Metadata only. ListSyncRuns reads the sync_runs rows and parses the cached
 // stats blob when one is present; unlike GetSync it never recomputes stats, so
@@ -532,14 +542,6 @@ func discardedSyncFields(discarded []DiscardedSync) []zap.Field {
 // chosen when it is all there is (newest started_at among them), since
 // convert-open must not fail on such a file. Unfinished syncs within the
 // cutoff are live work and keep competing on started_at alone.
-//
-// The excluded types are the diff pair written by attached-file diffing,
-// partial_upserts and partial_deletions: each holds one side of a delta and
-// is meaningless converted alone. GenerateSyncDiff's delta sync is NOT
-// excluded — it is stored as a plain partial (diff.go), indistinguishable
-// from a targeted sync by type, parent_sync_id, or supports_diff — so on a
-// file that was just diffed and holds no newer sync, "" resolves to the
-// delta.
 func (c *C1File) resolveConvertSyncID(ctx context.Context) (string, error) {
 	q := c.db.From(syncRuns.Name()).Prepared(true).
 		Select("sync_id").
@@ -810,6 +812,20 @@ func (c *C1File) convertEntitlements(ctx context.Context, bi *pebble.BulkSyncImp
 // via WithConvertParallelism.
 const convertGrantScanLanes = 4
 
+// grantScanLanes returns the grant scan fan-out the conversion will
+// attempt: the caller's WithConvertParallelism when set, otherwise half
+// the available CPUs capped at convertGrantScanLanes, never below 1.
+// convertGrants may still fall back to a single lane if the extra sqlite
+// readers cannot attach; the value here is also what the bulk import
+// sizes its spill arenas for, so it is computed once up front.
+func (cfg *convertConfig) grantScanLanes() int {
+	lanes := min(convertGrantScanLanes, max(1, runtime.GOMAXPROCS(0)/2))
+	if cfg.parallelism > 0 {
+		lanes = cfg.parallelism
+	}
+	return max(1, lanes)
+}
+
 // rawGrantRow is one grant row's raw column bytes, copied out of the
 // scan into a batch-owned arena so decoding can happen on another
 // goroutine after the scanner has moved on, plus the row's
@@ -822,13 +838,13 @@ type rawGrantRow struct {
 
 // convertGrants streams the sync's grants into the bulk import. The
 // scan shards by EXTERNAL ID range over the UNIQUE(external_id,
-// sync_id) index: each lane's ordered range scan yields rows already in
-// the shard's final pebble key order, so grant primaries stream
-// straight into one final SST per lane — no spill, no external sort, no
-// merge (see BulkGrantShard). Range boundaries come from sampling
-// external ids at random rowids and taking quantiles; uneven lanes only
-// cost balance, never correctness, and pebble's Ingest rejects
-// overlapping shard SSTs outright.
+// sync_id) index purely to spread the SQLite read and decode work across
+// lanes: grants are keyed by structural identity, whose order the
+// external-id scan does not reproduce, so each shard spill-sorts its
+// primaries and index keys and Finish k-way merges every shard's runs
+// into one grants SST (see BulkGrantShard). Range boundaries come from
+// sampling external ids at random rowids and taking quantiles; uneven
+// lanes only cost balance, never correctness.
 //
 // Each lane is a two-stage pipeline: a reader goroutine does nothing
 // but step rows and memcpy the raw (data, expansion) column bytes into
@@ -854,13 +870,7 @@ func (c *C1File) convertGrants(ctx context.Context, bi *pebble.BulkSyncImport, s
 		return nil // no grants in this sync
 	}
 
-	lanes := min(convertGrantScanLanes, max(1, runtime.GOMAXPROCS(0)/2))
-	if cfg.parallelism > 0 {
-		lanes = cfg.parallelism
-	}
-	if lanes < 1 {
-		lanes = 1
-	}
+	lanes := cfg.grantScanLanes()
 	// The C1File's own pool is capped at one connection (WAL checkpoint
 	// hygiene — see NewC1File) and defaults to locking_mode=EXCLUSIVE,
 	// which holds its lock indefinitely once acquired and would starve a

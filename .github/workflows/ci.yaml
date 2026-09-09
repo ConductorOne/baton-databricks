@@ -28,7 +28,7 @@ jobs:
       - name: Test grant/revoking entitlements
         env:
           BATON_DATABRICKS: ./baton-databricks
-        uses: ConductorOne/github-workflows/actions/sync-test@v2
+        uses: ConductorOne/github-workflows/actions/sync-test@v4
         with:
           connector: ./baton-databricks
           baton-entitlement: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/66271399072731:member'

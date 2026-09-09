@@ -83,6 +83,31 @@ func WithMetricsHandler(handler metrics.Handler) WrapperOption {
 	return metricsHandlerOption{handler: handler}
 }
 
+type cacheKeyHeadersWrapperOption struct {
+	opt CacheOption
+}
+
+func (o cacheKeyHeadersWrapperOption) Apply(c *BaseHttpClient) {
+	c.cacheOptions = append(c.cacheOptions, o.opt)
+}
+
+// WithCacheKeyHeaders returns a WrapperOption that additionally folds the
+// named headers into the HTTP response cache key for every request this
+// client makes, on top of the default set (Accept, Content-Type, Cookie,
+// Range). Use this when requests through this client vary by a header the
+// cache wouldn't otherwise key on -- e.g. a per-call Authorization token or
+// a tenant/version header -- so requests that only differ in that header
+// don't collide in the cache. The value folded in is always read from
+// req.Header at request time, so the key can never describe a value other
+// than the one actually sent.
+//
+// Named headers must be set on the request before it reaches Do; a header
+// only added later by a transport-level RoundTripper or a cookie jar is not
+// seen by the cache lookup and will not be reflected in the key.
+func WithCacheKeyHeaders(headers ...string) WrapperOption {
+	return cacheKeyHeadersWrapperOption{opt: CacheKeyHeaders(headers...)}
+}
+
 type WrapperOption interface {
 	Apply(*BaseHttpClient)
 }
@@ -120,6 +145,7 @@ type (
 		rateLimiter    uRateLimit.Limiter
 		baseHttpCache  icache
 		metricsHandler metrics.Handler
+		cacheOptions   []CacheOption
 	}
 
 	DoOption      func(resp *WrapperResponse) error
@@ -233,7 +259,7 @@ func WithAlwaysXMLResponse(response any) DoOption {
 			if resp.StatusCode == http.StatusNoContent {
 				return nil
 			}
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(resp.Body) == 0 {
+			if isSuccessStatusCode(resp.StatusCode) && len(resp.Body) == 0 {
 				return nil
 			}
 			return unmarshalXMLToMap(genericResponse, resp)
@@ -291,6 +317,13 @@ type ErrorResponse interface {
 	Message() string
 }
 
+// isSuccessStatusCode reports whether code is in the 2xx success class.
+// http.StatusOK (200) is the inclusive lower bound and
+// http.StatusMultipleChoices (300) the exclusive upper bound.
+func isSuccessStatusCode(code int) bool {
+	return code >= http.StatusOK && code < http.StatusMultipleChoices
+}
+
 // GrpcCodeFromHTTPStatus maps an HTTP status code to the appropriate gRPC status code.
 func GrpcCodeFromHTTPStatus(httpStatus int) codes.Code {
 	switch httpStatus {
@@ -323,7 +356,7 @@ func GrpcCodeFromHTTPStatus(httpStatus int) codes.Code {
 
 func WithErrorResponse(resource ErrorResponse) DoOption {
 	return func(resp *WrapperResponse) error {
-		if resp.StatusCode < 300 {
+		if resp.StatusCode < http.StatusMultipleChoices {
 			return nil
 		}
 
@@ -399,7 +432,7 @@ func WithGenericResponse(response *map[string]any) DoOption {
 			return nil
 		}
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(resp.Body) == 0 {
+		if isSuccessStatusCode(resp.StatusCode) && len(resp.Body) == 0 {
 			return nil
 		}
 
@@ -495,7 +528,7 @@ func (c *BaseHttpClient) Do(req *http.Request, options ...DoOption) (*http.Respo
 	}
 
 	if req.Method == http.MethodGet && req.Header.Get("Cache-Control") != "no-cache" {
-		resp, err = c.baseHttpCache.Get(req)
+		resp, err = c.baseHttpCache.Get(req, c.cacheOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -561,13 +594,13 @@ func (c *BaseHttpClient) Do(req *http.Request, options ...DoOption) (*http.Respo
 		}
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if !isSuccessStatusCode(resp.StatusCode) {
 		grpcCode := GrpcCodeFromHTTPStatus(resp.StatusCode)
 		return resp, WrapErrorsWithRateLimitInfo(grpcCode, resp, optErrs...)
 	}
 
 	if req.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
-		cacheErr := c.baseHttpCache.Set(req, resp)
+		cacheErr := c.baseHttpCache.Set(req, resp, c.cacheOptions...)
 		if cacheErr != nil {
 			l.Warn("error setting cache", zap.String("url", req.URL.String()), zap.Error(cacheErr))
 		}
