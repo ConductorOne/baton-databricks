@@ -78,17 +78,11 @@ var (
 	)
 	SQLWarehouseIDField = field.StringField(
 		"sql-warehouse-id",
-		field.WithDescription("ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled."),
-		field.WithDisplayName("SQL Warehouse ID"),
-	)
-	SQLWarehouseWorkspaceField = field.StringField(
-		"sql-warehouse-workspace",
 		field.WithDescription(
-			"Deployment name of the workspace that hosts the SQL warehouse (sql-warehouse-id), since SQL warehouses "+
-				"only exist in one workspace. Required when incremental sync is enabled and more than one workspace "+
-				"is available; if omitted with only one workspace available, that workspace is used automatically.",
+			"ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental "+
+				"sync is enabled; the workspace hosting it is discovered automatically.",
 		),
-		field.WithDisplayName("SQL Warehouse Workspace"),
+		field.WithDisplayName("SQL Warehouse ID"),
 	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
@@ -102,7 +96,6 @@ var (
 		ExcludeWorkspacesField,
 		EnableIncrementalSyncField,
 		SQLWarehouseIDField,
-		SQLWarehouseWorkspaceField,
 	}
 )
 
@@ -124,7 +117,7 @@ var Config = field.NewConfiguration(
 			Fields: []field.SchemaField{
 				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
 				HostnameField, AccountHostnameField, WorkspacesField, BaseURLField, ExcludeWorkspacesField,
-				EnableIncrementalSyncField, SQLWarehouseIDField, SQLWarehouseWorkspaceField,
+				EnableIncrementalSyncField, SQLWarehouseIDField,
 			},
 			Default: true,
 		},

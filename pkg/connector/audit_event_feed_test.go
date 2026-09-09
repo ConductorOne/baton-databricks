@@ -43,59 +43,105 @@ func TestResolveSQLWorkspacesTokenAuth(t *testing.T) {
 	}
 }
 
-func TestResolveQueryWorkspace(t *testing.T) {
-	workspaces := []databricks.Workspace{
-		{ID: 1, DeploymentName: "dbc-zzz"},
-		{ID: 2, DeploymentName: "dbc-aaa"},
+// writeJSONNotFound writes a 404 with a JSON body; a plain-text one (e.g. http.NotFound)
+// breaks the client's JSON decoder.
+func writeJSONNotFound(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error_code":"RESOURCE_DOES_NOT_EXIST","message":"not found"}`))
+}
+
+// newProbeTestClient builds a databricks.Client whose requests are redirected to a local
+// httptest.Server running handler (see redirectTransport).
+func newProbeTestClient(t *testing.T, handler http.HandlerFunc) *databricks.Client {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
 	}
 
-	t.Run("pinned workspace is used regardless of alphabetical order", func(t *testing.T) {
-		got, lookup, err := resolveQueryWorkspace(context.Background(), workspaces, "dbc-zzz")
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	auth := databricks.NewTokenAuth(nil, nil)
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	return client
+}
+
+func TestResolveWarehouseWorkspace(t *testing.T) {
+	const warehouseId = "wh-123"
+
+	t.Run("single workspace needs no probe", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Fatalf("unexpected request %s %s: a single workspace should skip probing", r.Method, r.URL.Path)
+		})
+		workspaces := []databricks.Workspace{{ID: 1, DeploymentName: "dbc-only"}}
+
+		got, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
 		if err != nil {
-			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+			t.Fatalf("resolveWarehouseWorkspace() error = %v", err)
 		}
-		if got != "dbc-zzz" {
-			t.Errorf("queryWorkspaceId = %q, want %q", got, "dbc-zzz")
-		}
-		if lookup[1] != "dbc-zzz" || lookup[2] != "dbc-aaa" {
-			t.Errorf("lookup = %+v, want ids 1 and 2 mapped to their deployment names", lookup)
+		if got != "dbc-only" {
+			t.Errorf("got %q, want %q", got, "dbc-only")
 		}
 	})
 
-	t.Run("pinned workspace match is case-insensitive", func(t *testing.T) {
-		got, _, err := resolveQueryWorkspace(context.Background(), workspaces, "DBC-ZZZ")
-		if err != nil {
-			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+	t.Run("probes each workspace until the warehouse is found", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.Header.Get("X-Test-Original-Host"), "dbc-bbb.") {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"id":%q}`, warehouseId)
+				return
+			}
+			writeJSONNotFound(w)
+		})
+		workspaces := []databricks.Workspace{
+			{ID: 1, DeploymentName: "dbc-aaa"},
+			{ID: 2, DeploymentName: "dbc-bbb"},
 		}
-		if got != "dbc-zzz" {
-			t.Errorf("queryWorkspaceId = %q, want %q", got, "dbc-zzz")
+
+		got, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
+		if err != nil {
+			t.Fatalf("resolveWarehouseWorkspace() error = %v", err)
+		}
+		if got != "dbc-bbb" {
+			t.Errorf("got %q, want %q", got, "dbc-bbb")
 		}
 	})
 
-	t.Run("unknown pinned workspace is a clear config error", func(t *testing.T) {
-		_, _, err := resolveQueryWorkspace(context.Background(), workspaces, "dbc-does-not-exist")
+	t.Run("warehouse not found anywhere is a clear error", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			writeJSONNotFound(w)
+		})
+		workspaces := []databricks.Workspace{
+			{ID: 1, DeploymentName: "dbc-aaa"},
+			{ID: 2, DeploymentName: "dbc-bbb"},
+		}
+
+		_, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
 		if err == nil {
-			t.Fatal("resolveQueryWorkspace() error = nil, want error for unresolvable sql-warehouse-workspace")
+			t.Fatal("resolveWarehouseWorkspace() error = nil, want error when no workspace has the warehouse")
 		}
 	})
 
-	t.Run("no pin falls back to the arbitrary alphabetical pick", func(t *testing.T) {
-		got, _, err := resolveQueryWorkspace(context.Background(), workspaces, "")
-		if err != nil {
-			t.Fatalf("resolveQueryWorkspace() error = %v", err)
+	t.Run("a real error from a probe is returned, not swallowed as not-found", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		})
+		workspaces := []databricks.Workspace{
+			{ID: 1, DeploymentName: "dbc-aaa"},
+			{ID: 2, DeploymentName: "dbc-bbb"},
 		}
-		if got != "dbc-aaa" {
-			t.Errorf("queryWorkspaceId = %q, want %q (sqlQueryWorkspace's default)", got, "dbc-aaa")
-		}
-	})
 
-	t.Run("single workspace needs no pin", func(t *testing.T) {
-		got, _, err := resolveQueryWorkspace(context.Background(), workspaces[:1], "")
-		if err != nil {
-			t.Fatalf("resolveQueryWorkspace() error = %v", err)
-		}
-		if got != "dbc-zzz" {
-			t.Errorf("queryWorkspaceId = %q, want %q", got, "dbc-zzz")
+		_, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
+		if err == nil {
+			t.Fatal("resolveWarehouseWorkspace() error = nil, want a propagated probe error")
 		}
 	})
 }
@@ -549,9 +595,13 @@ type redirectTransport struct {
 
 func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
+	originalHost := req.URL.Host
 	req.URL.Scheme = t.target.Scheme
 	req.URL.Host = t.target.Host
 	req.Host = t.target.Host
+	// Preserve the workspace-specific host the client intended, since it's otherwise lost
+	// once every request is rewritten to the same local test server.
+	req.Header.Set("X-Test-Original-Host", originalHost)
 	return http.DefaultTransport.RoundTrip(req)
 }
 
@@ -626,7 +676,7 @@ func TestListEventsEndToEnd(t *testing.T) {
 	// Mirrors what Validate() sets before any sync/event-feed call runs in production.
 	client.UpdateAvailability(true, true)
 
-	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1", "ws1")
+	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1")
 
 	events, streamState, annos, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
 	if err != nil {

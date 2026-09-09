@@ -2,7 +2,9 @@ package databricks
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 const (
 	statementsEndpoint = "/api/2.0/sql/statements"
+	warehousesEndpoint = "/api/2.0/sql/warehouses"
 
 	statementWaitTimeout  = "30s"
 	statementPollInterval = 2 * time.Second
@@ -227,4 +230,22 @@ func (c *Client) ValidateAuditLogAccess(ctx context.Context, workspaceId, wareho
 		return fmt.Errorf("failed to query system.access.audit: %w", err)
 	}
 	return nil
+}
+
+// WarehouseExists reports whether warehouseId exists in workspaceId, since SQL warehouses
+// are workspace-scoped with no account-level lookup.
+func (c *Client) WarehouseExists(ctx context.Context, workspaceId, warehouseId string) (bool, *v2.RateLimitDescription, error) {
+	u := c.workspaceUrl(workspaceId).JoinPath(warehousesEndpoint, warehouseId)
+
+	var res struct{}
+	rateLimit, err := c.Get(ctx, u, &res)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return false, rateLimit, nil
+		}
+		return false, rateLimit, err
+	}
+
+	return true, rateLimit, nil
 }

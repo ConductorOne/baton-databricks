@@ -25,7 +25,6 @@ type Databricks struct {
 	workspaces            []string
 	enableIncrementalSync bool
 	sqlWarehouseID        string
-	sqlWarehouseWorkspace string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -46,7 +45,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 // gates its behavior inside ListEvents instead.
 func (d *Databricks) EventFeeds(ctx context.Context) []connectorbuilder.EventFeed {
 	return []connectorbuilder.EventFeed{
-		newAuditEventFeed(d.client, d.workspaces, d.enableIncrementalSync, d.sqlWarehouseID, d.sqlWarehouseWorkspace),
+		newAuditEventFeed(d.client, d.workspaces, d.enableIncrementalSync, d.sqlWarehouseID),
 	}
 }
 
@@ -185,7 +184,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 			return nil, fmt.Errorf("databricks-connector: incremental sync requires at least one workspace to query system.access.audit")
 		}
 
-		queryWorkspaceId, _, err := resolveQueryWorkspace(ctx, auditWorkspaces, d.sqlWarehouseWorkspace)
+		queryWorkspaceId, _, err := resolveWarehouseWorkspace(ctx, d.client, auditWorkspaces, d.sqlWarehouseID)
 		if err != nil {
 			return nil, err
 		}
@@ -215,7 +214,6 @@ func New(
 	workspaces []string,
 	enableIncrementalSync bool,
 	sqlWarehouseID string,
-	sqlWarehouseWorkspace string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -232,7 +230,6 @@ func New(
 		workspaces:            workspaces,
 		enableIncrementalSync: enableIncrementalSync,
 		sqlWarehouseID:        sqlWarehouseID,
-		sqlWarehouseWorkspace: sqlWarehouseWorkspace,
 	}, nil
 }
 
@@ -263,7 +260,6 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.Workspaces,
 		cfg.EnableIncrementalSync,
 		cfg.SqlWarehouseId,
-		cfg.SqlWarehouseWorkspace,
 	)
 	if err != nil {
 		return nil, nil, err
