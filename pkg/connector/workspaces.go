@@ -305,6 +305,14 @@ func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, p
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get workspace %s: %w", resourceId.Resource, err)
 	}
 
+	// Mirror List's --workspaces allowlist so a targeted re-sync can't resurrect a
+	// workspace that was deliberately excluded from the configured set.
+	if len(w.workspaces) > 0 {
+		if _, ok := matchConfiguredWorkspace(w.workspaces, workspace.DeploymentName, workspace.Name, strconv.Itoa(workspace.ID)); !ok {
+			return nil, nil, fmt.Errorf("databricks-connector: workspace %s is not configured", resourceId.Resource)
+		}
+	}
+
 	resource, err := workspaceResource(ctx, workspace, parentResourceId)
 	if err != nil {
 		return nil, nil, err

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,7 @@ func auditLogActionNames() []string {
 	for name := range auditLogActions {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -175,7 +177,7 @@ func (f *auditEventFeed) ListEvents(
 
 	if cursor.StartAt.IsZero() {
 		start := now.Add(-auditLogLookback)
-		if earliestEvent != nil && earliestEvent.AsTime().After(start) {
+		if earliestEvent != nil {
 			start = earliestEvent.AsTime()
 		}
 		cursor = eventPageCursor{StartAt: start}
@@ -255,7 +257,15 @@ func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool
 	}
 
 	if hasMore {
-		return eventPageCursor{StartAt: latest, StartAfterEventID: lastEventID, LatestEventSeen: latest}
+		startAt := latest
+		startAfterEventID := lastEventID
+		// Clamp intra-page advances to the trailing-lag boundary; otherwise the never-regress
+		// floor below would permanently defeat auditLogTrailingLag for this burst.
+		if laggedFloor := now.Add(-auditLogTrailingLag); startAt.After(laggedFloor) {
+			startAt = laggedFloor
+			startAfterEventID = ""
+		}
+		return eventPageCursor{StartAt: startAt, StartAfterEventID: startAfterEventID, LatestEventSeen: latest}
 	}
 
 	target := latest.Add(-auditLogTrailingLag)
@@ -364,7 +374,27 @@ func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, config
 	}
 
 	workspaces, _, err := client.ListWorkspaces(ctx)
-	return workspaces, err
+	if err != nil {
+		return nil, err
+	}
+
+	if len(configuredWorkspaces) == 0 {
+		return workspaces, nil
+	}
+
+	configured := make(map[string]struct{}, len(configuredWorkspaces))
+	for _, name := range configuredWorkspaces {
+		configured[name] = struct{}{}
+	}
+
+	filtered := make([]databricks.Workspace, 0, len(workspaces))
+	for _, w := range workspaces {
+		if _, ok := matchConfiguredWorkspace(configured, w.DeploymentName, w.Name, strconv.Itoa(w.ID)); ok {
+			filtered = append(filtered, w)
+		}
+	}
+
+	return filtered, nil
 }
 
 // resolveQueryWorkspace picks the workspace to run the audit-log query against, preferring
@@ -476,14 +506,23 @@ func parseAuditLogRows(result *databricks.StatementResult) ([]auditLogRow, error
 		colIndex[name] = i
 	}
 
+	maxColIndex := 0
 	for _, name := range []string{colEventID, colEventTime, colWorkspaceID, colActionName, colRequestParams} {
-		if _, ok := colIndex[name]; !ok {
+		idx, ok := colIndex[name]
+		if !ok {
 			return nil, fmt.Errorf("audit log query result missing column %q", name)
+		}
+		if idx > maxColIndex {
+			maxColIndex = idx
 		}
 	}
 
 	rows := make([]auditLogRow, 0, len(result.Rows))
 	for _, r := range result.Rows {
+		if len(r) <= maxColIndex {
+			return nil, fmt.Errorf("audit log query result row has %d columns, expected at least %d", len(r), maxColIndex+1)
+		}
+
 		eventTime, err := time.Parse("2006-01-02 15:04:05.999", r[colIndex[colEventTime]])
 		if err != nil {
 			eventTime, err = time.Parse(time.RFC3339, r[colIndex[colEventTime]])

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/config"
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -14,6 +15,10 @@ import (
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 )
+
+// validateAuditLogAccessTimeout bounds the one-off audit-log probe in Validate() so a cold
+// warehouse doesn't hang credential validation for minutes.
+const validateAuditLogAccessTimeout = 90 * time.Second
 
 type Databricks struct {
 	client                *databricks.Client
@@ -184,7 +189,10 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		if err != nil {
 			return nil, err
 		}
-		if err := d.client.ValidateAuditLogAccess(ctx, queryWorkspaceId, d.sqlWarehouseID); err != nil {
+		validateCtx, cancel := context.WithTimeout(ctx, validateAuditLogAccessTimeout)
+		err = d.client.ValidateAuditLogAccess(validateCtx, queryWorkspaceId, d.sqlWarehouseID)
+		cancel()
+		if err != nil {
 			return nil, fmt.Errorf(
 				"databricks-connector: incremental sync is enabled but the connector cannot query system.access.audit via warehouse %s: %w",
 				d.sqlWarehouseID, err,

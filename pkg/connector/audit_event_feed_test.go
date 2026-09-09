@@ -121,7 +121,9 @@ func TestDecodeEventCursorSelfHeals(t *testing.T) {
 	}
 }
 
-func TestAdvanceEventCursorFullPageAdvancesWithoutTrailingLag(t *testing.T) {
+// TestAdvanceEventCursorFullPageAdvancesPastLagWindow verifies that a full page of rows
+// older than the trailing-lag boundary still advances StartAt to the last row processed.
+func TestAdvanceEventCursorFullPageAdvancesPastLagWindow(t *testing.T) {
 	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	cursor := eventPageCursor{StartAt: startAt}
 
@@ -130,14 +132,57 @@ func TestAdvanceEventCursorFullPageAdvancesWithoutTrailingLag(t *testing.T) {
 		{EventID: "2", EventTime: startAt.Add(2 * time.Minute)},
 	}
 
-	next := advanceEventCursor(cursor, rows, true, startAt.Add(10*time.Minute))
+	// now is far enough past the rows that startAt+2min is still older than
+	// now-auditLogTrailingLag, so the lag clamp shouldn't kick in.
+	now := startAt.Add(2*time.Minute + auditLogTrailingLag + time.Hour)
+
+	next := advanceEventCursor(cursor, rows, true, now)
 
 	wantStart := startAt.Add(2 * time.Minute)
 	if !next.StartAt.Equal(wantStart) {
-		t.Errorf("StartAt = %v, want %v (no trailing lag while more pages remain)", next.StartAt, wantStart)
+		t.Errorf("StartAt = %v, want %v (rows are older than the lag window, so no clamp)", next.StartAt, wantStart)
 	}
 	if next.StartAfterEventID != "2" {
 		t.Errorf("StartAfterEventID = %q, want %q", next.StartAfterEventID, "2")
+	}
+}
+
+// TestAdvanceEventCursorFullPageClampsToLagWindow verifies intra-page paging never
+// advances StartAt past now-auditLogTrailingLag when the rows are within the lag window.
+func TestAdvanceEventCursorFullPageClampsToLagWindow(t *testing.T) {
+	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cursor := eventPageCursor{StartAt: startAt}
+
+	rows := []auditLogRow{
+		{EventID: "1", EventTime: startAt.Add(1 * time.Minute)},
+		{EventID: "2", EventTime: startAt.Add(2 * time.Minute)},
+	}
+
+	// now is close to the rows' timestamps, so startAt+2min falls inside the lag window.
+	now := startAt.Add(10 * time.Minute)
+
+	next := advanceEventCursor(cursor, rows, true, now)
+
+	wantStart := now.Add(-auditLogTrailingLag)
+	if !next.StartAt.Equal(wantStart) {
+		t.Errorf("StartAt = %v, want %v (clamped to the trailing-lag boundary)", next.StartAt, wantStart)
+	}
+	if next.StartAfterEventID != "" {
+		t.Errorf("StartAfterEventID = %q, want empty (clamped boundary doesn't tie to a real row)", next.StartAfterEventID)
+	}
+
+	// Once the burst drains, the trailing lag must still apply going forward.
+	drainedLatest := startAt.Add(3 * time.Hour)
+	drainedRows := []auditLogRow{{EventID: "3", EventTime: drainedLatest}}
+	drainedNow := drainedLatest.Add(5 * time.Minute)
+	drained := advanceEventCursor(next, drainedRows, false, drainedNow)
+
+	wantDrainedStart := drainedLatest.Add(-auditLogTrailingLag)
+	if !drained.StartAt.Equal(wantDrainedStart) {
+		t.Errorf("drained StartAt = %v, want %v (trailing lag re-applied after drain)", drained.StartAt, wantDrainedStart)
+	}
+	if !drained.StartAt.After(next.StartAt) {
+		t.Errorf("drained StartAt = %v did not advance past the clamped intra-page StartAt %v", drained.StartAt, next.StartAt)
 	}
 }
 

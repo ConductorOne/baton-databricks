@@ -179,13 +179,15 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 }
 
 // cancelStatement best-effort cancels a statement we've given up polling on, using a fresh
-// context since ctx/pollCtx may already be done.
+// context since ctx/pollCtx may already be done. Uses /cancel, not DELETE (which only closes
+// an already-terminal statement and wouldn't stop one still running).
 func (c *Client) cancelStatement(workspaceId, statementId string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, statementId)
-	if _, err := c.Delete(ctx, u); err != nil {
+	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, statementId, "cancel")
+	response := struct{}{}
+	if _, err := c.Post(ctx, u, nil, &response); err != nil {
 		ctxzap.Extract(ctx).Warn("failed to cancel timed-out sql statement", zap.String("statement_id", statementId), zap.Error(err))
 	}
 }

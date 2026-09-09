@@ -24,6 +24,8 @@ By default, the Databricks connector picks up access changes on its regular sync
 
 Turning this on requires a small Databricks SQL warehouse and a one-time setup step performed by a Databricks admin (granting the connector read access to Databricks' `system.access` activity log). Ask your connector operator or C1 support contact to enable it for you.
 
+Incremental sync requires OAuth2 (service principal) authentication — it's not available with workspace tokens, since the Account API needed to resolve audit events back to synced resources is unreachable that way.
+
 ## Gather Databricks credentials
 
 Configuring the connector requires you to pass in credentials generated in Databricks. Gather these credentials before you move on.
