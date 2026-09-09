@@ -70,6 +70,20 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
+	EnableIncrementalSyncField = field.BoolField(
+		"enable-incremental-sync",
+		field.WithDescription("Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync."),
+		field.WithDisplayName("Enable Incremental Sync"),
+		field.WithDefaultValue(false),
+	)
+	SQLWarehouseIDField = field.StringField(
+		"sql-warehouse-id",
+		field.WithDescription(
+			"ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental "+
+				"sync is enabled; the workspace hosting it is discovered automatically.",
+		),
+		field.WithDisplayName("SQL Warehouse ID"),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -80,6 +94,8 @@ var (
 		WorkspaceTokensField,
 		BaseURLField,
 		ExcludeWorkspacesField,
+		EnableIncrementalSyncField,
+		SQLWarehouseIDField,
 	}
 )
 
@@ -101,6 +117,7 @@ var Config = field.NewConfiguration(
 			Fields: []field.SchemaField{
 				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
 				HostnameField, AccountHostnameField, WorkspacesField, ExcludeWorkspacesField,
+				EnableIncrementalSyncField, SQLWarehouseIDField,
 			},
 			Default: true,
 		},
@@ -110,6 +127,8 @@ var Config = field.NewConfiguration(
 			HelpText: "Authenticate with a personal access token scoped to each workspace. " +
 				"Does not sync account-level data (account entitlements and grants, and " +
 				"workspace-membership entitlements); use OAuth for full account coverage.",
+			// Incremental sync requires the Account API, which workspace tokens can't reach
+			// (see Validate) — omitted here so the UI doesn't offer an option that can never work.
 			Fields:  []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField},
 			Default: false,
 		},
