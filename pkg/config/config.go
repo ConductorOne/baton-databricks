@@ -104,15 +104,47 @@ var Config = field.NewConfiguration(
 			},
 			Default: true,
 		},
-		{
-			Name:        DatabricksWorkspaceTokenGroup,
-			DisplayName: "Workspace token",
-			HelpText: "Authenticate with a personal access token scoped to each workspace. " +
-				"Does not sync account-level data (account entitlements and grants, and " +
-				"workspace-membership entitlements); use OAuth for full account coverage.",
-			Fields:  []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField},
-			Default: false,
-		},
+		// TEMPORARILY DISABLED — workspace-token auth is not offerable through the C1 UI.
+		//
+		// Two defects make the hosted path unusable, neither of them in this connector's
+		// auth implementation:
+		//
+		//  1. workspace-tokens is declared isSecret, but c1 has no secret bit for
+		//     string-list fields, so the PAT is stored unencrypted and rendered in clear
+		//     text. StringField secrets (databricks-client-secret) mask correctly on the
+		//     same form; StringSliceField secrets do not. Tracked as CXE-1374.
+		//  2. workspace-tokens is DependentOn workspaces, and workspaces renders as
+		//     "(optional)", so selecting this group shows no token input at all until the
+		//     user happens to commit a value in an optional field. There is no affordance
+		//     telling them to.
+		//
+		// SCOPE — this disables workspace-token auth EVERYWHERE, not only in the C1 UI.
+		//
+		// With this group commented out, oauth2 is the only group left and it is
+		// Default: true, so its required fields (databricks-client-id and
+		// databricks-client-secret) now apply unconditionally. Passing
+		// --auth-method workspace-token on the CLI fails config validation with
+		// "field databricks-client-id ... is marked as required but it has a zero-value"
+		// before any API call. Verified, not assumed.
+		//
+		// The flags and pkg/databricks/auth.go's NewTokenAuth path still exist and still
+		// compile — they are simply unreachable, because no group offers them. So this is
+		// a BREAKING CHANGE for any self-hosted deployment currently authenticating with
+		// workspace tokens; they must move to OAuth2 or stay on the previous version.
+		//
+		// Restore this block once CXE-1374 ships. Do NOT delete it, and do NOT remove the
+		// PAT documentation: this connector already lost PAT once in e84a1aef with the docs
+		// left in place, and that mismatch is exactly what CXH-2166 was filed to fix.
+		//
+		// {
+		// 	Name:        DatabricksWorkspaceTokenGroup,
+		// 	DisplayName: "Workspace token",
+		// 	HelpText: "Authenticate with a personal access token scoped to each workspace. " +
+		// 		"Does not sync account-level data (account entitlements and grants, and " +
+		// 		"workspace-membership entitlements); use OAuth for full account coverage.",
+		// 	Fields:  []field.SchemaField{AccountIdField, WorkspacesField, WorkspaceTokensField, HostnameField, AccountHostnameField},
+		// 	Default: false,
+		// },
 	}),
 )
 

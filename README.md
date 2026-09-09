@@ -89,21 +89,22 @@ By default (OAuth), the connector fetches all resources from the account and all
 workspaces. To limit the scope, pass a comma-separated list of workspace
 deployment names to the `--workspaces` flag.
 
-When authenticating with `--workspace-tokens` instead of the OAuth client ID and
-secret, also pass `--auth-method workspace-token` (or set
-`BATON_AUTH_METHOD=workspace-token`), otherwise the connector validates against
-the OAuth fields by default and rejects the config. In this mode `--workspaces`
-is required and pairs with `--workspace-tokens` by position: the Nth token
-authenticates the Nth workspace, so the two lists must have the same length and
-order. `--workspaces` and `--workspace-tokens` are not unioned, and a
-length mismatch is rejected at startup.
+## Authentication
 
-Workspace-token auth cannot reach the Databricks account API, so it syncs less
-than OAuth: no account-level entitlements or grants and no workspace-membership
-entitlements, and users, groups, service principals and roles are parented under
-their workspace instead of the account. The connector logs a warning at startup
-when the account API is unreachable. Use OAuth for full account and
-cross-workspace coverage.
+OAuth is the only authentication method currently available: an account-level
+service principal's client ID and secret.
+
+> **Workspace-token (PAT) authentication is temporarily unavailable.**
+> `--auth-method workspace-token` is not offered and a config specifying it is
+> rejected at startup, because the OAuth client ID and secret are required
+> unconditionally. `--workspaces` and `--workspace-tokens` still appear in
+> `--help`, but no authentication method consumes them.
+>
+> The implementation is intact and commented out in `pkg/config/config.go`
+> rather than deleted; it is withheld while a platform-side defect is resolved.
+> The defect is not in this connector — a credential declared as a list of
+> secrets is not treated as secret by the configuration layer, so a workspace
+> token supplied through the UI is stored unencrypted and shown in clear text.
 
 OAuth requires a reachable account API. If the account API check fails at
 startup, the connector fails validation instead of falling back to a
@@ -115,10 +116,13 @@ To instead exclude specific workspaces from the sync, pass them to the
 list. Each entry can be a workspace name, deployment name, or numeric workspace
 ID. Excluded workspaces and their roles are skipped entirely.
 
-## Group provisioning limitations
-provisioning of account groups from a workspace token is not supported, if you need to provision groups you can only do it using the client-id and client-secret flow,
-this is due to the fact that the Databricks API does not allow provisioning of groups from a workspace token.
-[here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.) are the different types of groups in Databricks
+## Group provisioning
+
+Account groups are provisioned through the OAuth client ID and secret flow. The
+Databricks API does not allow provisioning account groups from a workspace
+token, which is one reason the OAuth flow is the supported path.
+[Here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.)
+are the different types of groups in Databricks.
 
 # Contributing, Support and Issues
 
