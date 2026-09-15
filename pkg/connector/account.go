@@ -130,7 +130,15 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs
 
 				var annotations []protoreflect.ProtoMessage
 				if resourceId.ResourceType == groupResourceType.Id {
-					rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, resource.ParentResourceId)
+					// Groups sync parented under the account, so the expansion must name
+					// the same parent. The account resource's own ParentResourceId is
+					// nil, which would yield an unparented group id that matches no
+					// synced resource.
+					groupParentResourceId, err := rs.NewResourceID(accountResourceType, a.client.GetAccountId())
+					if err != nil {
+						return rv, nil, err
+					}
+					rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceId.Resource, groupParentResourceId)
 					if err != nil {
 						return rv, nil, err
 					}
