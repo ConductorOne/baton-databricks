@@ -143,20 +143,8 @@
     {
       "name": "workspaces",
       "displayName": "Workspaces",
-      "description": "Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. Mutually exclusive with databricks-exclude-workspaces.",
+      "description": "Limit syncing to the specified workspaces, by deployment name, not workspace ID. Mutually exclusive with databricks-exclude-workspaces.",
       "stringSliceField": {}
-    },
-    {
-      "name": "workspace-tokens",
-      "displayName": "Workspace Tokens",
-      "description": "The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API",
-      "isRequired": true,
-      "isSecret": true,
-      "stringSliceField": {
-        "rules": {
-          "isRequired": true
-        }
-      }
     },
     {
       "name": "databricks-exclude-workspaces",
@@ -172,35 +160,9 @@
         "workspaces",
         "databricks-exclude-workspaces"
       ]
-    },
-    {
-      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
-      "fieldNames": [
-        "workspace-tokens"
-      ],
-      "secondaryFieldNames": [
-        "workspaces"
-      ]
     }
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg",
-  "fieldGroups": [
-    {
-      "name": "oauth2",
-      "displayName": "OAuth2",
-      "helpText": "Authenticate as a service principal using an OAuth2 client ID and secret.",
-      "fields": [
-        "account-id",
-        "databricks-client-id",
-        "databricks-client-secret",
-        "hostname",
-        "account-hostname",
-        "workspaces",
-        "databricks-exclude-workspaces"
-      ],
-      "default": true
-    }
-  ]
+  "iconUrl": "/static/app-icons/databricks.svg"
 }

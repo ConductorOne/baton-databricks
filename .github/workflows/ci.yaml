@@ -15,7 +15,6 @@ jobs:
       BATON_DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       BATON_ACCOUNT_ID: ${{ secrets.BATON_ACCOUNT_ID }}
       # BATON_WORKSPACES: ${{ secrets.BATON_WORKSPACES }}
-      # BATON_WORKSPACE_TOKENS: ${{ secrets.BATON_WORKSPACE_TOKENS }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

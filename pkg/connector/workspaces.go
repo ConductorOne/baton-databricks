@@ -31,27 +31,6 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return workspaceResourceType
 }
 
-// minimalWorkspaceResource builds a workspace from just its deployment name, for
-// token auth where the Account API (and its numeric workspace IDs) is unreachable.
-// Deployment names are unique per Databricks cloud (they form the workspace's
-// canonical hostname), so they're safe as the resource ID here.
-// Users, groups and service principals hang off the workspace here instead of the account.
-func minimalWorkspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
-	return rs.NewGroupResource(
-		workspace.DeploymentName,
-		workspaceResourceType,
-		workspace.DeploymentName,
-		nil,
-		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(
-			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
-		),
-	)
-}
-
 func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
 	profile := map[string]interface{}{
 		"workspace_id": workspace.ID,
@@ -83,31 +62,6 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	}
 
 	var rv []*v2.Resource
-
-	if w.client.IsTokenAuth() {
-		for workspace := range w.workspaces {
-			if w.client.IsWorkspaceNameExcluded(workspace) {
-				continue
-			}
-
-			ws := &databricks.Workspace{DeploymentName: workspace}
-
-			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			rv = append(rv, wr)
-		}
-
-		if len(w.workspaces) > 0 && len(rv) == 0 {
-			ctxzap.Extract(ctx).Warn("databricks-connector: all configured workspaces are excluded, sync will be empty",
-				zap.Strings("workspaces", configuredWorkspaceNames(w.workspaces)),
-			)
-		}
-
-		return rv, nil, nil
-	}
 
 	workspaces, _, err := w.client.ListWorkspaces(ctx)
 	if err != nil {

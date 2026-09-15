@@ -23,13 +23,7 @@ The Databricks connector supports [automatic account provisioning and deprovisio
 
 ## Authentication methods
 
-The connector authenticates with **OAuth** — an account-level service principal's client ID and secret. This is the only method currently offered.
-
-<Warning>
-**Workspace-token (personal access token) authentication is temporarily unavailable.** It is not offered when configuring the connector, and configurations that specify it are rejected at startup. Use OAuth instead.
-
-The connector's PAT implementation is intact and the method is expected to return; it is withheld while a platform-side defect is resolved. The defect is not in this connector: a credential declared as a list of secrets is not treated as secret by the configuration layer, so a workspace token supplied through the UI would be stored unencrypted and displayed in clear text.
-</Warning>
+The connector authenticates with **OAuth** — an account-level service principal's client ID and secret. This is the only authentication method the connector supports.
 
 ## Gather Databricks credentials
 
@@ -55,28 +49,22 @@ A user with the **Account admin** role in each Databricks workspace you want to 
 
 ### Generate Databricks credentials
 
-The Databricks connector authenticates with OAuth:
+The Databricks connector authenticates with OAuth, which syncs info from all Databricks workspaces the service principal can access.
 
-- **OAuth** (syncs info from all Databricks workspaces)
-
-  <Steps>
-    <Step>
-    Follow the [Databricks OAuth authentication documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and create an OAuth secret.
-    </Step>
-    <Step>
-    Carefully copy and save the OAuth client ID and secret.
-    </Step>
-  </Steps>
+<Steps>
+  <Step>
+  Follow the [Databricks OAuth authentication documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and create an OAuth secret.
+  </Step>
+  <Step>
+  Carefully copy and save the OAuth client ID and secret.
+  </Step>
+</Steps>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
 
 - Account ID
 - OAuth client ID
 - OAuth client secret
-
-<Note>
-Personal access token (workspace token) authentication is **temporarily unavailable** and is not offered when configuring the connector, so there is no need to generate one. See [Authentication methods](#authentication-methods) above.
-</Note>
 
 Next, move on to the instructions for your chosen setup method.
 
