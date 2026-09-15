@@ -16,8 +16,7 @@ import (
 )
 
 type Databricks struct {
-	client     *databricks.Client
-	workspaces []string
+	client *databricks.Client
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -27,7 +26,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client, d.workspaces),
+		newWorkspaceBuilder(d.client),
 		newRoleBuilder(d.client),
 	}
 
@@ -111,28 +110,19 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		return nil, fmt.Errorf("databricks-connector: account API validation failed: %w", err)
 	}
 
-	// With an explicit workspace list, validate each configured workspace. Otherwise
-	// discover every workspace from the Account API.
-	workspaceNames := d.workspaces
-	if len(workspaceNames) == 0 {
-		workspaces, _, err := d.client.ListWorkspaces(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
-		}
-
-		workspaceNames = make([]string, 0, len(workspaces))
-		for _, workspace := range workspaces {
-			workspaceNames = append(workspaceNames, workspace.DeploymentName)
-		}
+	// Validate that credentials are valid for every workspace.
+	workspaces, _, err := d.client.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
 	isWSAPIAvailable := false
-	for _, workspace := range workspaceNames {
+	for _, workspace := range workspaces {
 		// Not fatal: the account API already validated, and a workspace the service
 		// principal can't reach is skipped during sync rather than failing it.
-		if _, _, err := d.client.ListRoles(ctx, workspace, "", ""); err != nil {
+		if _, _, err := d.client.ListRoles(ctx, workspace.DeploymentName, "", ""); err != nil {
 			ctxzap.Extract(ctx).Debug("databricks-connector: workspace validation probe failed",
-				zap.String("workspace", workspace),
+				zap.String("workspace", workspace.DeploymentName),
 				zap.Error(err),
 			)
 		}
@@ -154,7 +144,6 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
-	workspaces []string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -167,17 +156,16 @@ func New(
 	}
 
 	return &Databricks{
-		client:     client,
-		workspaces: workspaces,
+		client: client,
 	}, nil
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	l := ctxzap.Extract(ctx)
 
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(cfg, l)
+	auth := prepareClientAuth(ctx, cfg, l)
 
 	cb, err := New(
 		ctx,
@@ -187,22 +175,26 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
-		cfg.Workspaces,
 	)
 	if err != nil {
+		l.Warn("error creating connector", zap.Error(err))
 		return nil, nil, err
 	}
 
 	return cb, nil, nil
 }
 
-func prepareClientAuth(cfg *config.Databricks, l *zap.Logger) databricks.Auth {
-	l.Debug("using oauth", zap.String("account-id", cfg.AccountId))
+func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
+	accountID := cfg.AccountId
+	databricksClientId := cfg.DatabricksClientId
+	databricksClientSecret := cfg.DatabricksClientSecret
+	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+
 	return databricks.NewOAuth2(
-		cfg.AccountId,
-		cfg.DatabricksClientId,
-		cfg.DatabricksClientSecret,
-		getAccountHostname(cfg, cfg.Hostname),
+		accountID,
+		databricksClientId,
+		databricksClientSecret,
+		accountHostname,
 	)
 }
 

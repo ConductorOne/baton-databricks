@@ -24,7 +24,6 @@ const workspaceMemberEntitlement = "member"
 type workspaceBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
-	workspaces   map[string]struct{}
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -68,17 +67,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
-	matchedConfigured := make(map[string]struct{}, len(w.workspaces))
 	for _, workspace := range workspaces {
-		// Skip workspaces outside the configured set when one was provided.
-		if len(w.workspaces) > 0 {
-			cfg, ok := matchConfiguredWorkspace(w.workspaces, workspace.DeploymentName, workspace.Name, strconv.Itoa(workspace.ID))
-			if !ok {
-				continue
-			}
-			matchedConfigured[cfg] = struct{}{}
-		}
-
 		wCopy := workspace
 
 		wr, err := workspaceResource(ctx, &wCopy, parentResourceID)
@@ -89,56 +78,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		rv = append(rv, wr)
 	}
 
-	l := ctxzap.Extract(ctx)
-	if len(w.workspaces) > 0 && len(matchedConfigured) == 0 {
-		l.Warn("databricks-connector: none of the configured workspaces matched any account workspace, sync will be empty",
-			zap.Strings("workspaces", configuredWorkspaceNames(w.workspaces)),
-		)
-	}
-	for workspace := range w.workspaces {
-		if _, ok := matchedConfigured[workspace]; ok {
-			continue
-		}
-		if w.client.IsWorkspaceNameExcluded(workspace) {
-			l.Debug("databricks-connector: configured workspace was excluded from sync",
-				zap.String("workspace", workspace),
-			)
-			continue
-		}
-		l.Debug("databricks-connector: configured workspace not found among account workspaces",
-			zap.String("workspace", workspace),
-		)
-	}
-
 	return rv, nil, nil
-}
-
-func configuredWorkspaceNames(configured map[string]struct{}) []string {
-	names := make([]string, 0, len(configured))
-	for name := range configured {
-		names = append(names, name)
-	}
-	return names
-}
-
-// matchConfiguredWorkspace looks up a workspace by deployment name, name, or numeric
-// ID case-insensitively (mirroring Client.IsWorkspaceNameExcluded), returning the matched
-// key so warnings can report the value the user configured.
-func matchConfiguredWorkspace(configured map[string]struct{}, candidates ...string) (string, bool) {
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if _, ok := configured[candidate]; ok {
-			return candidate, true
-		}
-		for cfg := range configured {
-			if strings.EqualFold(cfg, candidate) {
-				return cfg, true
-			}
-		}
-	}
-	return "", false
 }
 
 // Entitlements returns slice of entitlements representing workspace members.
@@ -299,15 +239,9 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	return nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
-	wMap := make(map[string]struct{}, len(workspaces))
-	for _, w := range workspaces {
-		wMap[w] = struct{}{}
-	}
-
+func newWorkspaceBuilder(client *databricks.Client) *workspaceBuilder {
 	return &workspaceBuilder{
 		client:       client,
 		resourceType: workspaceResourceType,
-		workspaces:   wMap,
 	}
 }

@@ -77,9 +77,9 @@ baton resources
 - Users
 - Roles
 
-By default, the connector fetches all resources from the account and all
-workspaces. To limit the scope, pass a comma-separated list of workspace
-deployment names to the `--workspaces` flag.
+The connector fetches all resources from the account and every workspace the
+service principal can access. There is no workspace allowlist; to narrow the
+scope, exclude workspaces as described below.
 
 ## Authentication
 
@@ -90,9 +90,9 @@ workspace-token option, and no username/password option.
 
 OAuth requires a reachable account API. If the account API check fails at
 startup, the connector fails validation rather than falling back to a
-workspace-only sync, even when `--workspaces` is set.
+workspace-only sync.
 
-To instead exclude specific workspaces from the sync, pass them to the
+To exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
 `BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated
 list. Each entry can be a workspace name, deployment name, or numeric workspace
@@ -137,7 +137,7 @@ Flags:
       --client-secret string                             The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
-      --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)
@@ -164,7 +164,6 @@ Flags:
       --ticketing                                        This must be set to enable ticketing support ($BATON_TICKETING)
   -v, --version                                          version for baton-databricks
       --workers int                                      The number of sync workers to use. -1 for auto-detect, 0 for sequential, >0 for parallel ($BATON_WORKERS)
-      --workspaces strings                               Limit syncing to the specified workspaces, by deployment name, not workspace ID. Mutually exclusive with databricks-exclude-workspaces. ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```

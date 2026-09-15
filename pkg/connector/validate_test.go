@@ -42,7 +42,7 @@ func newValidateConnector(t *testing.T, auth databricks.Auth, tr http.RoundTripp
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	return &Databricks{client: client, workspaces: []string{"ws1"}}
+	return &Databricks{client: client}
 }
 
 // Under OAuth a failed account check is a fixable misconfiguration, so Validate

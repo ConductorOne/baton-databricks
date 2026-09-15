@@ -184,8 +184,8 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.S
 	}
 
 	// membership grants
-	// Always fetch the group with the members attribute; the group listing above
-	// does not include members.
+	// Always fetch the group with members attribute to ensure we get the members
+	// regardless of authentication type (OAuth vs personal access token)
 	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)

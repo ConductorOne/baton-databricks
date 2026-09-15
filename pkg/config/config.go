@@ -14,8 +14,8 @@ var (
 	DatabricksClientIdField = field.StringField(
 		"databricks-client-id",
 		field.WithDescription("The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API"),
-		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client ID"),
+		field.WithRequired(true),
 	)
 	DatabricksClientSecretField = field.StringField(
 		"databricks-client-secret",
@@ -23,14 +23,6 @@ var (
 		field.WithIsSecret(true),
 		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client Secret"),
-	)
-	WorkspacesField = field.StringSliceField(
-		"workspaces",
-		field.WithDescription(
-			"Limit syncing to the specified workspaces, by deployment name, not workspace ID. "+
-				"Mutually exclusive with databricks-exclude-workspaces.",
-		),
-		field.WithDisplayName("Workspaces"),
 	)
 	AccountHostnameField = field.StringField(
 		"account-hostname",
@@ -51,7 +43,7 @@ var (
 	)
 	ExcludeWorkspacesField = field.StringSliceField(
 		"databricks-exclude-workspaces",
-		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
+		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID"),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
 	configFields = []field.SchemaField{
@@ -60,7 +52,6 @@ var (
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
 		HostnameField,
-		WorkspacesField,
 		BaseURLField,
 		ExcludeWorkspacesField,
 	}
@@ -72,7 +63,4 @@ var Config = field.NewConfiguration(
 	field.WithConnectorDisplayName("Databricks"),
 	field.WithHelpUrl("/docs/baton/databricks"),
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
-	field.WithConstraints(
-		field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField),
-	),
 )
