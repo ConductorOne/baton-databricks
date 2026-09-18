@@ -226,11 +226,12 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
-				groupParentResourceId, err := groupGrantParent(r.client.IsAccountAPIAvailable(), r.client.GetAccountId(), workspaceId)
+				accountId := r.client.GetAccountId()
+				accountResourceId, err := rs.NewResourceID(accountResourceType, accountId)
 				if err != nil {
 					return rv, nil, err
 				}
-				resourceId, expandAnnotation, err := groupGrantExpansion(ctx, g.ID, groupParentResourceId)
+				resourceId, expandAnnotation, err := groupGrantExpansion(ctx, g.ID, accountResourceId)
 				if err != nil {
 					return rv, nil, err
 				}

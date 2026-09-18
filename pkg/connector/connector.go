@@ -11,13 +11,10 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
-	"go.uber.org/zap"
 )
 
 type Databricks struct {
-	client     *databricks.Client
-	workspaces []string
+	client *databricks.Client
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -27,7 +24,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client, d.workspaces),
+		newWorkspaceBuilder(d.client),
 		newRoleBuilder(d.client),
 	}
 
@@ -102,63 +99,20 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 	}, nil
 }
 
-// Validate is called to ensure that the connector is properly configured. It should exercise any API credentials
-// to be sure that they are valid. Since this connector works with two APIs and can have different types of credentials
-// it is important to validate that the connector is properly configured before attempting to sync.
+// Validate is called to ensure that the connector is properly configured. It exercises the
+// OAuth credentials against the Account API.
 func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, error) {
-	isAccAPIAvailable := false
-	isWSAPIAvailable := false
-
-	// OAuth must reach the account API; a failed check here is a fixable misconfiguration,
-	// so fail instead of silently dropping account-level data (token auth, handled below,
-	// can't reach it by design).
-	if !d.client.IsTokenAuth() {
-		if _, _, err := d.client.ListRoles(ctx, "", "", ""); err != nil {
-			return nil, fmt.Errorf("databricks-connector: account API validation failed: %w", err)
-		}
-		isAccAPIAvailable = true
+	// A failed account API check is a fixable misconfiguration, so fail instead of
+	// silently dropping account-level data.
+	if _, _, err := d.client.ListRoles(ctx, "", "", ""); err != nil {
+		return nil, fmt.Errorf("databricks-connector: account API validation failed: %w", err)
 	}
 
-	// With an explicit workspace list (always the case for token auth), validate each
-	// configured workspace. Otherwise discover every workspace from the Account API.
-	workspaceNames := d.workspaces
-	if len(workspaceNames) == 0 {
-		workspaces, _, err := d.client.ListWorkspaces(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
-		}
-
-		workspaceNames = make([]string, 0, len(workspaces))
-		for _, workspace := range workspaces {
-			workspaceNames = append(workspaceNames, workspace.DeploymentName)
-		}
-	}
-
-	for _, workspace := range workspaceNames {
-		_, _, err := d.client.ListRoles(ctx, workspace, "", "")
-		if err != nil && !isAccAPIAvailable {
-			return nil, fmt.Errorf("databricks-connector: failed to validate credentials for workspace %s: %w", workspace, err)
-		}
-
-		isWSAPIAvailable = true
-	}
-
-	// Resolve the result.
-	if !isAccAPIAvailable && !isWSAPIAvailable {
-		return nil, fmt.Errorf("databricks-connector: failed to validate credentials")
-	}
-
-	d.client.UpdateAvailability(isAccAPIAvailable, isWSAPIAvailable)
-
-	// Token auth can't reach the account plane: account entitlements/grants and
-	// workspace-membership entitlements go unsynced and identities re-parent onto the
-	// workspace. Warn, not Debug (invisible at info level), so this drop isn't silent.
-	if !isAccAPIAvailable && isWSAPIAvailable {
-		ctxzap.Extract(ctx).Warn(
-			"databricks-connector: account API unreachable under workspace-token auth; syncing workspace-scoped data only. " +
-				"Account entitlements and grants, and workspace-membership entitlements, will not be synced, " +
-				"and identities are parented under their workspace instead of the account",
-		)
+	// Workspace enumeration is the other account-plane call every sync depends on.
+	// Per-workspace probing is deliberately not done here: a workspace the service
+	// principal can't reach is skipped during sync rather than failing validation.
+	if _, _, err := d.client.ListWorkspaces(ctx); err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
 	return nil, nil
@@ -173,7 +127,6 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
-	workspaces []string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -186,26 +139,14 @@ func New(
 	}
 
 	return &Databricks{
-		client:     client,
-		workspaces: workspaces,
+		client: client,
 	}, nil
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
-	l := ctxzap.Extract(ctx)
-
-	authMethod := ""
-	if opts != nil {
-		authMethod = opts.SelectedAuthMethod
-	}
-
-	if err := config.ValidateConfig(ctx, cfg, authMethod); err != nil {
-		return nil, nil, err
-	}
-
+func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(ctx, cfg, authMethod, l)
+	auth := prepareClientAuth(cfg)
 
 	cb, err := New(
 		ctx,
@@ -215,7 +156,6 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
-		cfg.Workspaces,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -224,18 +164,17 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	return cb, nil, nil
 }
 
-func prepareClientAuth(_ context.Context, cfg *config.Databricks, authMethod string, l *zap.Logger) databricks.Auth {
-	if authMethod == config.DatabricksWorkspaceTokenGroup {
-		l.Debug("using workspace token auth", zap.String("account-id", cfg.AccountId))
-		return databricks.NewTokenAuth(cfg.Workspaces, cfg.WorkspaceTokens)
-	}
+func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
+	accountID := cfg.AccountId
+	databricksClientId := cfg.DatabricksClientId
+	databricksClientSecret := cfg.DatabricksClientSecret
+	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 
-	l.Debug("using oauth", zap.String("account-id", cfg.AccountId))
 	return databricks.NewOAuth2(
-		cfg.AccountId,
-		cfg.DatabricksClientId,
-		cfg.DatabricksClientSecret,
-		getAccountHostname(cfg, cfg.Hostname),
+		accountID,
+		databricksClientId,
+		databricksClientSecret,
+		accountHostname,
 	)
 }
 
