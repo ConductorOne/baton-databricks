@@ -11,8 +11,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
-	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
-	"go.uber.org/zap"
 )
 
 type Databricks struct {
@@ -102,7 +100,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 }
 
 // Validate is called to ensure that the connector is properly configured. It exercises the
-// OAuth credentials against both the Account API and each workspace the sync will cover.
+// OAuth credentials against the Account API.
 func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, error) {
 	// A failed account API check is a fixable misconfiguration, so fail instead of
 	// silently dropping account-level data.
@@ -110,27 +108,12 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		return nil, fmt.Errorf("databricks-connector: account API validation failed: %w", err)
 	}
 
-	// Validate that credentials are valid for every workspace.
-	workspaces, _, err := d.client.ListWorkspaces(ctx)
-	if err != nil {
+	// Workspace enumeration is the other account-plane call every sync depends on.
+	// Per-workspace probing is deliberately not done here: a workspace the service
+	// principal can't reach is skipped during sync rather than failing validation.
+	if _, _, err := d.client.ListWorkspaces(ctx); err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
-
-	isWSAPIAvailable := false
-	for _, workspace := range workspaces {
-		// Not fatal: the account API already validated, and a workspace the service
-		// principal can't reach is skipped during sync rather than failing it.
-		if _, _, err := d.client.ListRoles(ctx, workspace.DeploymentName, "", ""); err != nil {
-			ctxzap.Extract(ctx).Debug("databricks-connector: workspace validation probe failed",
-				zap.String("workspace", workspace.DeploymentName),
-				zap.Error(err),
-			)
-		}
-
-		isWSAPIAvailable = true
-	}
-
-	d.client.UpdateAvailability(true, isWSAPIAvailable)
 
 	return nil, nil
 }
@@ -161,11 +144,9 @@ func New(
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
-	l := ctxzap.Extract(ctx)
-
+func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(ctx, cfg, l)
+	auth := prepareClientAuth(cfg)
 
 	cb, err := New(
 		ctx,
@@ -177,14 +158,13 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		cfg.DatabricksExcludeWorkspaces,
 	)
 	if err != nil {
-		l.Warn("error creating connector", zap.Error(err))
 		return nil, nil, err
 	}
 
 	return cb, nil, nil
 }
 
-func prepareClientAuth(_ context.Context, cfg *config.Databricks, l *zap.Logger) databricks.Auth {
+func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
 	databricksClientSecret := cfg.DatabricksClientSecret

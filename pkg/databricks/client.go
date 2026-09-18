@@ -47,7 +47,6 @@ type Client struct {
 	excludeWorkspaces map[string]struct{}
 
 	isAccAPIAvailable bool
-	isWSAPIAvailable  bool
 }
 
 // hostMatches reports whether hostname equals suffix or sits under it at a DNS
@@ -111,6 +110,11 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 		accountBaseUrl:    accountBaseUrl,
 		baseUrl:           baseUrl,
 		excludeWorkspaces: excludeSet,
+
+		// OAuth is the only auth method, and Validate hard-fails when the account
+		// plane is unreachable, so availability is an invariant rather than
+		// something callers must wait for Validate to establish.
+		isAccAPIAvailable: true,
 	}, err
 }
 
@@ -138,17 +142,8 @@ func (c *Client) workspaceUrl(workspaceId string) *url.URL {
 	}
 }
 
-func (c *Client) IsWorkspaceAPIAvailable() bool {
-	return c.isWSAPIAvailable
-}
-
 func (c *Client) IsAccountAPIAvailable() bool {
 	return c.isAccAPIAvailable
-}
-
-func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {
-	c.isAccAPIAvailable = accAPI
-	c.isWSAPIAvailable = wsAPI
 }
 
 func (c *Client) UpdateEtag(etag string) {
