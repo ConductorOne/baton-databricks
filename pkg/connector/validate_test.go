@@ -11,8 +11,8 @@ import (
 )
 
 // rolesTransport answers the assignable-roles calls Validate makes. failAccount
-// makes the account-plane check (host "accounts.*") fail so isAccAPIAvailable stays
-// false while the workspace check still succeeds.
+// makes the account-plane check (host "accounts.*") fail, which Validate treats as
+// fatal.
 type rolesTransport struct{ failAccount bool }
 
 func (t rolesTransport) RoundTrip(req *http.Request) (*http.Response, error) {
