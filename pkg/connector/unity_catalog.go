@@ -143,14 +143,32 @@ func securableGrants(ctx context.Context, c *databricks.Client, resource *v2.Res
 
 	assignments, _, err := c.ListPermissions(ctx, workspaceId, securableType, fullName)
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to list %s permissions for %q: %w", securableType, fullName, err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Degrade gracefully: a securable whose grants cannot be read (UC access
+		// missing, securable deleted mid-sync) must not fail the whole sync.
+		l.Warn("databricks-connector: unable to list unity catalog permissions, skipping securable grants",
+			zap.String("securable_type", securableType),
+			zap.String("securable", fullName),
+			zap.Error(err),
+		)
+		return nil, nil
 	}
 
 	var rv []*v2.Grant
 	for _, a := range assignments {
 		principalID, err := resolvePrincipalResourceID(ctx, c, workspaceId, a.Principal)
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to resolve principal %q: %w", a.Principal, err)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			l.Warn("databricks-connector: failed to resolve unity catalog principal, skipping",
+				zap.String("principal", a.Principal),
+				zap.String("securable", fullName),
+				zap.Error(err),
+			)
+			continue
 		}
 		if principalID == nil {
 			l.Warn("databricks-connector: skipping unresolved unity catalog principal",
@@ -173,7 +191,15 @@ func securableGrants(ctx context.Context, c *databricks.Client, resource *v2.Res
 	if owner, ok := rs.GetProfileStringValue(rs.GetProfile(resource), "owner"); ok && owner != "" {
 		principalID, err := resolvePrincipalResourceID(ctx, c, workspaceId, owner)
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to resolve owner %q: %w", owner, err)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			l.Warn("databricks-connector: failed to resolve unity catalog owner, skipping owner grant",
+				zap.String("owner", owner),
+				zap.String("securable", fullName),
+				zap.Error(err),
+			)
+			return rv, nil
 		}
 		if principalID == nil {
 			l.Warn("databricks-connector: skipping unresolved unity catalog owner",
@@ -294,7 +320,16 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 
 	catalogs, nextToken, _, err := b.client.ListCatalogs(ctx, workspaceId, pageToken, ResourcesPageSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to list catalogs: %w", err)
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		// Degrade gracefully: workspaces without Unity Catalog (or where the
+		// service principal lacks UC access) must not fail the sync.
+		ctxzap.Extract(ctx).Warn("databricks-connector: unable to list catalogs, skipping unity catalog for workspace",
+			zap.String("workspace", workspaceId),
+			zap.Error(err),
+		)
+		return nil, nil, nil
 	}
 
 	var rv []*v2.Resource
@@ -377,7 +412,15 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 
 	schemas, nextToken, _, err := b.client.ListSchemas(ctx, workspaceId, catalogName, pageToken, ResourcesPageSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to list schemas: %w", err)
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		ctxzap.Extract(ctx).Warn("databricks-connector: unable to list schemas, skipping catalog",
+			zap.String("workspace", workspaceId),
+			zap.String("catalog", catalogName),
+			zap.Error(err),
+		)
+		return nil, nil, nil
 	}
 
 	var rv []*v2.Resource
@@ -464,7 +507,16 @@ func (b *tableBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 
 	tables, nextToken, _, err := b.client.ListTables(ctx, workspaceId, catalogName, schemaName, pageToken, ResourcesPageSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to list tables: %w", err)
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		ctxzap.Extract(ctx).Warn("databricks-connector: unable to list tables, skipping schema",
+			zap.String("workspace", workspaceId),
+			zap.String("catalog", catalogName),
+			zap.String("schema", schemaName),
+			zap.Error(err),
+		)
+		return nil, nil, nil
 	}
 
 	var rv []*v2.Resource

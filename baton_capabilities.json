@@ -14,6 +14,17 @@
     },
     {
       "resourceType": {
+        "id": "catalog",
+        "displayName": "Catalog"
+      },
+      "capabilities": [
+        "CAPABILITY_SYNC",
+        "CAPABILITY_PROVISION"
+      ],
+      "permissions": {}
+    },
+    {
+      "resourceType": {
         "id": "group",
         "displayName": "Group",
         "traits": [
@@ -42,11 +53,33 @@
     },
     {
       "resourceType": {
+        "id": "schema",
+        "displayName": "Schema"
+      },
+      "capabilities": [
+        "CAPABILITY_SYNC",
+        "CAPABILITY_PROVISION"
+      ],
+      "permissions": {}
+    },
+    {
+      "resourceType": {
         "id": "service_principal",
         "displayName": "Service Principal",
         "traits": [
           "TRAIT_GROUP"
         ]
+      },
+      "capabilities": [
+        "CAPABILITY_SYNC",
+        "CAPABILITY_PROVISION"
+      ],
+      "permissions": {}
+    },
+    {
+      "resourceType": {
+        "id": "table",
+        "displayName": "Table"
       },
       "capabilities": [
         "CAPABILITY_SYNC",
