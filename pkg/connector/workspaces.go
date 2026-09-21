@@ -48,6 +48,7 @@ func minimalWorkspaceResource(_ context.Context, workspace *databricks.Workspace
 			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: catalogResourceType.Id},
 		),
 	)
 }
@@ -66,6 +67,7 @@ func workspaceResource(_ context.Context, workspace *databricks.Workspace, paren
 		rs.WithParentResourceID(parent),
 		rs.WithAnnotation(
 			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: catalogResourceType.Id},
 		),
 	)
 
