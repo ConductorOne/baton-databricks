@@ -80,14 +80,19 @@ type indexMigration struct {
 // bait (unbounded latency and memory at Open on large files); prefer
 // seal-time derivation or explicit rebuild commands over registering
 // one here.
+//
+// GrantDigestABIVersion bumps in particular do NOT belong here: a
+// migration records that it ran once, but old binaries can rewrite
+// digest state afterwards without re-triggering it. The digest ABI is
+// instead enforced by a stamp stored WITH the state
+// (rawdb.GrantDigestABIStampKey, checked every Open by
+// verifyGrantDigestABI), so re-polluted state is re-detected — and the
+// remedy is again a cheap drop plus seal-time rebuild, never an
+// Open-time backfill.
 var indexMigrations []indexMigration
 
-// applyIndexMigrations runs on engine Open (writable opens only —
-// read-only files are immutable on disk). For each registered
-// migration whose stored applied-version is older than the
-// target, it invokes Apply and persists the new version on
-// success. Errors surface to Open; callers can decide whether
-// to abort or proceed with the partially-migrated engine.
+// Runs under writeMu (Open and ResetForNewSync), so Apply must use raw
+// e.db operations or *Locked methods, never withWrite.
 func (e *Engine) applyIndexMigrations(ctx context.Context) error {
 	if e.opts.readOnly {
 		return nil

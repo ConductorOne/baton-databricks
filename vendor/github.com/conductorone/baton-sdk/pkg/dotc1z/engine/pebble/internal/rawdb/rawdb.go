@@ -14,14 +14,13 @@
 // is a caller that forgot an obligation; this package makes the
 // obligation unforgettable by construction.
 //
-// What this package deliberately does NOT own: the engine's write
-// BARRIER (writeMu / writeWG / closing / sealed / checkpointMu) stays
-// in the pebble package. The barrier is lifecycle policy — who may
-// write when — while rawdb is write mechanics — what a write must do.
-// Callers arrive here already inside withWrite/withWriteAllowSealed;
-// the known barrier bypasses (the synth-layer worker's background
-// ingest, the compactor's DB() writes, cleanup's compaction driver)
-// are enumerated on the operations that serve them.
+// What this package deliberately does NOT own: the engine's write lock
+// (writeMu) and the lifecycle snapshot it guards stay in the pebble
+// package. The lock is lifecycle policy — who may write when — while
+// rawdb is write mechanics — what a write must do. Callers arrive here
+// already holding writeMu (TestWriteMuHolders checks that statically);
+// the one bypass, the compactor's DB() writes, is fenced by call order
+// and noted on the operations that serve it.
 //
 // Reads are exposed liberally (Get / NewIter / Metrics): the bug class
 // lives on the write side, and a read choke point would only add
@@ -274,6 +273,7 @@ func (d *DB) RestoreDeferredIdxPending() error {
 		d.deferredIdxPending.Store(true)
 		return nil
 	case errors.Is(err, pebble.ErrNotFound):
+		d.deferredIdxPending.Store(false)
 		return nil
 	default:
 		return err
@@ -290,9 +290,11 @@ func (d *DB) GrantDigestsPresent() bool { return d.grantDigestsPresent.Load() }
 func (d *DB) SetGrantDigestsPresent(present bool) { d.grantDigestsPresent.Store(present) }
 
 // ProbeGrantDigestsPresent initializes the presence flag with one
-// bounded seek over the digest keyspace (the Open-time probe).
+// bounded seek over the digest NODE keyspace (the Open-time probe).
+// The ABI stamp's metadata sub-range is outside the bounds: a file
+// holding only a leftover stamp has no digest state to invalidate.
 func (d *DB) ProbeGrantDigestsPresent() error {
-	lo, hi := DigestKeyspaceBounds()
+	lo, hi := DigestNodeKeyspaceBounds()
 	iter, err := d.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 	if err != nil {
 		return err
@@ -388,12 +390,11 @@ func (d *DB) SetPoisonObserver(fn func(PoisonEvent)) {
 func (d *DB) FlushMemtables() error { return d.db.Flush() }
 
 // Checkpoint cuts a pebble checkpoint into destDir (created by pebble,
-// must not exist). Caller holds the engine's checkpoint barrier.
+// must not exist). Caller holds the engine's writeMu.
 func (d *DB) Checkpoint(destDir string) error { return d.db.Checkpoint(destDir) }
 
 // Compact manually compacts the given key range. Serves cleanup's
-// space-reclaim pass; deliberately barrier-free at the engine layer
-// (see the checkpointMu inventory).
+// space-reclaim pass.
 func (d *DB) Compact(ctx context.Context, start, end []byte, parallel bool) error {
 	return d.db.Compact(ctx, start, end, parallel)
 }

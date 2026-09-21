@@ -420,8 +420,8 @@ func (c *Compactor) Compact(ctx context.Context) (_ *CompactableSync, retErr err
 	var newSyncId string
 	switch {
 	case foldMode:
-		// In-place fold: no fresh sync — the output adopts the base
-		// sync's id and partials merge into its keyspace.
+		// No StartNewSync: partials merge under the base id and the fold renames
+		// the sync-run record at the end.
 		newSyncId, err = c.compactPebbleFold(runCtx)
 		if err != nil {
 			if cause := context.Cause(runCtx); errors.Is(cause, context.DeadlineExceeded) && c.runDuration > 0 && ctx.Err() == nil {
@@ -1321,8 +1321,8 @@ func (c *Compactor) expandGrants(ctx context.Context, newSyncId string, compacti
 	// opted-in compactions preserve a fresh graph (so the incremental chain
 	// heals after a fallback); otherwise drop any sidecar inherited from a
 	// fold-copied base. Pebble-only: incremental expansion declines on other
-	// engines, and without a sidecar the preserved graph would only bloat
-	// the final sync token.
+	// engines, and without a sidecar a preserved graph has nowhere to go:
+	// no writer puts a graph in a sync token.
 	if c.incrementalExpansion && c.resolvedEngine() == c1zstore.EnginePebble {
 		syncOpts = append(syncOpts, sync.WithPreserveEntitlementGraph())
 	} else if gs, ok := c.compactedC1z.(sync.EntitlementGraphStore); ok {

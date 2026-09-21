@@ -1,5 +1,7 @@
 package pebble
 
+import "sync/atomic"
+
 // testSeams aggregates every test-only injection point on the Engine
 // behind a single field (Engine.test), so the production struct isn't
 // littered with hook fields and new seams have one obvious home. All
@@ -25,7 +27,7 @@ type testSeams struct {
 
 	// endSyncPreFlushHook, when non-nil, runs inside endSyncFinalize
 	// IMMEDIATELY after the ended_at stamp commits — before the stats
-	// sidecar write and the EndFreshSync durability flush. Tests
+	// sidecar write and the FinishSync durability flush. Tests
 	// crash-clone the FS here to pin the WAL-prefix-durability
 	// contract: a Sync commit's WAL fsync also hardens every earlier
 	// NoSync page commit (sequential WAL; rotated WALs sync at
@@ -92,4 +94,12 @@ type testSeams struct {
 	// stored record stays unstamped and the sync stays discoverable
 	// as unfinished (resumable).
 	endSyncStampHook func() error
+
+	// Lets the SST-residue test show that the purge, not the scrub, removes the
+	// bytes.
+	skipLedgerResiduePurge bool
+
+	// Nothing else observes a compaction that did not happen; pebble's own
+	// Compact.Count folds in automatic compactions.
+	ledgerResiduePurges atomic.Int64
 }

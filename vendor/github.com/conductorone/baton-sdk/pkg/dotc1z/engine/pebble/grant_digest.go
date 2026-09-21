@@ -9,6 +9,8 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	v3 "github.com/conductorone/baton-sdk/pb/c1/storage/v3"
@@ -55,12 +57,112 @@ var grantDigestSpec = digestIndexSpec{
 // ABI bump (a change to either hash's input framing) makes stored
 // manifest roots computed under different versions incomparable by
 // construction, rather than silently comparing unrelated hash schemes.
-// Bump alongside any index-migration version bump that touches these
-// hashes (see index_migrations.go).
+//
+// Enforcement on the stored state itself is the durable ABI stamp
+// (rawdb.GrantDigestABIStampKey), written alongside every global-root
+// write and checked once per Open (verifyGrantDigestABI): digest state
+// whose stamp does not name this constant is dropped (writable open)
+// or reported "never built" (read-only open), so a bump here is
+// sufficient by itself to force every previously-sealed file's digest
+// state to be rebuilt in full at the new ABI on its next writable use.
+// A file with digest nodes but NO stamp was sealed by an SDK that
+// predates the stamp; those builds all hashed at version 1, so absence
+// reads as grantDigestABIVersionUnstamped. That made introducing the
+// stamp itself free of any rebuild (the constant was still 1 then),
+// but is a fixed historical fact, not a standing guarantee: at ABI >=
+// 2 an unstamped file is stale like any other mismatched stamp, and a
+// writable Open drops and rebuilds it — see
+// TestGrantDigestABIMissingStampReadsAsVersion1.
+// No index-migration entry is needed — see the note on digest-ABI
+// handling in index_migrations.go.
+//
+// v2 folds two more facts into grantContentHash64: the GrantImmutable
+// annotation (isImmutable) and, per source, GrantSourceRecord.is_direct
+// — both are stable per-grant facts (not sync-transient bookkeeping;
+// see the ABI doc on grantContentHash64) that v1 silently dropped along
+// with the rest of `annotations`.
 //
 // Exported so consumers of GrantContentHash / GrantDigestAccumulator
 // can check a stored root's abi_version before comparing.
-const GrantDigestABIVersion uint32 = 1
+const GrantDigestABIVersion uint32 = 2
+
+// grantDigestABIVersionUnstamped is the ABI version a file with digest
+// nodes but no stamp key is read as: every SDK build that predates the
+// stamp hashed at version 1. Fixed forever — it describes shipped
+// history, not the current ABI, and must not move when
+// GrantDigestABIVersion does.
+const grantDigestABIVersionUnstamped uint32 = 1
+
+// grantDigestABIStampValue is the ABI stamp's stored value: the
+// current GrantDigestABIVersion, uint32 BE (the index-migration
+// applied-version encoding).
+func grantDigestABIStampValue() []byte {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], GrantDigestABIVersion)
+	return buf[:]
+}
+
+// verifyGrantDigestABI is the Open-time half of the ABI stamp contract
+// (rawdb.GrantDigestABIStampKey; the write half is every global-root
+// write site). If the file holds digest nodes (per the just-probed
+// presence flag) whose stamped ABI version (readGrantDigestABIStamp)
+// is not the current GrantDigestABIVersion, that state was computed by
+// different hash code: a writable open restores the always-safe
+// "digests absent" state — the next EndSync's existing digests-absent
+// path (RepairMissingGrantDigests delegating to BuildGrantDigests)
+// then rebuilds everything, hash rows and nodes and manifest root
+// alike, at the current ABI. A read-only open cannot drop; it sets
+// grantDigestAbiStale, which makes the digest root getters report
+// "never built" (present-means-exact consumers recalculate — never a
+// wrong answer, mirroring grantDigestBuildPending).
+//
+// A stale or orphaned stamp over an EMPTY node keyspace is left alone:
+// with no nodes there is nothing to trust, and every build rewrites the
+// stamp on its completion side (the fold's opening DeleteRange erases
+// it first).
+func (e *Engine) verifyGrantDigestABI(ctx context.Context, readOnly bool) error {
+	e.grantDigestAbiStale.Store(false)
+	if !e.db.GrantDigestsPresent() {
+		return nil
+	}
+	stamped, err := e.readGrantDigestABIStamp()
+	if err != nil {
+		return err
+	}
+	if stamped == GrantDigestABIVersion {
+		return nil
+	}
+	if readOnly {
+		e.grantDigestAbiStale.Store(true)
+		return nil
+	}
+	ctxzap.Extract(ctx).Warn("pebble: grant digest state was built under a different hash ABI; dropping it — the next EndSync rebuilds it from scratch",
+		zap.Uint32("stamped_abi", stamped),
+		zap.Uint32("current_abi", GrantDigestABIVersion))
+	return e.dropAllGrantDigestStateLocked()
+}
+
+// readGrantDigestABIStamp returns the ABI version the file's digest
+// state is stamped with. A missing stamp key reads as
+// grantDigestABIVersionUnstamped (the pre-stamp SDKs all hashed at
+// version 1); a malformed value reads as 0, which no real ABI version
+// is, so it can never pass as current. Only meaningful when digest
+// nodes are present — with none, there is no state for the stamp to
+// describe.
+func (e *Engine) readGrantDigestABIStamp() (uint32, error) {
+	val, closer, err := e.db.Get(rawdb.GrantDigestABIStampKey())
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return grantDigestABIVersionUnstamped, nil
+		}
+		return 0, err
+	}
+	defer closer.Close()
+	if len(val) != 4 {
+		return 0, nil
+	}
+	return binary.BigEndian.Uint32(val), nil
+}
 
 // The whole-file grant digest root's node-key level lives in
 // internal/keys (rawdb.DigestLevelGlobalRoot, consumed by
@@ -85,7 +187,8 @@ func digestPartitionForEntitlement(id entitlementIdentity) string {
 // ABI: the two hash definitions below are part of the stored format.
 // Two SDK builds must hash identical grants identically or the digest
 // comparison reads "everything differs"; changing either input framing
-// requires an index-migration bump (index_migrations.go).
+// requires a GrantDigestABIVersion bump (which the durable ABI stamp
+// then enforces at Open — no index migration is involved).
 
 // grantPrincipalBucketHash64 is the bucket address for a principal:
 // xxHash64 over the ENCODED principal segments
@@ -110,7 +213,7 @@ func grantPrincipalBucketHash64(encodedPrincipalSegments []byte) uint64 {
 // ScanEntitlementGrantBucket).
 //
 // ABI: the stored truncation width, pinned to GrantDigestABIVersion. It may
-// only grow, and only under an index-migration bump — which is why it is a
+// only grow, and only under a GrantDigestABIVersion bump — which is why it is a
 // named constant rather than a literal in PrincipalBucketHash's signature:
 // widening the addressable bucket space must not change that signature.
 const DigestBucketHashBits = digestBucketHashLen * 8
@@ -146,7 +249,7 @@ const DigestBucketHashBits = digestBucketHashLen * 8
 //
 // ABI: pinned to GrantDigestABIVersion alongside GrantContentHash. Two
 // SDK builds must place the same principal in the same bucket, so the
-// input framing changes only under an index-migration bump.
+// input framing changes only under a GrantDigestABIVersion bump.
 func PrincipalBucketHash(principalRT, principalID string) uint64 {
 	enc := codec.AppendTupleStrings(make([]byte, 0, 64), principalRT, principalID)
 	return grantPrincipalBucketHash64(enc)
@@ -191,72 +294,140 @@ func principalBucketHash(principalRT, principalID string) []byte {
 	return out
 }
 
+// grantSourceFact is one entry of a grant's sources map as the content
+// hash sees it: the source-entitlement id (the map key) plus whether
+// that contribution is direct (GrantSourceRecord.is_direct, the map
+// value's only content-hash-relevant field — resource_type_id/
+// resource_id/entitlement_id are redundant with the key's own
+// entitlement identity and not folded in). key is a borrowed slice on
+// the raw-scan path; sortGrantSourceFacts sorts a slice of these by key.
+type grantSourceFact struct {
+	key      []byte
+	isDirect bool
+}
+
+// sortGrantSourceFacts sorts by key ascending (bytes.Compare order) and
+// collapses duplicate keys down to one entry each, keeping the LAST
+// duplicate in original encounter order — matching proto map semantics,
+// where a marshaled map field with a repeated key (never produced by
+// proto.Marshal, but legal wire bytes proto.Unmarshal must still accept)
+// keeps only the last entry seen for that key. A raw-scanned source list
+// can carry such duplicates (scanGrantContentFactsRawBytes does not
+// dedupe); the from-record paths (grantContentHashForRecord,
+// GrantContentHash) never can, since a Go map has already deduplicated
+// by construction before they build the fact list — but they still route
+// through here for one sort implementation.
+//
+// The insertion sort below is stable, so a run of equal keys is left in
+// wire/encounter order after sorting; collapsing each run to its last
+// element is therefore exactly "last write wins". Returns the
+// (possibly shortened) slice, reusing s's backing array — callers must
+// use the returned slice, not their original variable.
+func sortGrantSourceFacts(s []grantSourceFact) []grantSourceFact {
+	// Small-n insertion sort: source sets are tiny (usually 0–4).
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && bytes.Compare(s[j].key, s[j-1].key) < 0; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+	// Collapse runs of equal keys, keeping the last of each run.
+	out := s[:0]
+	for i := 0; i < len(s); i++ {
+		if i+1 < len(s) && bytes.Equal(s[i].key, s[i+1].key) {
+			continue
+		}
+		out = append(out, s[i])
+	}
+	return out
+}
+
 // grantContentHash64 is the canonical content hash of a grant — the
 // value stored in the hash index and the unit the grant digest folds.
 //
-// ABI: "the same grant" is defined as
+// ABI (v2): "the same grant" is defined as
 //
-//	xxHash64( primaryKeyTail ‖ ( 0x00 ‖ esc(source_id) )* )
+//	xxHash64( primaryKeyTail ‖ 0x00 ‖ bool(isImmutable) ‖
+//	          ( 0x00 ‖ esc(source_id) ‖ 0x00 ‖ bool(is_direct) )* )
 //
 // where primaryKeyTail is the grant's encoded primary-key tail (the
 // 6-segment identity tuple ent_rt|ent_rid|ent_flag|ent_tail|p_rt|p_id,
-// escaped and separator-delimited exactly as stored) and the source
-// ids — the keys of the grant's sources map, its expansion
-// provenance — are appended as additional tuple segments in ascending
-// byte order (sortedSourceKeys must already be sorted; the escape is
-// order-preserving so raw order == encoded order).
+// escaped and separator-delimited exactly as stored), isImmutable is
+// whether the grant carries a GrantImmutable annotation, and the
+// sources — the grant's expansion provenance — are appended as
+// (source_id, is_direct) pairs in ascending source_id byte order
+// (sortedSources must already be sorted AND deduplicated by key — see
+// sortGrantSourceFacts; the escape is order-preserving so raw order ==
+// encoded order). bool(...) is codec.AppendTupleBool's
+// single-byte encoding (0x26/0x27 — disjoint from the tuple separator
+// and escape bytes, so it needs no escaping of its own).
 //
-// The field set deliberately covers the membership EDGE (the identity
-// tuple) plus the grant's source-entitlement set, and deliberately
-// EXCLUDES everything sync-relative or transient — external_id (not
-// identity under the injective-key scheme; the same edge keeps its
-// hash when a connector changes its id grammar), discovered_at,
-// needs_expansion, expansion state, and annotations — none of which
-// change "which principal holds which entitlement". The source map
-// VALUES (GrantSourceRecord) are not folded in v1 — only the set of
-// source ids, which is the membership-composition signal.
+// The field set covers the membership EDGE (the identity tuple), the
+// grant's source-entitlement set and each source's direct/indirect
+// provenance, and whether the grant is immutable — and deliberately
+// EXCLUDES everything else sync-relative, transient, or connector-
+// opaque: external_id (not identity under the injective-key scheme;
+// the same edge keeps its hash when a connector changes its id
+// grammar), discovered_at, needs_expansion, expansion state, and every
+// other annotation (e.g. GrantMetadata). isImmutable and is_direct are
+// the two exceptions to "annotations/source values are excluded": both
+// are stable per-grant facts about what the edge IS — not bookkeeping
+// that would legitimately churn every sync — and both are already used
+// elsewhere in the SDK to distinguish grants whose identity tuple and
+// source-id set are otherwise identical (see rollback_expansion.go's
+// suspect-grant check and topological_merge.go's direct-wins-over-
+// indirect upgrade). v1 folded neither; see GrantDigestABIVersion.
 //
 // This is a hand-rolled framing, NOT proto marshal: deterministic-proto
 // output is not canonical across protobuf library versions, which
 // would make two files written by different SDK builds hash identical
 // grants differently. The tuple framing is injective: every segment is
-// escaped and separator-delimited, and the identity is a fixed six
-// segments, so no source list can alias a different identity split (a
-// naive 0x00-joined concatenation would collide e.g. sources
+// escaped and separator-delimited, the identity is a fixed six
+// segments, and the isImmutable flag always occupies the fixed slot
+// right after it (whether or not any source follows), so no source
+// list can alias a different identity split or a different isImmutable
+// value (a naive 0x00-joined concatenation would collide e.g. sources
 // ["a","b"] vs ["a\x00b"]).
 //
 // tuple is a caller-reused scratch buffer, returned grown for reuse.
-func grantContentHash64(tuple, primaryKeyTail []byte, sortedSourceKeys [][]byte) (uint64, []byte) {
-	if len(sortedSourceKeys) == 0 {
-		// Common case: no sources — hash the tail bytes in place.
+func grantContentHash64(tuple, primaryKeyTail []byte, isImmutable bool, sortedSources []grantSourceFact) (uint64, []byte) {
+	if !isImmutable && len(sortedSources) == 0 {
+		// Common case: not immutable, no sources — hash the tail bytes
+		// in place.
 		return xxhash.Sum64(primaryKeyTail), tuple
 	}
 	tuple = append(tuple[:0], primaryKeyTail...)
-	for _, k := range sortedSourceKeys {
+	tuple = codec.AppendTupleSeparator(tuple)
+	tuple = codec.AppendTupleBool(tuple, isImmutable)
+	for _, s := range sortedSources {
 		tuple = codec.AppendTupleSeparator(tuple)
-		tuple = codec.AppendTupleBytes(tuple, k)
+		tuple = codec.AppendTupleBytes(tuple, s.key)
+		tuple = codec.AppendTupleSeparator(tuple)
+		tuple = codec.AppendTupleBool(tuple, s.isDirect)
 	}
 	return xxhash.Sum64(tuple), tuple
 }
 
 // grantContentHashForRecord is the from-record form of the content
-// hash: encodes the grant's identity tuple and sorts its source keys,
-// then delegates to grantContentHash64. The seal-time build never uses
-// this (it splices key bytes and raw-scans the value); it exists for
-// readers, tests, and any future repair path, and is pinned against
-// the splice form by TestGrantDigestSpliceMatchesEncode.
+// hash: encodes the grant's identity tuple, its immutability, and its
+// sorted sources, then delegates to grantContentHash64. The seal-time
+// build never uses this (it splices key bytes and raw-scans the
+// value); it exists for readers, tests, and any future repair path,
+// and is pinned against the splice form by
+// TestGrantDigestSpliceMatchesEncode.
 func grantContentHashForRecord(r *v3.GrantRecord) ([]byte, error) {
 	id, err := grantIdentityFromRecord(r)
 	if err != nil {
 		return nil, err
 	}
 	key := encodeGrantIdentityKey(id)
-	srcs := make([][]byte, 0, len(r.GetSources()))
-	for k := range r.GetSources() {
-		srcs = append(srcs, []byte(k))
+	isImmutable := annsContainType(r.GetAnnotations(), grantImmutableAnnotationTypeName)
+	srcMap := r.GetSources()
+	srcs := make([]grantSourceFact, 0, len(srcMap))
+	for k, v := range srcMap {
+		srcs = append(srcs, grantSourceFact{key: []byte(k), isDirect: v.GetIsDirect()})
 	}
-	sortByteSlices(srcs)
-	h, _ := grantContentHash64(nil, key[grantPrimaryKeyPrefixLen:], srcs)
+	srcs = sortGrantSourceFacts(srcs)
+	h, _ := grantContentHash64(nil, key[grantPrimaryKeyPrefixLen:], isImmutable, srcs)
 	out := make([]byte, hashLen)
 	binary.BigEndian.PutUint64(out, h)
 	return out, nil
@@ -293,13 +464,14 @@ func GrantContentHash(g *v2.Grant) (uint64, error) {
 		principalID:     princ.GetResource(),
 	}
 	key := encodeGrantIdentityKey(id)
+	isImmutable := annsContainType(g.GetAnnotations(), grantImmutableAnnotationTypeName)
 	sources := g.GetSources().GetSources()
-	srcs := make([][]byte, 0, len(sources))
-	for k := range sources {
-		srcs = append(srcs, []byte(k))
+	srcs := make([]grantSourceFact, 0, len(sources))
+	for k, v := range sources {
+		srcs = append(srcs, grantSourceFact{key: []byte(k), isDirect: v.GetIsDirect()})
 	}
-	sortByteSlices(srcs)
-	h, _ := grantContentHash64(nil, key[grantPrimaryKeyPrefixLen:], srcs)
+	srcs = sortGrantSourceFacts(srcs)
+	h, _ := grantContentHash64(nil, key[grantPrimaryKeyPrefixLen:], isImmutable, srcs)
 	return h, nil
 }
 
@@ -337,16 +509,6 @@ func (a *GrantDigestAccumulator) Root() DigestRoot {
 	return DigestRoot{
 		Hash:  binary.BigEndian.AppendUint64(nil, a.xor),
 		Count: a.count,
-	}
-}
-
-// sortByteSlices sorts byte slices ascending (bytes.Compare order).
-func sortByteSlices(s [][]byte) {
-	// Small-n insertion sort: source sets are tiny (usually 0–4).
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && bytes.Compare(s[j], s[j-1]) < 0; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
 	}
 }
 
@@ -437,10 +599,12 @@ func (e *Engine) GetEntitlementDigestRoot(ctx context.Context, id entitlementIde
 // invalidation paths that drop any per-entitlement root — see
 // stageGrantDigestInvalidation and the Drop* functions below.
 func (e *Engine) GetGrantDigestGlobalRoot(ctx context.Context) (DigestRoot, bool, error) {
-	if e.grantDigestBuildPending.Load() {
+	if e.grantDigestStateUntrusted() {
 		// Same guard as getPartitionDigestRoot: a global root committed
 		// by an interrupted build must read as absent, not certify a
-		// hash index that was never ingested.
+		// hash index that was never ingested — and one computed under a
+		// different hash ABI (read-only open of an old file) must read
+		// as absent rather than compare hashes from another scheme.
 		return DigestRoot{}, false, nil
 	}
 	val, closer, err := e.db.Get(rawdb.GlobalGrantDigestNodeKey())
@@ -470,7 +634,18 @@ func (e *Engine) GetGrantDigestGlobalRoot(ctx context.Context) (DigestRoot, bool
 // absent index range and returns {0, 0} — "zero grants", not "unknown".
 // Never use it as a fallback for a missing root; see
 // GetEntitlementDigestRoot and computeBucketDigest's precondition.
+//
+// Gated on grantDigestStateUntrusted: while either flag is set, the
+// hash index this folds may be half-built (grantDigestBuildPending) or
+// hold content hashes from a different ABI (grantDigestAbiStale), so
+// folding it directly — unlike getPartitionDigestRoot, this method has
+// no stored-root check of its own to lean on — would return digests
+// derived from untrustworthy content. Report the same {0, 0} "not
+// built / absent" shape a never-built partition already produces.
 func (e *Engine) ComputeEntitlementBucketDigest(ctx context.Context, id entitlementIdentity, bucket DigestBucket) ([]byte, int64, error) {
+	if e.grantDigestStateUntrusted() {
+		return make([]byte, hashLen), 0, nil
+	}
 	return e.computeBucketDigest(ctx, grantDigestSpec, digestPartitionForEntitlement(id), bucket)
 }
 
@@ -489,6 +664,17 @@ func (e *Engine) DirtyEntitlementBuckets(ctx context.Context, other *Engine, id 
 // The primary key is reconstructed from each index key by byte splice
 // (no decode); the point Get per entry is the cost of MATERIALIZING a
 // changed grant, not of finding it. Orphan index entries are skipped.
+//
+// Deliberately NOT gated by grantDigestStateUntrusted, unlike
+// getPartitionDigestRoot / GetGrantDigestGlobalRoot /
+// ComputeEntitlementBucketDigest: a bucket's MEMBERSHIP is the
+// principal bucket hash over the encoded principal identity, frozen by
+// the v3 key encoding and untouched by any GrantDigestABIVersion bump
+// (only the stored CONTENT hashes and digest nodes are ABI-dependent —
+// see grantContentHash64 vs grantPrincipalBucketHash64). So a stale
+// file's bucket placement is still exact, and this keeps yielding the
+// grants a caller already knows to be dirty even on a read-only open
+// over a stale ABI stamp.
 func (e *Engine) IterateGrantsByEntitlementBucket(ctx context.Context, id entitlementIdentity, bucket DigestBucket, yield func(*v3.GrantRecord) bool) error {
 	lower, upper := grantDigestSpec.bucketBounds(digestPartitionForEntitlement(id), bucket)
 	iter, err := e.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})

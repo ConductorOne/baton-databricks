@@ -38,7 +38,10 @@ const (
 	// TypeDigest because 0x0A was assigned to digests before source-cache
 	// replay was extracted onto the current keyspace.
 	TypeSourceCache byte = 0x0B
-	TypeEngineMeta  byte = 0xFF
+	// A ledger row is staged only into the same RecordBatch as its page's
+	// records (StageLedgerRow).
+	TypeLedger     byte = 0x0C
+	TypeEngineMeta byte = 0xFF
 )
 
 // Index-discriminator bytes (second byte after TypeIndex). One byte
@@ -76,6 +79,14 @@ const GrantPrimaryKeyPrefixLen = 3
 // (root=0, leaf=1), keeping the global node's key disjoint from every
 // per-partition node regardless of partition bytes.
 const DigestLevelGlobalRoot byte = 2
+
+// DigestMetaIndexID is the reserved index-discriminator for
+// engine-owned metadata keys inside the digest keyspace (today only
+// GrantDigestABIStampKey). 0xFF sorts after every real digested
+// index, so [v3|TypeDigest, v3|TypeDigest|DigestMetaIndexID) bounds
+// exactly the digest NODES (see DigestNodeKeyspaceBounds). No
+// digestIndexSpec may ever claim this byte.
+const DigestMetaIndexID byte = 0xFF
 
 // === grant primary-key splices ===
 
@@ -273,6 +284,66 @@ func SourceCachePoisonBounds() ([]byte, []byte) {
 func SourceCacheFamilyBounds() ([]byte, []byte) {
 	lo := []byte{VersionV3, TypeSourceCache}
 	return lo, UpperBound(lo)
+}
+
+// The ledger family (v3 | TypeLedger) is split by a sub-kind byte:
+//
+//	0x00  page rows        (LedgerKeyPrefix; tuple-encoded identity tail)
+//	0x01  fact keys        (LedgerFactPrefix; tuple(name) → 1 byte)
+//	0x02  counter buckets  (LedgerCounterPrefix; tuple(run) | sep | worker → LedgerCounterBucket;
+//	                        worker 0xFFFFFFFF is the run's reserved run-level stats bucket)
+//	0x03  frontier         (LedgerFrontierKey; single key → LedgerFrontier)
+//
+// All ride the RecordBatch and are wiped with the sync (scopedRanges
+// covers the family). Row readers bound themselves to 0x00
+// (LedgerRowBounds); the family-wide bound is for wipe and purge.
+const (
+	ledgerKindRow      byte = 0x00
+	ledgerKindFact     byte = 0x01
+	ledgerKindCounter  byte = 0x02
+	ledgerKindFrontier byte = 0x03
+)
+
+func LedgerKeyPrefix() []byte {
+	return []byte{VersionV3, TypeLedger, ledgerKindRow}
+}
+
+func LedgerRowBounds() ([]byte, []byte) {
+	lo := LedgerKeyPrefix()
+	return lo, UpperBound(lo)
+}
+
+func LedgerFactPrefix() []byte {
+	return []byte{VersionV3, TypeLedger, ledgerKindFact}
+}
+
+func LedgerFactBounds() ([]byte, []byte) {
+	lo := LedgerFactPrefix()
+	return lo, UpperBound(lo)
+}
+
+func LedgerCounterPrefix() []byte {
+	return []byte{VersionV3, TypeLedger, ledgerKindCounter}
+}
+
+func LedgerCounterBounds() ([]byte, []byte) {
+	lo := LedgerCounterPrefix()
+	return lo, UpperBound(lo)
+}
+
+func LedgerFrontierKey() []byte {
+	return []byte{VersionV3, TypeLedger, ledgerKindFrontier}
+}
+
+func LedgerBounds() ([]byte, []byte) {
+	lo := []byte{VersionV3, TypeLedger}
+	return lo, UpperBound(lo)
+}
+
+// Duplicates the engine's encodeSyncRunKey so the takeover can stage it with
+// a family assert.
+func SyncRunKey() []byte {
+	return []byte{VersionV3, TypeSyncRun}
 }
 
 // RowKindForRecordType maps a primary record type byte to the row-kind
@@ -490,9 +561,34 @@ func DeferredIdxPendingKey() []byte {
 	return codec.AppendTupleStrings(buf, "deferred_grant_idx_pending")
 }
 
-// DigestKeyspaceBounds bounds the entire digest keyspace (all digested
-// indexes) — the presence-probe range for the digests-present flag.
-func DigestKeyspaceBounds() ([]byte, []byte) {
-	lo := []byte{VersionV3, TypeDigest}
-	return lo, UpperBound(lo)
+// GrantDigestABIStampKey is the durable record of which grant-digest
+// hash ABI (the engine's GrantDigestABIVersion) this file's digest
+// state — hash-index values and digest nodes — was computed under.
+// Value: uint32 BE. Written only alongside the whole-file global root
+// (the same present-means-exact certificate), read only at Open.
+//
+// It lives INSIDE the digest keyspace deliberately: every wholesale
+// destroyer of digest state — the drop paths' full-range deletes,
+// ResetForNewSync's excision, the fold build's opening DeleteRange —
+// erases it without knowing it exists, INCLUDING the copies of those
+// paths in already-shipped SDKs that predate the stamp. Absence with
+// digest nodes present therefore always means "built by an SDK that
+// predates the stamp" — every such build hashed at ABI version 1, so
+// the engine reads a missing stamp as version 1 and compares that to
+// its current ABI like any other stamp (drop and rebuild iff they
+// differ). Under DigestMetaIndexID so no node scan or presence probe
+// visits it.
+func GrantDigestABIStampKey() []byte {
+	buf := make([]byte, 0, 3+len("grant_digest_abi")+2)
+	buf = append(buf, VersionV3, TypeDigest, DigestMetaIndexID)
+	return codec.AppendTupleStrings(buf, "grant_digest_abi")
+}
+
+// DigestNodeKeyspaceBounds bounds the digest NODE keyspace: all
+// digested indexes, excluding the DigestMetaIndexID metadata sub-range
+// — the presence-probe range for the digests-present flag. The ABI
+// stamp must not arm that flag: presence gates mutation-path
+// invalidation and repair delegation, which are about nodes.
+func DigestNodeKeyspaceBounds() ([]byte, []byte) {
+	return []byte{VersionV3, TypeDigest}, []byte{VersionV3, TypeDigest, DigestMetaIndexID}
 }
