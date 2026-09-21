@@ -70,6 +70,18 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
+	SyncUnityCatalogField = field.BoolField(
+		"sync-unity-catalog",
+		field.WithDescription("Sync Unity Catalog catalogs and schemas (and their permission grants) for access reviews."),
+		field.WithDefaultValue(false),
+		field.WithDisplayName("Sync Unity Catalog"),
+	)
+	SyncUnityCatalogTablesField = field.BoolField(
+		"sync-unity-catalog-tables",
+		field.WithDescription("Also sync Unity Catalog tables and their grants. Requires sync-unity-catalog. May be very large in big metastores."),
+		field.WithDefaultValue(false),
+		field.WithDisplayName("Sync Unity Catalog Tables"),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -80,6 +92,8 @@ var (
 		WorkspaceTokensField,
 		BaseURLField,
 		ExcludeWorkspacesField,
+		SyncUnityCatalogField,
+		SyncUnityCatalogTablesField,
 	}
 )
 
@@ -92,6 +106,7 @@ var Config = field.NewConfiguration(
 	field.WithConstraints(
 		field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField),
 		field.FieldsDependentOn([]field.SchemaField{WorkspaceTokensField}, []field.SchemaField{WorkspacesField}),
+		field.FieldsDependentOn([]field.SchemaField{SyncUnityCatalogTablesField}, []field.SchemaField{SyncUnityCatalogField}),
 	),
 	field.WithFieldGroups([]field.SchemaFieldGroup{
 		{
@@ -101,6 +116,7 @@ var Config = field.NewConfiguration(
 			Fields: []field.SchemaField{
 				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
 				HostnameField, AccountHostnameField, WorkspacesField, ExcludeWorkspacesField,
+				SyncUnityCatalogField, SyncUnityCatalogTablesField,
 			},
 			Default: true,
 		},

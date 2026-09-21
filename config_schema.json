@@ -163,6 +163,18 @@
       "displayName": "Exclude Workspaces",
       "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces.",
       "stringSliceField": {}
+    },
+    {
+      "name": "sync-unity-catalog",
+      "displayName": "Sync Unity Catalog",
+      "description": "Sync Unity Catalog catalogs and schemas (and their permission grants) for access reviews.",
+      "boolField": {}
+    },
+    {
+      "name": "sync-unity-catalog-tables",
+      "displayName": "Sync Unity Catalog Tables",
+      "description": "Also sync Unity Catalog tables and their grants. Requires sync-unity-catalog. May be very large in big metastores.",
+      "boolField": {}
     }
   ],
   "constraints": [
@@ -181,6 +193,15 @@
       "secondaryFieldNames": [
         "workspaces"
       ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_DEPENDENT_ON",
+      "fieldNames": [
+        "sync-unity-catalog-tables"
+      ],
+      "secondaryFieldNames": [
+        "sync-unity-catalog"
+      ]
     }
   ],
   "displayName": "Databricks",
@@ -198,7 +219,9 @@
         "hostname",
         "account-hostname",
         "workspaces",
-        "databricks-exclude-workspaces"
+        "databricks-exclude-workspaces",
+        "sync-unity-catalog",
+        "sync-unity-catalog-tables"
       ],
       "default": true
     }

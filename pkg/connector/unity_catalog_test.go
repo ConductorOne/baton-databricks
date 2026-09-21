@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -48,7 +49,7 @@ func newErrClient(t *testing.T, status int) *databricks.Client {
 // must not fail the sync — the catalog List degrades to empty instead of
 // returning an error that aborts every other resource type.
 func TestCatalogListDegradesOnForbidden(t *testing.T) {
-	b := newCatalogBuilder(newErrClient(t, http.StatusForbidden))
+	b := newCatalogBuilder(newUCResolver(newErrClient(t, http.StatusForbidden)))
 	parent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "dbc-abc"}
 
 	resources, results, err := b.List(context.Background(), parent, rs.SyncOpAttrs{})
@@ -65,7 +66,7 @@ func TestCatalogListDegradesOnForbidden(t *testing.T) {
 
 // Context cancellation must propagate rather than be swallowed as degradation.
 func TestCatalogListPropagatesContextCancellation(t *testing.T) {
-	b := newCatalogBuilder(newErrClient(t, http.StatusForbidden))
+	b := newCatalogBuilder(newUCResolver(newErrClient(t, http.StatusForbidden)))
 	parent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "dbc-abc"}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -73,5 +74,63 @@ func TestCatalogListPropagatesContextCancellation(t *testing.T) {
 
 	if _, _, err := b.List(ctx, parent, rs.SyncOpAttrs{}); err == nil {
 		t.Fatalf("List swallowed cancelled context, want error")
+	}
+}
+
+func childResourceTypeIDs(t *testing.T, r *v2.Resource) []string {
+	t.Helper()
+	var out []string
+	for _, a := range r.GetAnnotations() {
+		crt := &v2.ChildResourceType{}
+		if a.MessageIs(crt) {
+			if err := a.UnmarshalTo(crt); err != nil {
+				t.Fatalf("unmarshal child resource type: %v", err)
+			}
+			out = append(out, crt.ResourceTypeId)
+		}
+	}
+	return out
+}
+
+// Unity Catalog is opt-in: the catalog child (and thus UC sync) must be absent
+// unless enabled, and table sync is separately gated on the schema child.
+func TestUnityCatalogSyncIsGated(t *testing.T) {
+	ctx := context.Background()
+	ws := &databricks.Workspace{Name: "prod", DeploymentName: "dbc-abc", ID: 1}
+	acct := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acc-1"}
+
+	off, err := workspaceResource(ctx, ws, acct, false)
+	if err != nil {
+		t.Fatalf("workspaceResource: %v", err)
+	}
+	if slices.Contains(childResourceTypeIDs(t, off), catalogResourceType.Id) {
+		t.Fatalf("catalog child present when UC sync disabled")
+	}
+
+	on, err := workspaceResource(ctx, ws, acct, true)
+	if err != nil {
+		t.Fatalf("workspaceResource: %v", err)
+	}
+	if !slices.Contains(childResourceTypeIDs(t, on), catalogResourceType.Id) {
+		t.Fatalf("catalog child missing when UC sync enabled")
+	}
+
+	catParent := &v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: makeSecurableID("dbc-abc", "prod_evaluation")}
+	schema := &databricks.Schema{Name: "reports", FullName: "prod_evaluation.reports"}
+
+	noTables, err := schemaResource("dbc-abc", schema, catParent, false)
+	if err != nil {
+		t.Fatalf("schemaResource: %v", err)
+	}
+	if slices.Contains(childResourceTypeIDs(t, noTables), tableResourceType.Id) {
+		t.Fatalf("table child present when table sync disabled")
+	}
+
+	withTables, err := schemaResource("dbc-abc", schema, catParent, true)
+	if err != nil {
+		t.Fatalf("schemaResource: %v", err)
+	}
+	if !slices.Contains(childResourceTypeIDs(t, withTables), tableResourceType.Id) {
+		t.Fatalf("table child missing when table sync enabled")
 	}
 }

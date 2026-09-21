@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -28,19 +29,22 @@ const securableIDSep = "::"
 // provisionable through the permissions API.
 const ownerEntitlement = "owner"
 
-// Unity Catalog privileges per securable level. Supersets of what the
-// permissions API may report so every observed grant maps to an entitlement.
+// Unity Catalog privileges per securable level. These are the entitlements
+// exposed for each level; a grant referencing a privilege outside its level's
+// set is skipped (with a warning) so no grant points at an entitlement that
+// Entitlements() never produced.
 var (
 	catalogPrivileges = []string{
 		"ALL_PRIVILEGES", "USE_CATALOG", "USE_SCHEMA", "CREATE_SCHEMA", "CREATE_TABLE",
 		"CREATE_FUNCTION", "CREATE_MODEL", "CREATE_VOLUME", "CREATE_MATERIALIZED_VIEW",
 		"MODIFY", "SELECT", "EXECUTE", "READ_VOLUME", "WRITE_VOLUME", "REFRESH",
-		"APPLY_TAG", "BROWSE", "MANAGE",
+		"APPLY_TAG", "BROWSE", "EXTERNAL_USE_SCHEMA", "MANAGE",
 	}
 	schemaPrivileges = []string{
 		"ALL_PRIVILEGES", "USE_SCHEMA", "CREATE_TABLE", "CREATE_FUNCTION", "CREATE_MODEL",
 		"CREATE_VOLUME", "CREATE_MATERIALIZED_VIEW", "MODIFY", "SELECT", "EXECUTE",
-		"READ_VOLUME", "WRITE_VOLUME", "REFRESH", "APPLY_TAG", "BROWSE", "MANAGE",
+		"READ_VOLUME", "WRITE_VOLUME", "REFRESH", "APPLY_TAG", "BROWSE",
+		"EXTERNAL_USE_SCHEMA", "MANAGE",
 	}
 	tablePrivileges = []string{
 		"ALL_PRIVILEGES", "SELECT", "MODIFY", "APPLY_TAG", "BROWSE", "MANAGE",
@@ -60,11 +64,12 @@ func splitSecurableID(id string) (string, string) {
 	return workspaceId, fullName
 }
 
-func securableProfile(workspaceId, fullName, owner string) map[string]interface{} {
+func securableProfile(workspaceId, fullName, owner, securableType string) map[string]interface{} {
 	return map[string]interface{}{
-		"workspace_id": workspaceId,
-		"full_name":    fullName,
-		"owner":        owner,
+		"workspace_id":   workspaceId,
+		"full_name":      fullName,
+		"owner":          owner,
+		"securable_type": securableType,
 	}
 }
 
@@ -91,10 +96,82 @@ func securablePrivilegeEntitlements(resource *v2.Resource, privileges []string) 
 	return rv
 }
 
-// resolvePrincipalResourceID resolves a Unity Catalog principal string (a user
-// name/email, a group display name, or a service principal application ID) to a
-// connector resource ID. Returns nil when the principal cannot be matched to any
-// known identity so the caller can skip it.
+// ucResolver resolves Unity Catalog principal strings to/from connector resource
+// IDs, caching results per (scope, principal) to avoid a SCIM lookup storm:
+// Grants() runs for every catalog, schema and table, and each grant would
+// otherwise cost up to three uncached SCIM list calls per principal.
+type ucResolver struct {
+	client *databricks.Client
+	mu     sync.Mutex
+	cache  map[string]*v2.ResourceId
+}
+
+func newUCResolver(client *databricks.Client) *ucResolver {
+	return &ucResolver{client: client, cache: make(map[string]*v2.ResourceId)}
+}
+
+// scimScopes returns the SCIM scopes to search, in order. Unity Catalog grants
+// are typically held by account-level identities, which are synced from account
+// SCIM (scope "") whenever the account API is available; the workspace scope is
+// a fallback for workspace-local identities (and the only scope under token
+// auth, where identities are synced per workspace).
+func (r *ucResolver) scimScopes(workspaceId string) []string {
+	if r.client.IsAccountAPIAvailable() {
+		return []string{"", workspaceId}
+	}
+	return []string{workspaceId}
+}
+
+// resolve maps a Unity Catalog principal string (user name/email, group display
+// name, or service principal application ID) to a connector resource ID. Returns
+// nil when no identity matches. Results (including negatives) are cached.
+func (r *ucResolver) resolve(ctx context.Context, workspaceId, principal string) (*v2.ResourceId, error) {
+	key := workspaceId + "\x00" + principal
+
+	r.mu.Lock()
+	if id, ok := r.cache[key]; ok {
+		r.mu.Unlock()
+		return id, nil
+	}
+	r.mu.Unlock()
+
+	var result *v2.ResourceId
+	for _, scope := range r.scimScopes(workspaceId) {
+		id, err := resolvePrincipalResourceID(ctx, r.client, scope, principal)
+		if err != nil {
+			return nil, err
+		}
+		if id != nil {
+			result = id
+			break
+		}
+	}
+
+	r.mu.Lock()
+	r.cache[key] = result
+	r.mu.Unlock()
+	return result, nil
+}
+
+// resolveName converts a connector principal resource ID back into the Unity
+// Catalog principal string expected by the permissions API, searching the same
+// scopes as resolve.
+func (r *ucResolver) resolveName(ctx context.Context, workspaceId string, principal *v2.ResourceId) (string, error) {
+	for _, scope := range r.scimScopes(workspaceId) {
+		name, err := resolvePrincipalName(ctx, r.client, scope, principal)
+		if err != nil {
+			return "", err
+		}
+		if name != "" {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
+// resolvePrincipalResourceID resolves a Unity Catalog principal string against a
+// single SCIM scope (workspaceId "" targets the account API). Returns nil when
+// the principal cannot be matched to any known identity in that scope.
 func resolvePrincipalResourceID(ctx context.Context, c *databricks.Client, workspaceId, principal string) (*v2.ResourceId, error) {
 	if userID, _, err := c.FindUserID(ctx, workspaceId, principal); err == nil && userID != "" {
 		return &v2.ResourceId{ResourceType: userResourceType.Id, Resource: userID}, nil
@@ -117,8 +194,8 @@ func resolvePrincipalResourceID(ctx context.Context, c *databricks.Client, works
 	return nil, nil
 }
 
-// resolvePrincipalName converts a connector principal resource ID back into the
-// Unity Catalog principal string expected by the permissions API.
+// resolvePrincipalName converts a connector principal resource ID into the Unity
+// Catalog principal string within a single SCIM scope. Returns "" when not found.
 func resolvePrincipalName(ctx context.Context, c *databricks.Client, workspaceId string, principal *v2.ResourceId) (string, error) {
 	switch principal.ResourceType {
 	case userResourceType.Id:
@@ -137,31 +214,41 @@ func resolvePrincipalName(ctx context.Context, c *databricks.Client, workspaceId
 
 // securableGrants lists the direct privilege assignments on a securable and
 // converts them into grants, expanding group principals and adding the owner.
-func securableGrants(ctx context.Context, c *databricks.Client, resource *v2.Resource, securableType string) ([]*v2.Grant, error) {
+// Failures degrade to an empty result (logged) rather than aborting the sync;
+// context cancellation still propagates.
+func securableGrants(ctx context.Context, r *ucResolver, resource *v2.Resource, securableType string, privileges []string) ([]*v2.Grant, annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 	workspaceId, fullName := splitSecurableID(resource.Id.Resource)
 
-	assignments, _, err := c.ListPermissions(ctx, workspaceId, securableType, fullName)
+	assignments, ratelimit, err := r.client.ListPermissions(ctx, workspaceId, securableType, fullName)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
-		// Degrade gracefully: a securable whose grants cannot be read (UC access
-		// missing, securable deleted mid-sync) must not fail the whole sync.
 		l.Warn("databricks-connector: unable to list unity catalog permissions, skipping securable grants",
 			zap.String("securable_type", securableType),
 			zap.String("securable", fullName),
 			zap.Error(err),
 		)
-		return nil, nil
+		return nil, nil, nil
+	}
+
+	annos := annotations.Annotations{}
+	if ratelimit != nil {
+		annos.WithRateLimiting(ratelimit)
+	}
+
+	known := make(map[string]struct{}, len(privileges))
+	for _, p := range privileges {
+		known[p] = struct{}{}
 	}
 
 	var rv []*v2.Grant
 	for _, a := range assignments {
-		principalID, err := resolvePrincipalResourceID(ctx, c, workspaceId, a.Principal)
+		principalID, err := r.resolve(ctx, workspaceId, a.Principal)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
 			l.Warn("databricks-connector: failed to resolve unity catalog principal, skipping",
 				zap.String("principal", a.Principal),
@@ -179,9 +266,17 @@ func securableGrants(ctx context.Context, c *databricks.Client, resource *v2.Res
 		}
 
 		for _, priv := range a.Privileges {
-			g, err := securableGrant(ctx, c, resource, workspaceId, priv, principalID)
+			if _, ok := known[priv]; !ok {
+				l.Warn("databricks-connector: skipping unmodeled unity catalog privilege",
+					zap.String("privilege", priv),
+					zap.String("securable_type", securableType),
+					zap.String("securable", fullName),
+				)
+				continue
+			}
+			g, err := securableGrant(ctx, r.client, resource, workspaceId, priv, principalID)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			rv = append(rv, g)
 		}
@@ -189,34 +284,34 @@ func securableGrants(ctx context.Context, c *databricks.Client, resource *v2.Res
 
 	// Owners hold implicit full control the permissions API omits.
 	if owner, ok := rs.GetProfileStringValue(rs.GetProfile(resource), "owner"); ok && owner != "" {
-		principalID, err := resolvePrincipalResourceID(ctx, c, workspaceId, owner)
+		principalID, err := r.resolve(ctx, workspaceId, owner)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
 			l.Warn("databricks-connector: failed to resolve unity catalog owner, skipping owner grant",
 				zap.String("owner", owner),
 				zap.String("securable", fullName),
 				zap.Error(err),
 			)
-			return rv, nil
+			return rv, annos, nil
 		}
 		if principalID == nil {
 			l.Warn("databricks-connector: skipping unresolved unity catalog owner",
 				zap.String("owner", owner),
 				zap.String("securable", fullName),
 			)
-			return rv, nil
+			return rv, annos, nil
 		}
 
-		g, err := securableGrant(ctx, c, resource, workspaceId, ownerEntitlement, principalID)
+		g, err := securableGrant(ctx, r.client, resource, workspaceId, ownerEntitlement, principalID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		rv = append(rv, g)
 	}
 
-	return rv, nil
+	return rv, annos, nil
 }
 
 // securableGrant builds a single grant, adding group-membership expansion when
@@ -238,7 +333,7 @@ func securableGrant(ctx context.Context, c *databricks.Client, resource *v2.Reso
 }
 
 // securableGrantChange applies a single add/remove privilege change on a securable.
-func securableGrantChange(ctx context.Context, c *databricks.Client, entitlement *v2.Entitlement, principal *v2.Resource, add bool) (annotations.Annotations, error) {
+func securableGrantChange(ctx context.Context, r *ucResolver, entitlement *v2.Entitlement, principal *v2.Resource, add bool) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
 	if !isValidPrincipal(principal.Id) {
@@ -260,7 +355,7 @@ func securableGrantChange(ctx context.Context, c *databricks.Client, entitlement
 		return nil, fmt.Errorf("databricks-connector: securable type not found on entitlement resource")
 	}
 
-	principalName, err := resolvePrincipalName(ctx, c, workspaceId, principal.Id)
+	principalName, err := r.resolveName(ctx, workspaceId, principal.Id)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to resolve principal name: %w", err)
 	}
@@ -275,17 +370,28 @@ func securableGrantChange(ctx context.Context, c *databricks.Client, entitlement
 		change.Remove = []string{privilege}
 	}
 
-	if _, err := c.UpdatePermissions(ctx, workspaceId, securableType, fullName, []databricks.PermissionsChange{change}); err != nil {
+	if _, err := r.client.UpdatePermissions(ctx, workspaceId, securableType, fullName, []databricks.PermissionsChange{change}); err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to update %s permissions for %q: %w", securableType, fullName, err)
 	}
 
 	return nil, nil
 }
 
+// syncOpResults builds a SyncOpResults carrying the next page token and any
+// rate-limit feedback so the SDK can back off on the highest-volume calls.
+func syncOpResults(nextPage string, ratelimit *v2.RateLimitDescription) *rs.SyncOpResults {
+	res := &rs.SyncOpResults{NextPageToken: nextPage}
+	if ratelimit != nil {
+		res.Annotations = annotations.Annotations{}
+		res.Annotations.WithRateLimiting(ratelimit)
+	}
+	return res
+}
+
 // ---- Catalog builder ----
 
 type catalogBuilder struct {
-	client       *databricks.Client
+	resolver     *ucResolver
 	resourceType *v2.ResourceType
 }
 
@@ -294,14 +400,11 @@ func (b *catalogBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 }
 
 func catalogResource(workspaceId string, catalog *databricks.Catalog, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := securableProfile(workspaceId, catalog.Name, catalog.Owner)
-	profile["securable_type"] = databricks.SecurableCatalog
-
 	return rs.NewResource(
 		catalog.Name,
 		catalogResourceType,
 		makeSecurableID(workspaceId, catalog.Name),
-		rs.WithResourceProfile(profile),
+		rs.WithResourceProfile(securableProfile(workspaceId, catalog.Name, catalog.Owner, databricks.SecurableCatalog)),
 		rs.WithParentResourceID(parent),
 		rs.WithAnnotation(&v2.ChildResourceType{ResourceTypeId: schemaResourceType.Id}),
 	)
@@ -318,7 +421,7 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
-	catalogs, nextToken, _, err := b.client.ListCatalogs(ctx, workspaceId, pageToken, ResourcesPageSize)
+	catalogs, nextToken, ratelimit, err := b.resolver.client.ListCatalogs(ctx, workspaceId, pageToken, ResourcesPageSize)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
@@ -347,7 +450,7 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+	return rv, syncOpResults(nextPage, ratelimit), nil
 }
 
 func (b *catalogBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -355,47 +458,51 @@ func (b *catalogBuilder) Entitlements(_ context.Context, resource *v2.Resource, 
 }
 
 func (b *catalogBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	grants, err := securableGrants(ctx, b.client, resource, databricks.SecurableCatalog)
+	grants, annos, err := securableGrants(ctx, b.resolver, resource, databricks.SecurableCatalog, catalogPrivileges)
 	if err != nil {
 		return nil, nil, err
 	}
-	return grants, nil, nil
+	return grants, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
 func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return securableGrantChange(ctx, b.client, entitlement, principal, true)
+	return securableGrantChange(ctx, b.resolver, entitlement, principal, true)
 }
 
 func (b *catalogBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.Annotations, error) {
-	return securableGrantChange(ctx, b.client, grant.Entitlement, grant.Principal, false)
+	return securableGrantChange(ctx, b.resolver, grant.Entitlement, grant.Principal, false)
 }
 
-func newCatalogBuilder(client *databricks.Client) *catalogBuilder {
-	return &catalogBuilder{client: client, resourceType: catalogResourceType}
+func newCatalogBuilder(resolver *ucResolver) *catalogBuilder {
+	return &catalogBuilder{resolver: resolver, resourceType: catalogResourceType}
 }
 
 // ---- Schema builder ----
 
 type schemaBuilder struct {
-	client       *databricks.Client
+	resolver     *ucResolver
 	resourceType *v2.ResourceType
+	syncTables   bool
 }
 
 func (b *schemaBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return schemaResourceType
 }
 
-func schemaResource(workspaceId string, schema *databricks.Schema, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := securableProfile(workspaceId, schema.FullName, schema.Owner)
-	profile["securable_type"] = databricks.SecurableSchema
+func schemaResource(workspaceId string, schema *databricks.Schema, parent *v2.ResourceId, syncTables bool) (*v2.Resource, error) {
+	opts := []rs.ResourceOption{
+		rs.WithResourceProfile(securableProfile(workspaceId, schema.FullName, schema.Owner, databricks.SecurableSchema)),
+		rs.WithParentResourceID(parent),
+	}
+	if syncTables {
+		opts = append(opts, rs.WithAnnotation(&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id}))
+	}
 
 	return rs.NewResource(
 		schema.Name,
 		schemaResourceType,
 		makeSecurableID(workspaceId, schema.FullName),
-		rs.WithResourceProfile(profile),
-		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id}),
+		opts...,
 	)
 }
 
@@ -410,7 +517,7 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
-	schemas, nextToken, _, err := b.client.ListSchemas(ctx, workspaceId, catalogName, pageToken, ResourcesPageSize)
+	schemas, nextToken, ratelimit, err := b.resolver.client.ListSchemas(ctx, workspaceId, catalogName, pageToken, ResourcesPageSize)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
@@ -426,7 +533,7 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 	var rv []*v2.Resource
 	for _, schema := range schemas {
 		sCopy := schema
-		sr, err := schemaResource(workspaceId, &sCopy, parentResourceID)
+		sr, err := schemaResource(workspaceId, &sCopy, parentResourceID, b.syncTables)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -438,7 +545,7 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+	return rv, syncOpResults(nextPage, ratelimit), nil
 }
 
 func (b *schemaBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -446,29 +553,29 @@ func (b *schemaBuilder) Entitlements(_ context.Context, resource *v2.Resource, _
 }
 
 func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	grants, err := securableGrants(ctx, b.client, resource, databricks.SecurableSchema)
+	grants, annos, err := securableGrants(ctx, b.resolver, resource, databricks.SecurableSchema, schemaPrivileges)
 	if err != nil {
 		return nil, nil, err
 	}
-	return grants, nil, nil
+	return grants, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
 func (b *schemaBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return securableGrantChange(ctx, b.client, entitlement, principal, true)
+	return securableGrantChange(ctx, b.resolver, entitlement, principal, true)
 }
 
 func (b *schemaBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.Annotations, error) {
-	return securableGrantChange(ctx, b.client, grant.Entitlement, grant.Principal, false)
+	return securableGrantChange(ctx, b.resolver, grant.Entitlement, grant.Principal, false)
 }
 
-func newSchemaBuilder(client *databricks.Client) *schemaBuilder {
-	return &schemaBuilder{client: client, resourceType: schemaResourceType}
+func newSchemaBuilder(resolver *ucResolver, syncTables bool) *schemaBuilder {
+	return &schemaBuilder{resolver: resolver, resourceType: schemaResourceType, syncTables: syncTables}
 }
 
 // ---- Table builder ----
 
 type tableBuilder struct {
-	client       *databricks.Client
+	resolver     *ucResolver
 	resourceType *v2.ResourceType
 }
 
@@ -477,8 +584,7 @@ func (b *tableBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 }
 
 func tableResource(workspaceId string, table *databricks.Table, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := securableProfile(workspaceId, table.FullName, table.Owner)
-	profile["securable_type"] = databricks.SecurableTable
+	profile := securableProfile(workspaceId, table.FullName, table.Owner, databricks.SecurableTable)
 	profile["table_type"] = table.TableType
 
 	return rs.NewResource(
@@ -505,7 +611,7 @@ func (b *tableBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
-	tables, nextToken, _, err := b.client.ListTables(ctx, workspaceId, catalogName, schemaName, pageToken, ResourcesPageSize)
+	tables, nextToken, ratelimit, err := b.resolver.client.ListTables(ctx, workspaceId, catalogName, schemaName, pageToken, ResourcesPageSize)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
@@ -534,7 +640,7 @@ func (b *tableBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+	return rv, syncOpResults(nextPage, ratelimit), nil
 }
 
 func (b *tableBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -542,21 +648,21 @@ func (b *tableBuilder) Entitlements(_ context.Context, resource *v2.Resource, _ 
 }
 
 func (b *tableBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	grants, err := securableGrants(ctx, b.client, resource, databricks.SecurableTable)
+	grants, annos, err := securableGrants(ctx, b.resolver, resource, databricks.SecurableTable, tablePrivileges)
 	if err != nil {
 		return nil, nil, err
 	}
-	return grants, nil, nil
+	return grants, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
 func (b *tableBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return securableGrantChange(ctx, b.client, entitlement, principal, true)
+	return securableGrantChange(ctx, b.resolver, entitlement, principal, true)
 }
 
 func (b *tableBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.Annotations, error) {
-	return securableGrantChange(ctx, b.client, grant.Entitlement, grant.Principal, false)
+	return securableGrantChange(ctx, b.resolver, grant.Entitlement, grant.Principal, false)
 }
 
-func newTableBuilder(client *databricks.Client) *tableBuilder {
-	return &tableBuilder{client: client, resourceType: tableResourceType}
+func newTableBuilder(resolver *ucResolver) *tableBuilder {
+	return &tableBuilder{resolver: resolver, resourceType: tableResourceType}
 }

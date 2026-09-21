@@ -222,6 +222,14 @@ stringData:
   # Mutually exclusive with BATON_WORKSPACES — set one or the other, never both.
   BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
 
+  # Optional: sync Unity Catalog catalogs and schemas (and their grants) for
+  # data access reviews. Off by default.
+  # BATON_SYNC_UNITY_CATALOG: true
+
+  # Optional: also sync Unity Catalog tables and their grants. Requires
+  # BATON_SYNC_UNITY_CATALOG. Can be very large in big metastores.
+  # BATON_SYNC_UNITY_CATALOG_TABLES: true
+
   # Optional: include if you want C1 to provision access using this connector
   BATON_PROVISIONING: true
 ```
