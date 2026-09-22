@@ -15,6 +15,7 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -41,12 +42,23 @@ const (
 
 // auditActionMapping describes what an audit log action_name affects: an optional primary
 // resource (resourceType + the request_params key holding its native ID), an optional
-// account-scoped role, and/or optional workspace-scoped roles/entitlements.
+// account-scoped role, and/or optional workspace-scoped roles/entitlements. grant, when set,
+// means the row is an atomic entitlement assignment/revocation rather than a generic change.
 type auditActionMapping struct {
 	resourceType *v2.ResourceType
 	idParam      string
 	accountRole  string
 	roleNames    []string
+	grant        *auditGrantMapping
+}
+
+// auditGrantMapping names the principal and direction of a grant-mapped action. The
+// entitlement's resource is resourceType/idParam on the enclosing auditActionMapping.
+type auditGrantMapping struct {
+	entitlement    string
+	principalType  *v2.ResourceType
+	principalParam string
+	revoke         bool
 }
 
 // auditActionKey identifies an audit log action by (service_name, action_name), since
@@ -59,12 +71,26 @@ type auditActionKey struct {
 // auditLogActions maps (service_name, action_name) pairs to the resources they affect, per
 // https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
 var auditLogActions = map[auditActionKey]auditActionMapping{
-	{auditServiceAccounts, "createGroup"}:               {resourceType: groupResourceType, idParam: "targetGroupId"},
-	{auditServiceAccounts, "addPrincipalToGroup"}:       {resourceType: groupResourceType, idParam: "targetGroupId"},
-	{auditServiceAccounts, "removePrincipalFromGroup"}:  {resourceType: groupResourceType, idParam: "targetGroupId"},
-	{auditServiceAccounts, "addPrincipalsToGroup"}:      {resourceType: groupResourceType, idParam: "targetGroupId"},
-	{auditServiceAccounts, "removePrincipalsFromGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
-	{auditServiceAccounts, "removeGroup"}:               {resourceType: groupResourceType, idParam: "targetGroupId"},
+	{auditServiceAccounts, "createGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
+	// Databricks documents targetUserId as the added/removed member's id on all four of these
+	// actions, singular and plural alike: https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
+	{auditServiceAccounts, "addPrincipalToGroup"}: {
+		resourceType: groupResourceType, idParam: "targetGroupId",
+		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalType: userResourceType, principalParam: "targetUserId"},
+	},
+	{auditServiceAccounts, "removePrincipalFromGroup"}: {
+		resourceType: groupResourceType, idParam: "targetGroupId",
+		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalType: userResourceType, principalParam: "targetUserId", revoke: true},
+	},
+	{auditServiceAccounts, "addPrincipalsToGroup"}: {
+		resourceType: groupResourceType, idParam: "targetGroupId",
+		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalType: userResourceType, principalParam: "targetUserId"},
+	},
+	{auditServiceAccounts, "removePrincipalsFromGroup"}: {
+		resourceType: groupResourceType, idParam: "targetGroupId",
+		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalType: userResourceType, principalParam: "targetUserId", revoke: true},
+	},
+	{auditServiceAccounts, "removeGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
 	{auditServiceAccounts, "updateGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
@@ -223,8 +249,12 @@ func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, allWorkspa
 // inside ListEvents instead, to avoid confusing "feed not found" errors when it's off.
 func (f *auditEventFeed) EventFeedMetadata(_ context.Context) *v2.EventFeedMetadata {
 	return &v2.EventFeedMetadata{
-		Id:                  auditEventFeedId,
-		SupportedEventTypes: []v2.EventType{v2.EventType_EVENT_TYPE_RESOURCE_CHANGE},
+		Id: auditEventFeedId,
+		SupportedEventTypes: []v2.EventType{
+			v2.EventType_EVENT_TYPE_RESOURCE_CHANGE,
+			v2.EventType_EVENT_TYPE_CREATE_GRANT,
+			v2.EventType_EVENT_TYPE_CREATE_REVOKE,
+		},
 	}
 }
 
@@ -298,16 +328,25 @@ func (f *auditEventFeed) ListEvents(
 		}
 
 		for i, a := range affected {
-			events = append(events, &v2.Event{
+			event := &v2.Event{
 				Id:         fmt.Sprintf("%s/%d", row.EventID, i),
 				OccurredAt: timestamppb.New(row.EventTime),
-				Event: &v2.Event_ResourceChangeEvent{
-					ResourceChangeEvent: &v2.ResourceChangeEvent{
-						ResourceId:       a.resourceId,
-						ParentResourceId: a.parentResourceId,
-					},
-				},
-			})
+			}
+			switch {
+			case a.grant != nil && a.grant.revoke:
+				event.Event = &v2.Event_CreateRevokeEvent{
+					CreateRevokeEvent: &v2.CreateRevokeEvent{Entitlement: a.grant.entitlement, Principal: a.grant.principal},
+				}
+			case a.grant != nil:
+				event.Event = &v2.Event_CreateGrantEvent{
+					CreateGrantEvent: &v2.CreateGrantEvent{Entitlement: a.grant.entitlement, Principal: a.grant.principal},
+				}
+			default:
+				event.Event = &v2.Event_ResourceChangeEvent{
+					ResourceChangeEvent: &v2.ResourceChangeEvent{ResourceId: a.resourceId, ParentResourceId: a.parentResourceId},
+				}
+			}
+			events = append(events, event)
 		}
 	}
 
@@ -362,10 +401,18 @@ func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool
 	return eventPageCursor{StartAt: target, StartAfterEventID: startAfterEventID}
 }
 
-// affectedResource is one resource a mapped audit row's action changed.
+// affectedResource is either one resource a mapped audit row's action changed (RESOURCE_CHANGE),
+// or, when grant is set, the entitlement/principal it assigned or revoked (CREATE_GRANT/CREATE_REVOKE).
 type affectedResource struct {
 	resourceId       *v2.ResourceId
 	parentResourceId *v2.ResourceId
+	grant            *affectedGrant
+}
+
+type affectedGrant struct {
+	entitlement *v2.Entitlement
+	principal   *v2.Resource
+	revoke      bool
 }
 
 // mapAuditRowToResource maps an audit row to every Baton resource its action affects, skipping
@@ -415,6 +462,14 @@ func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId strin
 			resourceId.Resource = groupResourceId(ctx, nativeId, parent)
 		}
 
+		if mapping.grant != nil {
+			g, ok := buildAffectedGrant(row, mapping.grant, resourceId, parent)
+			if !ok {
+				return nil
+			}
+			return []affectedResource{{grant: g}}
+		}
+
 		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: parent})
 	}
 
@@ -435,6 +490,22 @@ func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId strin
 	}
 
 	return affected
+}
+
+// buildAffectedGrant builds the entitlement (on entitlementResourceId/parent) and principal a
+// grant-mapped row names, skipping rows missing the principal's native id.
+func buildAffectedGrant(row auditLogRow, gm *auditGrantMapping, entitlementResourceId, parent *v2.ResourceId) (*affectedGrant, bool) {
+	principalNativeId, ok := row.RequestParams[gm.principalParam]
+	if !ok || principalNativeId == "" {
+		return nil, false
+	}
+
+	entitlementResource := &v2.Resource{Id: entitlementResourceId, ParentResourceId: parent}
+	return &affectedGrant{
+		entitlement: ent.NewAssignmentEntitlement(entitlementResource, gm.entitlement),
+		principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: gm.principalType.Id, Resource: principalNativeId}},
+		revoke:      gm.revoke,
+	}, true
 }
 
 // filterConfiguredWorkspaces narrows workspaces to configuredWorkspaces (the --workspaces

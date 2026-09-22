@@ -15,6 +15,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 )
 
 // writeJSONNotFound writes a 404 with a JSON body; a plain-text one (e.g. http.NotFound)
@@ -371,7 +372,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			name:                "workspace-scoped group change stays account-parented when the Account API is available",
 			accountAPIAvailable: true,
 			row: auditLogRow{
-				ActionName:    "addPrincipalToGroup",
+				ActionName:    "removeGroup",
 				ServiceName:   "accounts",
 				WorkspaceID:   123,
 				RequestParams: map[string]string{"targetGroupId": "g-1"},
@@ -386,7 +387,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			name:                "workspace-scoped group change is workspace-parented under token auth",
 			accountAPIAvailable: false,
 			row: auditLogRow{
-				ActionName:    "addPrincipalToGroup",
+				ActionName:    "removeGroup",
 				ServiceName:   "accounts",
 				WorkspaceID:   123,
 				RequestParams: map[string]string{"targetGroupId": "g-1"},
@@ -491,6 +492,63 @@ func TestMapAuditRowToResource(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMapAuditRowToResourceGrantMapping covers the group-membership actions that map to an
+// atomic CREATE_GRANT/CREATE_REVOKE instead of a RESOURCE_CHANGE.
+func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
+	accountId := "acct-1"
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
+	wantGroupId := groupResourceId(context.Background(), "g-1", accountParent)
+	wantEntitlementId := ent.NewEntitlementID(&v2.Resource{Id: &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: wantGroupId}}, groupMemberEntitlement)
+
+	cases := []struct {
+		name       string
+		actionName string
+		wantRevoke bool
+	}{
+		{"addPrincipalToGroup grants", "addPrincipalToGroup", false},
+		{"removePrincipalFromGroup revokes", "removePrincipalFromGroup", true},
+		{"addPrincipalsToGroup grants", "addPrincipalsToGroup", false},
+		{"removePrincipalsFromGroup revokes", "removePrincipalsFromGroup", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := auditLogRow{
+				ActionName:    tc.actionName,
+				ServiceName:   auditServiceAccounts,
+				RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1"},
+			}
+
+			got := mapAuditRowToResource(context.Background(), row, accountId, true, nil)
+			if len(got) != 1 || got[0].grant == nil {
+				t.Fatalf("got %+v, want exactly one grant-mapped affected resource", got)
+			}
+
+			g := got[0].grant
+			if g.revoke != tc.wantRevoke {
+				t.Errorf("revoke = %v, want %v", g.revoke, tc.wantRevoke)
+			}
+			if g.entitlement.GetId() != wantEntitlementId {
+				t.Errorf("entitlement id = %q, want %q", g.entitlement.GetId(), wantEntitlementId)
+			}
+			if g.principal.GetId().GetResourceType() != userResourceType.Id || g.principal.GetId().GetResource() != "u-1" {
+				t.Errorf("principal = %+v, want type=%s id=u-1", g.principal.GetId(), userResourceType.Id)
+			}
+		})
+	}
+
+	t.Run("missing principal id is skipped", func(t *testing.T) {
+		row := auditLogRow{
+			ActionName:    "addPrincipalToGroup",
+			ServiceName:   auditServiceAccounts,
+			RequestParams: map[string]string{"targetGroupId": "g-1"},
+		}
+		if got := mapAuditRowToResource(context.Background(), row, accountId, true, nil); got != nil {
+			t.Errorf("got %+v, want nil when targetUserId is missing", got)
+		}
+	})
 }
 
 func TestParseAuditLogRowsDedupesNothingAndParsesFields(t *testing.T) {
@@ -720,6 +778,86 @@ func TestListEventsEndToEnd(t *testing.T) {
 	}
 	if rld.GetLimit() != wantLimit || rld.GetRemaining() != wantRemaining {
 		t.Errorf("RateLimitDescription = %+v, want limit=%d remaining=%d", rld, wantLimit, wantRemaining)
+	}
+}
+
+// TestListEventsEmitsCreateGrantEvent verifies ListEvents wires a grant-mapped audit row all
+// the way to a CreateGrantEvent, not a ResourceChangeEvent.
+func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"statement_id": "stmt-1",
+			"status":       map[string]any{"state": "SUCCEEDED"},
+			"manifest": map[string]any{
+				"schema": map[string]any{
+					"columns": []map[string]any{
+						{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+						{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+					},
+				},
+			},
+			"result": map[string]any{
+				"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("failed to encode mock statement response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	auth := databricks.NewTokenAuth([]string{"ws1"}, []string{"token-1"})
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client.UpdateAvailability(true, true)
+
+	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1")
+	events, _, _, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1: %+v", len(events), events)
+	}
+
+	cg := events[0].GetCreateGrantEvent()
+	if cg == nil {
+		t.Fatalf("event = %+v, want a CreateGrantEvent", events[0])
+	}
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acct-1"}
+	wantGroupId := groupResourceId(context.Background(), "g-1", accountParent)
+	if cg.GetEntitlement().GetResource().GetId().GetResource() != wantGroupId {
+		t.Errorf("entitlement resource = %q, want %q", cg.GetEntitlement().GetResource().GetId().GetResource(), wantGroupId)
+	}
+	if cg.GetPrincipal().GetId().GetResourceType() != userResourceType.Id || cg.GetPrincipal().GetId().GetResource() != "u-1" {
+		t.Errorf("principal = %+v, want type=%s id=u-1", cg.GetPrincipal().GetId(), userResourceType.Id)
 	}
 }
 
