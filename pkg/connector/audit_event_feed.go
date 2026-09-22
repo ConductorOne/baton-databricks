@@ -24,12 +24,13 @@ import (
 const (
 	auditEventFeedId = "databricks_audit_log"
 
-	// The first poll looks back this far since there's no prior watermark yet.
-	auditLogLookback = 1 * time.Hour
-
 	// Trail the watermark by this much instead of the newest event seen, since slower-indexing
 	// areas of the audited system could otherwise have events skipped permanently.
 	auditLogTrailingLag = 4 * time.Hour
+
+	// The first poll looks back this far since there's no prior watermark yet. Must be >=
+	// auditLogTrailingLag, or the lagCutoff guard in ListEvents skips every poll until it is.
+	auditLogLookback = auditLogTrailingLag
 
 	auditLogPageLimit = 1000
 
@@ -101,18 +102,26 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		resourceType: userResourceType, idParam: "targetUserId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	{auditServiceAccounts, "delete"}:                 {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "createServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
-	{auditServiceAccounts, "updateServicePrincipal"}: {
-		resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
-	},
-	{auditServiceAccounts, "deleteServicePrincipal"}:       {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	{auditServiceAccounts, "delete"}: {resourceType: userResourceType, idParam: "targetUserId"},
+	// createServicePrincipal/updateServicePrincipal/deleteServicePrincipal: commented out, not
+	// real action_name values. Not found anywhere in the official audit log reference (AWS/GCP/
+	// Azure) — the only documented service-principal action is changeServicePrincipalAcls.
+	// {auditServiceAccounts, "createServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	// {auditServiceAccounts, "updateServicePrincipal"}: {
+	// 	resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId",
+	// 	roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+	// },
+	// {auditServiceAccounts, "deleteServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
 	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
 	{auditServiceAccounts, "changeDatabricksSqlAcl"}:       {roleNames: []string{SQLAccessRole}},
 	{auditServiceAccounts, "setAdmin"}:                     {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
 	// removeAdmin revokes *workspace* admin, not account admin, so only the user is refreshed.
 	{auditServiceAccounts, "removeAdmin"}: {resourceType: userResourceType, idParam: "targetUserId"},
+	// setAccountAdmin/removeAccountAdmin: commented out, not real action_name values. Confirmed
+	// absent from the official audit log reference on AWS, GCP, and Azure docs — setAdmin already
+	// covers account-admin grant (see above).
+	// {auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	// {auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
 }
 
 func auditLogActionNames() []string {
@@ -159,8 +168,8 @@ func encodeEventCursor(c eventPageCursor) (string, error) {
 }
 
 // decodeEventCursor returns a zero-value cursor (self-healing to the lookback default) when
-// missing, corrupt, or stale. Corrupt/missing is routine and logged at Debug; a stale-but-valid
-// cursor indicates a real data gap and is logged at Warn.
+// missing, corrupt, or stale. All three are skip-and-continue, not connector bugs, so all three
+// log at Debug, not Warn (which C1 surfaces as an incident).
 func decodeEventCursor(ctx context.Context, s string, now time.Time) eventPageCursor {
 	l := ctxzap.Extract(ctx)
 
@@ -181,7 +190,7 @@ func decodeEventCursor(ctx context.Context, s string, now time.Time) eventPageCu
 	}
 
 	if !c.StartAt.IsZero() && now.Sub(c.StartAt) > auditLogRetention {
-		l.Warn("databricks-connector: event cursor is older than system.access.audit's retention window, resetting to lookback default",
+		l.Debug("databricks-connector: event cursor is older than system.access.audit's retention window, resetting to lookback default",
 			zap.Time("cursor_start_at", c.StartAt),
 		)
 		return eventPageCursor{}
@@ -631,7 +640,7 @@ func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) 
 	for _, r := range result.Rows {
 		row, err := parseAuditLogRow(r, colIndex, maxColIndex)
 		if err != nil {
-			l.Warn("databricks-connector: skipping malformed audit log row", zap.Error(err))
+			l.Debug("databricks-connector: skipping malformed audit log row", zap.Error(err))
 			continue
 		}
 		rows = append(rows, row)

@@ -290,6 +290,9 @@ func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, p
 		if _, ok := w.workspaces[resourceId.Resource]; !ok {
 			return nil, nil, fmt.Errorf("databricks-connector: workspace %s is not configured", resourceId.Resource)
 		}
+		if w.client.IsWorkspaceNameExcluded(resourceId.Resource) {
+			return nil, nil, fmt.Errorf("databricks-connector: workspace %s is not configured", resourceId.Resource)
+		}
 
 		ws := &databricks.Workspace{DeploymentName: resourceId.Resource}
 		resource, err := minimalWorkspaceResource(ctx, ws, parentResourceId)

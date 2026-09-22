@@ -334,6 +334,10 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
+			name: "setAccountAdmin is not a real action_name, so it's skipped",
+			row:  auditLogRow{ActionName: "setAccountAdmin", ServiceName: "accounts"},
+		},
+		{
 			name:                "updateUser stays account-parented when the Account API is available, but workspace roles still refresh",
 			accountAPIAvailable: true,
 			row: auditLogRow{
@@ -538,9 +542,9 @@ func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-// TestListEventsSkipsQueryPastLagCutoff covers the bootstrap edge case where the lookback
-// default is older than now but still after lagCutoff (auditLogLookback < auditLogTrailingLag):
-// ListEvents must not query with an inverted (start > end) range.
+// TestListEventsSkipsQueryPastLagCutoff covers the bootstrap default landing exactly at
+// lagCutoff (auditLogLookback == auditLogTrailingLag): ListEvents must not query an
+// inverted (start > end) range.
 func TestListEventsSkipsQueryPastLagCutoff(t *testing.T) {
 	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("unexpected request %s %s: should have been skipped by the lagCutoff guard", r.Method, r.URL.Path)

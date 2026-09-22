@@ -154,7 +154,7 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 				c.cancelStatement(workspaceId, res.StatementID)
 				return res, rateLimit, err
 			}
-			l.Warn("sql statement did not reach a terminal state before poll timeout, canceling",
+			l.Debug("sql statement did not reach a terminal state before poll timeout, canceling",
 				zap.String("statement_id", res.StatementID),
 				zap.String("state", string(res.Status.State)),
 				zap.Duration("max_wait", statementPollMaxWait),
@@ -191,7 +191,7 @@ func (c *Client) cancelStatement(workspaceId, statementId string) {
 	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, statementId, "cancel")
 	response := struct{}{}
 	if _, err := c.Post(ctx, u, nil, &response); err != nil {
-		ctxzap.Extract(ctx).Warn("failed to cancel timed-out sql statement", zap.String("statement_id", statementId), zap.Error(err))
+		ctxzap.Extract(ctx).Debug("failed to cancel timed-out sql statement", zap.String("statement_id", statementId), zap.Error(err))
 	}
 }
 
