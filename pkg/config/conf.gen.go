@@ -13,6 +13,8 @@ type Databricks struct {
 	WorkspaceTokens []string `mapstructure:"workspace-tokens"`
 	BaseUrl string `mapstructure:"base-url"`
 	DatabricksExcludeWorkspaces []string `mapstructure:"databricks-exclude-workspaces"`
+	SyncUnityCatalog bool `mapstructure:"sync-unity-catalog"`
+	SyncUnityCatalogTables bool `mapstructure:"sync-unity-catalog-tables"`
 }
 
 func (c *Databricks) findFieldByTag(tagValue string) (any, bool) {

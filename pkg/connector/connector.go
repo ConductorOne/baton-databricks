@@ -16,19 +16,25 @@ import (
 )
 
 type Databricks struct {
-	client     *databricks.Client
-	workspaces []string
+	client                 *databricks.Client
+	workspaces             []string
+	syncUnityCatalog       bool
+	syncUnityCatalogTables bool
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+	resolver := newUCResolver(d.client)
 	syncers := []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client, d.workspaces),
+		newWorkspaceBuilder(d.client, d.workspaces, d.syncUnityCatalog),
 		newRoleBuilder(d.client),
+		newCatalogBuilder(resolver),
+		newSchemaBuilder(resolver, d.syncUnityCatalogTables),
+		newTableBuilder(resolver),
 	}
 
 	return syncers
@@ -174,6 +180,8 @@ func New(
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
+	syncUnityCatalog bool,
+	syncUnityCatalogTables bool,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -186,8 +194,10 @@ func New(
 	}
 
 	return &Databricks{
-		client:     client,
-		workspaces: workspaces,
+		client:                 client,
+		workspaces:             workspaces,
+		syncUnityCatalog:       syncUnityCatalog,
+		syncUnityCatalogTables: syncUnityCatalogTables,
 	}, nil
 }
 
@@ -216,6 +226,8 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
+		cfg.SyncUnityCatalog,
+		cfg.SyncUnityCatalogTables,
 	)
 	if err != nil {
 		return nil, nil, err

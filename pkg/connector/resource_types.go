@@ -46,4 +46,22 @@ var (
 		Id:          "account",
 		DisplayName: "Account",
 	}
+
+	// The catalog resource type is a Unity Catalog top-level data container.
+	catalogResourceType = &v2.ResourceType{
+		Id:          "catalog",
+		DisplayName: "Catalog",
+	}
+
+	// The schema resource type is a Unity Catalog schema within a catalog.
+	schemaResourceType = &v2.ResourceType{
+		Id:          "schema",
+		DisplayName: "Schema",
+	}
+
+	// The table resource type is a Unity Catalog table or view within a schema.
+	tableResourceType = &v2.ResourceType{
+		Id:          "table",
+		DisplayName: "Table",
+	}
 )

@@ -22,9 +22,10 @@ import (
 const workspaceMemberEntitlement = "member"
 
 type workspaceBuilder struct {
-	client       *databricks.Client
-	resourceType *v2.ResourceType
-	workspaces   map[string]struct{}
+	client           *databricks.Client
+	resourceType     *v2.ResourceType
+	workspaces       map[string]struct{}
+	syncUnityCatalog bool
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -36,25 +37,37 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 // Deployment names are unique per Databricks cloud (they form the workspace's
 // canonical hostname), so they're safe as the resource ID here.
 // Users, groups and service principals hang off the workspace here instead of the account.
-func minimalWorkspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
+func minimalWorkspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId, syncUnityCatalog bool) (*v2.Resource, error) {
+	children := []protoreflect.ProtoMessage{
+		&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
+		&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
+		&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
+		&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+	}
+	if syncUnityCatalog {
+		children = append(children, &v2.ChildResourceType{ResourceTypeId: catalogResourceType.Id})
+	}
+
 	return rs.NewGroupResource(
 		workspace.DeploymentName,
 		workspaceResourceType,
 		workspace.DeploymentName,
 		nil,
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(
-			&v2.ChildResourceType{ResourceTypeId: userResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
-			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
-		),
+		rs.WithAnnotation(children...),
 	)
 }
 
-func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
+func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId, syncUnityCatalog bool) (*v2.Resource, error) {
 	profile := map[string]interface{}{
 		"workspace_id": workspace.ID,
+	}
+
+	children := []protoreflect.ProtoMessage{
+		&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+	}
+	if syncUnityCatalog {
+		children = append(children, &v2.ChildResourceType{ResourceTypeId: catalogResourceType.Id})
 	}
 
 	resource, err := rs.NewGroupResource(
@@ -64,9 +77,7 @@ func workspaceResource(_ context.Context, workspace *databricks.Workspace, paren
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(
-			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
-		),
+		rs.WithAnnotation(children...),
 	)
 
 	if err != nil {
@@ -92,7 +103,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 			ws := &databricks.Workspace{DeploymentName: workspace}
 
-			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID)
+			wr, err := minimalWorkspaceResource(ctx, ws, parentResourceID, w.syncUnityCatalog)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -127,7 +138,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 		wCopy := workspace
 
-		wr, err := workspaceResource(ctx, &wCopy, parentResourceID)
+		wr, err := workspaceResource(ctx, &wCopy, parentResourceID, w.syncUnityCatalog)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -345,15 +356,16 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	return nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
+func newWorkspaceBuilder(client *databricks.Client, workspaces []string, syncUnityCatalog bool) *workspaceBuilder {
 	wMap := make(map[string]struct{}, len(workspaces))
 	for _, w := range workspaces {
 		wMap[w] = struct{}{}
 	}
 
 	return &workspaceBuilder{
-		client:       client,
-		resourceType: workspaceResourceType,
-		workspaces:   wMap,
+		client:           client,
+		resourceType:     workspaceResourceType,
+		workspaces:       wMap,
+		syncUnityCatalog: syncUnityCatalog,
 	}
 }
