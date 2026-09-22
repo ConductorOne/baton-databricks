@@ -396,7 +396,10 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	hasMore := rawRowCount >= auditLogPageLimit
-	nextCursor := advanceEventCursor(cursor, lastRawBoundary, hasMore, lagCutoff)
+	nextCursor, advanced := advanceEventCursor(cursor, rows, lastRawBoundary, hasMore, lagCutoff)
+	if !advanced {
+		hasMore = false
+	}
 
 	encoded, err := encodeEventCursor(nextCursor)
 	if err != nil {
@@ -408,16 +411,22 @@ func (f *auditEventFeed) ListEvents(
 
 // advanceEventCursor advances to the last row processed while more of the page remains, or
 // to lagCutoff once drained: rows are already bounded by lagCutoff (see queryAuditLog), so a
-// drained page proves nothing else exists up to that point. lastRawBoundary comes from the
-// raw page (not the parsed rows), so a page where every row fails to parse still advances.
-func advanceEventCursor(cursor eventPageCursor, lastRawBoundary eventPageCursor, hasMore bool, lagCutoff time.Time) eventPageCursor {
+// drained page proves nothing else exists up to that point. Prefers lastRawBoundary (from the
+// raw page, so a page where every row fails to parse still advances), falling back to the last
+// successfully parsed row. advanced is false only if neither is available, so the caller can
+// avoid reporting HasMore with an unchanged cursor.
+func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, lastRawBoundary eventPageCursor, hasMore bool, lagCutoff time.Time) (next eventPageCursor, advanced bool) {
 	if hasMore {
 		if !lastRawBoundary.StartAt.IsZero() {
-			return lastRawBoundary
+			return lastRawBoundary, true
 		}
-		return cursor
+		if len(rows) > 0 {
+			last := rows[len(rows)-1]
+			return eventPageCursor{StartAt: last.EventTime, StartAfterEventID: last.EventID}, true
+		}
+		return cursor, false
 	}
-	return eventPageCursor{StartAt: lagCutoff}
+	return eventPageCursor{StartAt: lagCutoff}, true
 }
 
 // affectedResource is either one resource a mapped audit row's action changed (RESOURCE_CHANGE),
@@ -542,10 +551,15 @@ func buildAffectedGrant(
 		return nil, rateLimit, nil
 	}
 
+	principalResourceId := principalNativeId
+	if principalType == groupResourceType {
+		principalResourceId = groupResourceId(ctx, principalNativeId, parent)
+	}
+
 	entitlementResource := &v2.Resource{Id: entitlementResourceId, ParentResourceId: parent}
 	return &affectedGrant{
 		entitlement: ent.NewAssignmentEntitlement(entitlementResource, gm.entitlement),
-		principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: principalType.Id, Resource: principalNativeId}},
+		principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: principalType.Id, Resource: principalResourceId}},
 		revoke:      gm.revoke,
 	}, rateLimit, nil
 }
@@ -749,7 +763,11 @@ func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) 
 
 	var lastRawBoundary eventPageCursor
 	if len(result.Rows) > 0 {
-		lastRawBoundary, _ = parseEventBoundary(result.Rows[len(result.Rows)-1], colIndex)
+		var err error
+		lastRawBoundary, err = parseEventBoundary(result.Rows[len(result.Rows)-1], colIndex)
+		if err != nil {
+			l.Debug("databricks-connector: failed to parse last raw row's event boundary", zap.Error(err))
+		}
 	}
 
 	return rows, lastRawBoundary, nil

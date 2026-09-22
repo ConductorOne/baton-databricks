@@ -232,23 +232,42 @@ func TestAdvanceEventCursorAdvancesToLastRawBoundary(t *testing.T) {
 	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	lastRawBoundary := eventPageCursor{StartAt: cursor.StartAt.Add(time.Minute), StartAfterEventID: "evt-999"}
 
-	next := advanceEventCursor(cursor, lastRawBoundary, true, cursor.StartAt.Add(auditLogTrailingLag))
+	next, advanced := advanceEventCursor(cursor, nil, lastRawBoundary, true, cursor.StartAt.Add(auditLogTrailingLag))
 
-	if next != lastRawBoundary {
-		t.Errorf("next = %+v, want %+v", next, lastRawBoundary)
+	if !advanced || next != lastRawBoundary {
+		t.Errorf("next = %+v, advanced = %v, want %+v, true", next, advanced, lastRawBoundary)
 	}
 }
 
-// TestAdvanceEventCursorFullyMalformedPageKeepsCursor covers a full page where every row
-// failed to parse: lastRawBoundary is zero-value, so this must not panic indexing an empty
-// rows slice, and must not skip ahead past unparsed rows either.
-func TestAdvanceEventCursorFullyMalformedPageKeepsCursor(t *testing.T) {
+// TestAdvanceEventCursorFallsBackToLastParsedRow covers a full page where only the last raw
+// row fails to parse: lastRawBoundary is zero-value, but the other rows parsed fine and must
+// still advance the cursor instead of stalling on a page that otherwise made progress.
+func TestAdvanceEventCursorFallsBackToLastParsedRow(t *testing.T) {
+	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	rows := []auditLogRow{
+		{EventID: "evt-1", EventTime: cursor.StartAt.Add(time.Minute)},
+		{EventID: "evt-2", EventTime: cursor.StartAt.Add(2 * time.Minute)},
+	}
+
+	next, advanced := advanceEventCursor(cursor, rows, eventPageCursor{}, true, cursor.StartAt.Add(auditLogTrailingLag))
+
+	want := eventPageCursor{StartAt: rows[1].EventTime, StartAfterEventID: rows[1].EventID}
+	if !advanced || next != want {
+		t.Errorf("next = %+v, advanced = %v, want %+v, true", next, advanced, want)
+	}
+}
+
+// TestAdvanceEventCursorFullyMalformedPageDoesNotStall covers a full page where every row
+// failed to parse: neither lastRawBoundary nor rows can advance the cursor, so this must
+// signal advanced=false (letting the caller stop claiming HasMore) instead of looping forever
+// on an unchanged cursor. It also must not panic indexing an empty rows slice.
+func TestAdvanceEventCursorFullyMalformedPageDoesNotStall(t *testing.T) {
 	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), StartAfterEventID: "evt-1"}
 
-	next := advanceEventCursor(cursor, eventPageCursor{}, true, cursor.StartAt.Add(auditLogTrailingLag))
+	next, advanced := advanceEventCursor(cursor, nil, eventPageCursor{}, true, cursor.StartAt.Add(auditLogTrailingLag))
 
-	if next != cursor {
-		t.Errorf("next = %+v, want unchanged cursor %+v", next, cursor)
+	if advanced || next != cursor {
+		t.Errorf("next = %+v, advanced = %v, want unchanged cursor %+v, false", next, advanced, cursor)
 	}
 }
 
@@ -259,10 +278,10 @@ func TestAdvanceEventCursorDrainedJumpsToLagCutoff(t *testing.T) {
 	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	lagCutoff := cursor.StartAt.Add(4 * time.Hour)
 
-	next := advanceEventCursor(cursor, eventPageCursor{}, false, lagCutoff)
+	next, advanced := advanceEventCursor(cursor, nil, eventPageCursor{}, false, lagCutoff)
 
-	if !next.StartAt.Equal(lagCutoff) || next.StartAfterEventID != "" {
-		t.Errorf("next = %+v, want StartAt=%v with no tiebreaker", next, lagCutoff)
+	if !advanced || !next.StartAt.Equal(lagCutoff) || next.StartAfterEventID != "" {
+		t.Errorf("next = %+v, advanced = %v, want StartAt=%v with no tiebreaker, true", next, advanced, lagCutoff)
 	}
 }
 
@@ -539,8 +558,9 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 		if len(got) != 1 || got[0].grant == nil {
 			t.Fatalf("got %+v, want exactly one grant-mapped affected resource", got)
 		}
-		if p := got[0].grant.principal.GetId(); p.GetResourceType() != groupResourceType.Id || p.GetResource() != "g-2" {
-			t.Errorf("principal = %+v, want type=%s id=g-2", p, groupResourceType.Id)
+		wantId := groupResourceId(context.Background(), "g-2", accountParent)
+		if p := got[0].grant.principal.GetId(); p.GetResourceType() != groupResourceType.Id || p.GetResource() != wantId {
+			t.Errorf("principal = %+v, want type=%s id=%s", p, groupResourceType.Id, wantId)
 		}
 	})
 
