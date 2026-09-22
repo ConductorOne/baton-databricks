@@ -189,15 +189,17 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 			return nil, fmt.Errorf("databricks-connector: incremental sync is not supported with workspace token auth")
 		}
 
-		auditWorkspaces, err := resolveSQLWorkspaces(ctx, d.client, d.workspaces)
+		// allWorkspaces (unfiltered) locates the query warehouse, which can live in any
+		// workspace in the account regardless of --workspaces.
+		allWorkspaces, _, err := d.client.ListWorkspaces(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: incremental sync requires the account API to list workspaces: %w", err)
 		}
-		if len(auditWorkspaces) == 0 {
+		if len(filterConfiguredWorkspaces(allWorkspaces, d.workspaces)) == 0 {
 			return nil, fmt.Errorf("databricks-connector: incremental sync requires at least one workspace to query system.access.audit")
 		}
 
-		queryWorkspaceId, _, err := resolveWarehouseWorkspace(ctx, d.client, auditWorkspaces, d.sqlWarehouseID)
+		queryWorkspaceId, _, err := resolveWarehouseWorkspace(ctx, d.client, allWorkspaces, d.sqlWarehouseID)
 		if err != nil {
 			return nil, err
 		}

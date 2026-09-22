@@ -134,7 +134,12 @@ Incremental sync also requires:
 - `--sql-warehouse-id` (or `BATON_SQL_WAREHOUSE_ID`), the ID of a Databricks SQL
   warehouse the connector can use to query the `system.access.audit` table. A
   small serverless warehouse is recommended to minimize cold-start latency.
-  The connector automatically discovers which workspace hosts it.
+  The connector automatically discovers which workspace hosts it. This can be
+  any workspace in the account: `system.access.audit` is an account-wide Unity
+  Catalog system table (per [Databricks' system tables
+  reference](https://docs.databricks.com/aws/en/admin/system-tables/)), so the
+  warehouse's workspace is only the compute used to run the query — it does not
+  limit which workspaces' audit events are returned.
 - A one-time setup performed by a Databricks admin, which the connector cannot
   do on its own:
   - An account admin must [enable the `access` system

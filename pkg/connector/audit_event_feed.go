@@ -179,7 +179,7 @@ type auditEventFeed struct {
 	enableIncrementalSync bool
 	sqlWarehouseID        string
 
-	// queryWorkspaceID caches which workspace hosts sqlWarehouseID across polls.
+	// queryWorkspaceID caches which workspace hosts sqlWarehouseID across polls. It's a discovered value, not provided by configs.
 	queryWorkspaceMu sync.Mutex
 	queryWorkspaceID string
 }
@@ -199,8 +199,10 @@ func newAuditEventFeed(
 }
 
 // resolveQueryWorkspaceID returns which workspace hosts f.sqlWarehouseID, resolving it
-// once via resolveWarehouseWorkspace rather than probing on every poll.
-func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, workspaces []databricks.Workspace) (string, *v2.RateLimitDescription, error) {
+// once via resolveWarehouseWorkspace rather than probing on every poll. allWorkspaces
+// must be every workspace in the account, not filtered by the --workspaces allowlist:
+// the warehouse can live in a workspace outside that scope.
+func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, allWorkspaces []databricks.Workspace) (string, *v2.RateLimitDescription, error) {
 	f.queryWorkspaceMu.Lock()
 	defer f.queryWorkspaceMu.Unlock()
 
@@ -208,7 +210,7 @@ func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, workspaces
 		return f.queryWorkspaceID, nil, nil
 	}
 
-	id, rateLimit, err := resolveWarehouseWorkspace(ctx, f.client, workspaces, f.sqlWarehouseID)
+	id, rateLimit, err := resolveWarehouseWorkspace(ctx, f.client, allWorkspaces, f.sqlWarehouseID)
 	if err != nil {
 		return "", rateLimit, err
 	}
@@ -219,7 +221,7 @@ func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, workspaces
 
 // EventFeedMetadata is registered unconditionally; enable-incremental-sync gates behavior
 // inside ListEvents instead, to avoid confusing "feed not found" errors when it's off.
-func (f *auditEventFeed) EventFeedMetadata(ctx context.Context) *v2.EventFeedMetadata {
+func (f *auditEventFeed) EventFeedMetadata(_ context.Context) *v2.EventFeedMetadata {
 	return &v2.EventFeedMetadata{
 		Id:                  auditEventFeedId,
 		SupportedEventTypes: []v2.EventType{v2.EventType_EVENT_TYPE_RESOURCE_CHANGE},
@@ -249,20 +251,22 @@ func (f *auditEventFeed) ListEvents(
 		cursor = eventPageCursor{StartAt: start}
 	}
 
-	workspaces, err := resolveSQLWorkspaces(ctx, f.client, f.workspaces)
+	// queries all the available workspaces to locate the one that contains the query warehouse.
+	allWorkspaces, _, err := f.client.ListWorkspaces(ctx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
-	if len(workspaces) == 0 {
+	scopedWorkspaces := filterConfiguredWorkspaces(allWorkspaces, f.workspaces)
+	if len(scopedWorkspaces) == 0 {
 		return nil, nil, nil, fmt.Errorf("databricks-connector: no workspace available to query system.access.audit")
 	}
 
-	workspaceLookup := make(map[int64]string, len(workspaces))
-	for _, w := range workspaces {
+	workspaceLookup := make(map[int64]string, len(scopedWorkspaces))
+	for _, w := range scopedWorkspaces {
 		workspaceLookup[int64(w.ID)] = w.DeploymentName
 	}
 
-	queryWorkspaceId, rateLimit, err := f.resolveQueryWorkspaceID(ctx, workspaces)
+	queryWorkspaceId, rateLimit, err := f.resolveQueryWorkspaceID(ctx, allWorkspaces)
 	if rateLimit != nil {
 		annos.WithRateLimiting(rateLimit)
 	}
@@ -433,24 +437,14 @@ func mapAuditRowToResource(ctx context.Context, row auditLogRow, accountId strin
 	return affected
 }
 
-// resolveSQLWorkspaces returns the workspaces available to run the audit-log SQL query
-// against, without calling the Account API under token auth (unreachable there).
-func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, configuredWorkspaces []string) ([]databricks.Workspace, error) {
-	if client.IsTokenAuth() {
-		workspaces := make([]databricks.Workspace, 0, len(configuredWorkspaces))
-		for _, name := range configuredWorkspaces {
-			workspaces = append(workspaces, databricks.Workspace{DeploymentName: name})
-		}
-		return workspaces, nil
-	}
-
-	workspaces, _, err := client.ListWorkspaces(ctx)
-	if err != nil {
-		return nil, err
-	}
-
+// filterConfiguredWorkspaces narrows workspaces to configuredWorkspaces (the --workspaces
+// allowlist), or returns workspaces unchanged when the allowlist is empty. This scopes
+// which workspaces' audit rows get resolved to resources — it must NOT be applied before
+// locating the query warehouse (resolveWarehouseWorkspace), which can live in any workspace
+// in the account regardless of this allowlist.
+func filterConfiguredWorkspaces(workspaces []databricks.Workspace, configuredWorkspaces []string) []databricks.Workspace {
 	if len(configuredWorkspaces) == 0 {
-		return workspaces, nil
+		return workspaces
 	}
 
 	configured := make(map[string]struct{}, len(configuredWorkspaces))
@@ -465,16 +459,12 @@ func resolveSQLWorkspaces(ctx context.Context, client *databricks.Client, config
 		}
 	}
 
-	return filtered, nil
+	return filtered
 }
 
 // resolveWarehouseWorkspace finds which workspace hosts warehouseId by probing each
 // candidate workspace, since Databricks has no account-level lookup for this.
 func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, workspaces []databricks.Workspace, warehouseId string) (string, *v2.RateLimitDescription, error) {
-	if len(workspaces) == 1 {
-		return workspaces[0].DeploymentName, nil, nil
-	}
-
 	var rateLimit *v2.RateLimitDescription
 	for _, w := range workspaces {
 		found, rl, err := client.WarehouseExists(ctx, w.DeploymentName, warehouseId)
@@ -492,6 +482,12 @@ func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, w
 		}
 	}
 
+	if len(workspaces) == 1 {
+		return "", rateLimit, fmt.Errorf(
+			"databricks-connector: sql-warehouse-id %q was not found in workspace %s",
+			warehouseId, workspaces[0].DeploymentName,
+		)
+	}
 	return "", rateLimit, fmt.Errorf(
 		"databricks-connector: sql-warehouse-id %q was not found in any of the %d available workspaces",
 		warehouseId, len(workspaces),

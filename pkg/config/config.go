@@ -76,6 +76,8 @@ var (
 		field.WithDisplayName("Enable Incremental Sync"),
 		field.WithDefaultValue(false),
 	)
+	// system.access.audit is account-wide, so this warehouse can be in any workspace
+	// in the account — its workspace is just query compute, not a data scope.
 	SQLWarehouseIDField = field.StringField(
 		"sql-warehouse-id",
 		field.WithDescription(

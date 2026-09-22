@@ -17,32 +17,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 )
 
-// TestResolveSQLWorkspacesTokenAuth ensures the audit-log workspace lookup never calls the
-// Account API under workspace-token auth (unreachable in that mode), building minimal
-// workspaces from the configured deployment names instead.
-func TestResolveSQLWorkspacesTokenAuth(t *testing.T) {
-	auth := databricks.NewTokenAuth([]string{"dbc-1", "dbc-2"}, []string{"token-1", "token-2"})
-	client, err := databricks.NewClient(context.Background(), &http.Client{}, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "", "", auth, nil)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	got, err := resolveSQLWorkspaces(context.Background(), client, []string{"dbc-1", "dbc-2"})
-	if err != nil {
-		t.Fatalf("resolveSQLWorkspaces() error = %v", err)
-	}
-
-	want := []databricks.Workspace{{DeploymentName: "dbc-1"}, {DeploymentName: "dbc-2"}}
-	if len(got) != len(want) {
-		t.Fatalf("got %d workspaces, want %d: %+v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i].DeploymentName != want[i].DeploymentName || got[i].ID != 0 {
-			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
 // writeJSONNotFound writes a 404 with a JSON body; a plain-text one (e.g. http.NotFound)
 // breaks the client's JSON decoder.
 func writeJSONNotFound(w http.ResponseWriter) {
@@ -76,9 +50,12 @@ func newProbeTestClient(t *testing.T, handler http.HandlerFunc) *databricks.Clie
 func TestResolveWarehouseWorkspace(t *testing.T) {
 	const warehouseId = "wh-123"
 
-	t.Run("single workspace needs no probe", func(t *testing.T) {
+	t.Run("single workspace is still probed", func(t *testing.T) {
+		probed := false
 		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			t.Fatalf("unexpected request %s %s: a single workspace should skip probing", r.Method, r.URL.Path)
+			probed = true
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%q}`, warehouseId)
 		})
 		workspaces := []databricks.Workspace{{ID: 1, DeploymentName: "dbc-only"}}
 
@@ -88,6 +65,25 @@ func TestResolveWarehouseWorkspace(t *testing.T) {
 		}
 		if got != "dbc-only" {
 			t.Errorf("got %q, want %q", got, "dbc-only")
+		}
+		if !probed {
+			t.Error("WarehouseExists was never called; a single workspace must still be probed so a bad sql-warehouse-id is caught with a clear error")
+		}
+	})
+
+	t.Run("single workspace missing the warehouse gets a specific not-found error", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			writeJSONNotFound(w)
+		})
+		workspaces := []databricks.Workspace{{ID: 1, DeploymentName: "dbc-only"}}
+
+		_, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
+		if err == nil {
+			t.Fatal("resolveWarehouseWorkspace() error = nil, want error when the single workspace doesn't have the warehouse")
+		}
+		wantMsg := `sql-warehouse-id "wh-123" was not found in workspace dbc-only`
+		if !strings.Contains(err.Error(), wantMsg) {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), wantMsg)
 		}
 	})
 
@@ -612,6 +608,26 @@ func TestListEventsEndToEnd(t *testing.T) {
 	const wantRemaining = 42
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ListEvents (OAuth2-only, now that token auth can't reach it) always lists
+		// workspaces via the Account API before querying the audit log.
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode([]map[string]any{
+				{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"},
+			}); err != nil {
+				t.Fatalf("failed to encode mock workspaces response: %v", err)
+			}
+			return
+		}
+
+		// resolveWarehouseWorkspace probes every candidate workspace (including a lone
+		// one) via WarehouseExists before running the audit-log query.
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -704,5 +720,89 @@ func TestListEventsEndToEnd(t *testing.T) {
 	}
 	if rld.GetLimit() != wantLimit || rld.GetRemaining() != wantRemaining {
 		t.Errorf("RateLimitDescription = %+v, want limit=%d remaining=%d", rld, wantLimit, wantRemaining)
+	}
+}
+
+// TestListEventsFindsWarehouseOutsideWorkspacesAllowlist verifies that resolving the SQL
+// warehouse's workspace is NOT scoped by --workspaces: the warehouse can live in any
+// workspace in the account, so the allowlist must only narrow which workspaces' audit
+// rows get resolved to resources, not which workspaces are searched for the warehouse.
+func TestListEventsFindsWarehouseOutsideWorkspacesAllowlist(t *testing.T) {
+	queriedWorkspace := ""
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode([]map[string]any{
+				{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"},
+				{"workspace_id": 2, "workspace_name": "ws2", "deployment_name": "ws2"},
+			}); err != nil {
+				t.Fatalf("failed to encode mock workspaces response: %v", err)
+			}
+			return
+		}
+
+		// The warehouse only exists in ws1, which is NOT in the --workspaces allowlist
+		// below (only ws2 is configured). Resolution must still find it in ws1.
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			isWs1 := strings.HasPrefix(r.Header.Get("X-Test-Original-Host"), "ws1.")
+			w.Header().Set("Content-Type", "application/json")
+			if isWs1 {
+				fmt.Fprintf(w, `{"id":"wh-1"}`)
+				return
+			}
+			writeJSONNotFound(w)
+			return
+		}
+
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			queriedWorkspace = r.Header.Get("X-Test-Original-Host")
+			w.Header().Set("Content-Type", "application/json")
+			resp := map[string]any{
+				"statement_id": "stmt-1",
+				"status":       map[string]any{"state": "SUCCEEDED"},
+				"manifest": map[string]any{
+					"schema": map[string]any{
+						"columns": []map[string]any{
+							{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+							{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+						},
+					},
+				},
+				"result": map[string]any{"data_array": [][]string{}},
+			}
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				t.Fatalf("failed to encode mock statement response: %v", err)
+			}
+			return
+		}
+
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	auth := databricks.NewTokenAuth([]string{"ws1", "ws2"}, []string{"token-1", "token-2"})
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client.UpdateAvailability(true, true)
+
+	// --workspaces is scoped to ws2 only; the warehouse lives in ws1.
+	feed := newAuditEventFeed(client, []string{"ws2"}, true, "wh-1")
+
+	_, _, _, err = feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v, want warehouse resolution to succeed despite living outside --workspaces", err)
+	}
+	if !strings.HasPrefix(queriedWorkspace, "ws1.") {
+		t.Errorf("audit query ran against %q, want it to run against ws1 (where the warehouse actually lives)", queriedWorkspace)
 	}
 }
