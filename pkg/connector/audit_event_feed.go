@@ -281,6 +281,19 @@ func (f *auditEventFeed) ListEvents(
 		cursor = eventPageCursor{StartAt: start}
 	}
 
+	// Rows are only ever fetched up to lagCutoff (see queryAuditLog), so slow-indexing rows
+	// have auditLogTrailingLag to appear before we consider that window done. If the cursor
+	// is already past it (e.g. right after bootstrap, where the lookback is narrower than the
+	// lag), there's nothing to query yet.
+	lagCutoff := now.Add(-auditLogTrailingLag)
+	if !cursor.StartAt.Before(lagCutoff) {
+		encoded, err := encodeEventCursor(cursor)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("databricks-connector: failed to encode event cursor: %w", err)
+		}
+		return nil, &pagination.StreamState{Cursor: encoded, HasMore: false}, annos, nil
+	}
+
 	// queries all the available workspaces to locate the one that contains the query warehouse.
 	allWorkspaces, _, err := f.client.ListWorkspaces(ctx)
 	if err != nil {
@@ -304,7 +317,7 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, annos, err
 	}
 
-	rows, rateLimit, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor)
+	rows, rawRowCount, rateLimit, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor, lagCutoff)
 	if err != nil {
 		if rateLimit != nil {
 			annos.WithRateLimiting(rateLimit)
@@ -350,8 +363,8 @@ func (f *auditEventFeed) ListEvents(
 		}
 	}
 
-	hasMore := len(rows) >= auditLogPageLimit
-	nextCursor := advanceEventCursor(cursor, rows, hasMore, now)
+	hasMore := rawRowCount >= auditLogPageLimit
+	nextCursor := advanceEventCursor(rows, hasMore, lagCutoff)
 
 	encoded, err := encodeEventCursor(nextCursor)
 	if err != nil {
@@ -361,44 +374,15 @@ func (f *auditEventFeed) ListEvents(
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
 }
 
-// advanceEventCursor advances only to the last row processed (by the well-ordered
-// (event_time, event_id) boundary) while a page is full, and once drained, trails the
-// newest event seen (or wall-clock time if empty) by auditLogTrailingLag.
-func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, hasMore bool, now time.Time) eventPageCursor {
-	latest := cursor.StartAt
-	lastEventID := cursor.StartAfterEventID
-	if len(rows) > 0 {
-		last := rows[len(rows)-1]
-		latest = last.EventTime
-		lastEventID = last.EventID
-	}
-
+// advanceEventCursor advances to the last row processed while more of the page remains, or
+// to lagCutoff once drained: rows are already bounded by lagCutoff (see queryAuditLog), so a
+// drained page proves nothing else exists up to that point.
+func advanceEventCursor(rows []auditLogRow, hasMore bool, lagCutoff time.Time) eventPageCursor {
 	if hasMore {
-		startAt := latest
-		startAfterEventID := lastEventID
-		// Clamp intra-page advances to the trailing-lag boundary; otherwise the never-regress
-		// floor below would permanently defeat auditLogTrailingLag for this burst.
-		if laggedFloor := now.Add(-auditLogTrailingLag); startAt.After(laggedFloor) {
-			startAt = laggedFloor
-			startAfterEventID = ""
-		}
-		return eventPageCursor{StartAt: startAt, StartAfterEventID: startAfterEventID}
+		last := rows[len(rows)-1]
+		return eventPageCursor{StartAt: last.EventTime, StartAfterEventID: last.EventID}
 	}
-
-	target := latest.Add(-auditLogTrailingLag)
-	if len(rows) == 0 {
-		target = now.Add(-auditLogTrailingLag)
-	}
-	if target.Before(cursor.StartAt) {
-		target = cursor.StartAt
-	}
-
-	startAfterEventID := ""
-	if target.Equal(latest) {
-		startAfterEventID = lastEventID
-	}
-
-	return eventPageCursor{StartAt: target, StartAfterEventID: startAfterEventID}
+	return eventPageCursor{StartAt: lagCutoff}
 }
 
 // affectedResource is either one resource a mapped audit row's action changed (RESOURCE_CHANGE),
@@ -565,7 +549,9 @@ func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, w
 	)
 }
 
-func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor) ([]auditLogRow, *v2.RateLimitDescription, error) {
+// queryAuditLog returns rows in (cursor, lagCutoff], plus the raw row count (before
+// parseAuditLogRows may drop malformed ones) so callers can tell if the page was full.
+func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor, lagCutoff time.Time) ([]auditLogRow, int, *v2.RateLimitDescription, error) {
 	// The (event_time, event_id) tiebreaker keeps ordering deterministic and lets us page
 	// with a composite > predicate, so progress never stalls even if many rows share one
 	// event_time (see advanceEventCursor); this holds as long as event_id compares consistently
@@ -575,6 +561,7 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		FROM system.access.audit
 		WHERE event_date >= :start_date
 		  AND (event_time > :start_time OR (event_time = :start_time AND event_id > :start_after_event_id))
+		  AND event_time <= :lag_cutoff
 		  AND service_name IN (%s)
 		  AND action_name IN (%s)
 		ORDER BY event_time ASC, event_id ASC
@@ -591,13 +578,14 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		// to round-trip at the same sub-second precision parseAuditLogRows parses.
 		databricks.StatementParameter{Name: "start_time", Value: cursor.StartAt.UTC().Format(time.RFC3339Nano), Type: "TIMESTAMP"},
 		databricks.StatementParameter{Name: "start_after_event_id", Value: cursor.StartAfterEventID, Type: "STRING"},
+		databricks.StatementParameter{Name: "lag_cutoff", Value: lagCutoff.UTC().Format(time.RFC3339Nano), Type: "TIMESTAMP"},
 	)
 	if err != nil {
-		return nil, rateLimit, err
+		return nil, 0, rateLimit, err
 	}
 
 	rows, err := parseAuditLogRows(ctx, result)
-	return rows, rateLimit, err
+	return rows, len(result.Rows), rateLimit, err
 }
 
 func quotedInClause(values []string) string {

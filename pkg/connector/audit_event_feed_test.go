@@ -16,7 +16,14 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// testEarliestEvent starts a fresh cursor before lagCutoff, so ListEvents' bootstrap
+// doesn't hit the guard for cursor.StartAt >= lagCutoff (see TestListEventsSkipsQueryPastLagCutoff).
+func testEarliestEvent() *timestamppb.Timestamp {
+	return timestamppb.New(time.Now().Add(-2 * auditLogTrailingLag))
+}
 
 // writeJSONNotFound writes a 404 with a JSON body; a plain-text one (e.g. http.NotFound)
 // breaks the client's JSON decoder.
@@ -199,139 +206,43 @@ func TestDecodeEventCursorResetsStaleCursor(t *testing.T) {
 	}
 }
 
-// TestAdvanceEventCursorFullPageAdvancesPastLagWindow verifies that a full page of rows
-// older than the trailing-lag boundary still advances StartAt to the last row processed.
-func TestAdvanceEventCursorFullPageAdvancesPastLagWindow(t *testing.T) {
-	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: startAt}
-
-	rows := []auditLogRow{
-		{EventID: "1", EventTime: startAt.Add(1 * time.Minute)},
-		{EventID: "2", EventTime: startAt.Add(2 * time.Minute)},
+// TestAdvanceEventCursorAdvancesToLastRow verifies a full page, including one where many
+// rows share the same event_time, advances to the last row processed rather than stalling.
+func TestAdvanceEventCursorAdvancesToLastRow(t *testing.T) {
+	tied := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := make([]auditLogRow, auditLogPageLimit)
+	for i := range rows {
+		rows[i] = auditLogRow{EventID: fmt.Sprintf("evt-%04d", i), EventTime: tied}
 	}
 
-	// now is far enough past the rows that startAt+2min is still older than
-	// now-auditLogTrailingLag, so the lag clamp shouldn't kick in.
-	now := startAt.Add(2*time.Minute + auditLogTrailingLag + time.Hour)
+	next := advanceEventCursor(rows, true, tied.Add(auditLogTrailingLag))
 
-	next := advanceEventCursor(cursor, rows, true, now)
-
-	wantStart := startAt.Add(2 * time.Minute)
-	if !next.StartAt.Equal(wantStart) {
-		t.Errorf("StartAt = %v, want %v (rows are older than the lag window, so no clamp)", next.StartAt, wantStart)
-	}
-	if next.StartAfterEventID != "2" {
-		t.Errorf("StartAfterEventID = %q, want %q", next.StartAfterEventID, "2")
+	lastID := rows[len(rows)-1].EventID
+	if !next.StartAt.Equal(tied) || next.StartAfterEventID != lastID {
+		t.Errorf("next = %+v, want StartAt=%v StartAfterEventID=%q", next, tied, lastID)
 	}
 }
 
-// TestAdvanceEventCursorFullPageClampsToLagWindow verifies intra-page paging never
-// advances StartAt past now-auditLogTrailingLag when the rows are within the lag window.
-func TestAdvanceEventCursorFullPageClampsToLagWindow(t *testing.T) {
-	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: startAt}
+// TestAdvanceEventCursorDrainedJumpsToLagCutoff verifies a drained page, with or without
+// rows, advances straight to lagCutoff: rows are already bounded by it (see queryAuditLog),
+// so draining proves nothing else exists up to that point.
+func TestAdvanceEventCursorDrainedJumpsToLagCutoff(t *testing.T) {
+	lagCutoff := time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC)
 
-	rows := []auditLogRow{
-		{EventID: "1", EventTime: startAt.Add(1 * time.Minute)},
-		{EventID: "2", EventTime: startAt.Add(2 * time.Minute)},
+	cases := []struct {
+		name string
+		rows []auditLogRow
+	}{
+		{"with rows", []auditLogRow{{EventID: "1", EventTime: lagCutoff.Add(-time.Hour)}}},
+		{"empty window", nil},
 	}
-
-	// now is close to the rows' timestamps, so startAt+2min falls inside the lag window.
-	now := startAt.Add(10 * time.Minute)
-
-	next := advanceEventCursor(cursor, rows, true, now)
-
-	wantStart := now.Add(-auditLogTrailingLag)
-	if !next.StartAt.Equal(wantStart) {
-		t.Errorf("StartAt = %v, want %v (clamped to the trailing-lag boundary)", next.StartAt, wantStart)
-	}
-	if next.StartAfterEventID != "" {
-		t.Errorf("StartAfterEventID = %q, want empty (clamped boundary doesn't tie to a real row)", next.StartAfterEventID)
-	}
-
-	// Once the burst drains, the trailing lag must still apply going forward.
-	drainedLatest := startAt.Add(3 * time.Hour)
-	drainedRows := []auditLogRow{{EventID: "3", EventTime: drainedLatest}}
-	drainedNow := drainedLatest.Add(5 * time.Minute)
-	drained := advanceEventCursor(next, drainedRows, false, drainedNow)
-
-	wantDrainedStart := drainedLatest.Add(-auditLogTrailingLag)
-	if !drained.StartAt.Equal(wantDrainedStart) {
-		t.Errorf("drained StartAt = %v, want %v (trailing lag re-applied after drain)", drained.StartAt, wantDrainedStart)
-	}
-	if !drained.StartAt.After(next.StartAt) {
-		t.Errorf("drained StartAt = %v did not advance past the clamped intra-page StartAt %v", drained.StartAt, next.StartAt)
-	}
-}
-
-func TestAdvanceEventCursorDrainedPageAppliesTrailingLag(t *testing.T) {
-	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: startAt}
-	latest := startAt.Add(5 * time.Hour)
-
-	rows := []auditLogRow{
-		{EventID: "1", EventTime: latest},
-	}
-
-	next := advanceEventCursor(cursor, rows, false, latest)
-
-	wantStart := latest.Add(-auditLogTrailingLag)
-	if !next.StartAt.Equal(wantStart) {
-		t.Errorf("StartAt = %v, want %v", next.StartAt, wantStart)
-	}
-	// The trailing lag pushes the boundary well before the only row seen, so nothing ties.
-	if next.StartAfterEventID != "" {
-		t.Errorf("StartAfterEventID = %q, want empty", next.StartAfterEventID)
-	}
-}
-
-// TestAdvanceEventCursorTieAtFlooredBoundaryIsRemembered covers a row landing exactly on
-// the floored StartAt boundary, which would otherwise be re-fetched forever.
-func TestAdvanceEventCursorTieAtFlooredBoundaryIsRemembered(t *testing.T) {
-	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: startAt}
-
-	rows := []auditLogRow{
-		{EventID: "1", EventTime: startAt},
-	}
-
-	next := advanceEventCursor(cursor, rows, false, startAt)
-
-	if !next.StartAt.Equal(startAt) {
-		t.Errorf("StartAt = %v, want unchanged %v", next.StartAt, startAt)
-	}
-	if next.StartAfterEventID != "1" {
-		t.Errorf("StartAfterEventID = %q, want %q", next.StartAfterEventID, "1")
-	}
-}
-
-func TestAdvanceEventCursorNeverRegresses(t *testing.T) {
-	startAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: startAt}
-
-	// "now" is barely past startAt, so subtracting the trailing lag would regress.
-	now := startAt.Add(1 * time.Minute)
-
-	next := advanceEventCursor(cursor, nil, false, now)
-
-	if next.StartAt.Before(cursor.StartAt) {
-		t.Errorf("StartAt regressed: got %v, was %v", next.StartAt, cursor.StartAt)
-	}
-	if !next.StartAt.Equal(cursor.StartAt) {
-		t.Errorf("StartAt = %v, want unchanged %v", next.StartAt, cursor.StartAt)
-	}
-}
-
-func TestAdvanceEventCursorEmptyWindowTrailsWallClock(t *testing.T) {
-	startAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: startAt}
-	now := startAt.Add(10 * time.Hour)
-
-	next := advanceEventCursor(cursor, nil, false, now)
-
-	wantStart := now.Add(-auditLogTrailingLag)
-	if !next.StartAt.Equal(wantStart) {
-		t.Errorf("StartAt = %v, want %v", next.StartAt, wantStart)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			next := advanceEventCursor(tc.rows, false, lagCutoff)
+			if !next.StartAt.Equal(lagCutoff) || next.StartAfterEventID != "" {
+				t.Errorf("next = %+v, want StartAt=%v with no tiebreaker", next, lagCutoff)
+			}
+		})
 	}
 }
 
@@ -609,38 +520,6 @@ func TestParseAuditLogRowsSkipsMalformedRow(t *testing.T) {
 	}
 }
 
-// TestAdvanceEventCursorLargeTiedBurstMakesProgress verifies more than auditLogPageLimit rows
-// sharing one event_time still make progress via the (event_time, event_id) cursor.
-func TestAdvanceEventCursorLargeTiedBurstMakesProgress(t *testing.T) {
-	tied := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cursor := eventPageCursor{StartAt: tied.Add(-time.Minute)}
-
-	rows := make([]auditLogRow, auditLogPageLimit)
-	for i := range rows {
-		rows[i] = auditLogRow{EventID: fmt.Sprintf("evt-%04d", i), EventTime: tied}
-	}
-
-	// now is far past the lag window so the intra-page clamp doesn't interfere.
-	now := tied.Add(auditLogTrailingLag + time.Hour)
-
-	next := advanceEventCursor(cursor, rows, true, now)
-	if !next.StartAt.Equal(tied) {
-		t.Fatalf("StartAt = %v, want %v (advances to the tied timestamp, not stuck before it)", next.StartAt, tied)
-	}
-	lastID := rows[len(rows)-1].EventID
-	if next.StartAfterEventID != lastID {
-		t.Fatalf("StartAfterEventID = %q, want %q (last row in the tied burst)", next.StartAfterEventID, lastID)
-	}
-
-	// A later, non-tied page must advance the cursor past the tied burst.
-	followUpLatest := tied.Add(5 * time.Hour)
-	followUp := []auditLogRow{{EventID: "evt-1000", EventTime: followUpLatest}}
-	drained := advanceEventCursor(next, followUp, false, followUpLatest.Add(5*time.Minute))
-	if !drained.StartAt.After(tied) {
-		t.Errorf("drained StartAt = %v did not advance past the tied burst's timestamp %v", drained.StartAt, tied)
-	}
-}
-
 // redirectTransport rewrites every outgoing request to target, since workspaceUrl always
 // builds a "<workspace>.<hostname>" subdomain a local httptest.Server can't listen on directly.
 type redirectTransport struct {
@@ -657,6 +536,30 @@ func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// once every request is rewritten to the same local test server.
 	req.Header.Set("X-Test-Original-Host", originalHost)
 	return http.DefaultTransport.RoundTrip(req)
+}
+
+// TestListEventsSkipsQueryPastLagCutoff covers the bootstrap edge case where the lookback
+// default is older than now but still after lagCutoff (auditLogLookback < auditLogTrailingLag):
+// ListEvents must not query with an inverted (start > end) range.
+func TestListEventsSkipsQueryPastLagCutoff(t *testing.T) {
+	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request %s %s: should have been skipped by the lagCutoff guard", r.Method, r.URL.Path)
+	})
+
+	feed := newAuditEventFeed(client, nil, true, "wh-1")
+	events, streamState, _, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("len(events) = %d, want 0", len(events))
+	}
+	if streamState.HasMore {
+		t.Error("HasMore = true, want false")
+	}
+	if streamState.Cursor == "" {
+		t.Error("Cursor is empty, want the bootstrap cursor to still be encoded")
+	}
 }
 
 // TestListEventsEndToEnd exercises ListEvents against a mocked Statement Execution API,
@@ -752,7 +655,7 @@ func TestListEventsEndToEnd(t *testing.T) {
 
 	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1")
 
-	events, streamState, annos, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	events, streamState, annos, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
 	}
@@ -839,7 +742,7 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 	client.UpdateAvailability(true, true)
 
 	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1")
-	events, _, _, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
 	}
@@ -936,7 +839,7 @@ func TestListEventsFindsWarehouseOutsideWorkspacesAllowlist(t *testing.T) {
 	// --workspaces is scoped to ws2 only; the warehouse lives in ws1.
 	feed := newAuditEventFeed(client, []string{"ws2"}, true, "wh-1")
 
-	_, _, _, err = feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
+	_, _, _, err = feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v, want warehouse resolution to succeed despite living outside --workspaces", err)
 	}
