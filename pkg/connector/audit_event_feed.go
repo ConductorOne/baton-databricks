@@ -415,7 +415,7 @@ func (f *auditEventFeed) ListEvents(
 // raw page, so a page where every row fails to parse still advances), falling back to the last
 // successfully parsed row. advanced is false only if neither is available, so the caller can
 // avoid reporting HasMore with an unchanged cursor.
-func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, lastRawBoundary eventPageCursor, hasMore bool, lagCutoff time.Time) (next eventPageCursor, advanced bool) {
+func advanceEventCursor(cursor eventPageCursor, rows []auditLogRow, lastRawBoundary eventPageCursor, hasMore bool, lagCutoff time.Time) (eventPageCursor, bool) {
 	if hasMore {
 		if !lastRawBoundary.StartAt.IsZero() {
 			return lastRawBoundary, true
@@ -446,7 +446,14 @@ type affectedGrant struct {
 // mapAuditRowToResource maps an audit row to every Baton resource its action affects, skipping
 // anything unresolvable. The principal's parent mirrors how it's actually synced (see
 // groupGrantParent in helpers.go), not the scope the audit row occurred in.
-func mapAuditRowToResource(ctx context.Context, client *databricks.Client, row auditLogRow, accountId string, accountAPIAvailable bool, workspaceLookup map[int64]string) ([]affectedResource, *v2.RateLimitDescription, error) {
+func mapAuditRowToResource(
+	ctx context.Context,
+	client *databricks.Client,
+	row auditLogRow,
+	accountId string,
+	accountAPIAvailable bool,
+	workspaceLookup map[int64]string,
+) ([]affectedResource, *v2.RateLimitDescription, error) {
 	mapping, ok := auditLogActions[auditActionKey{Service: row.ServiceName, Action: row.ActionName}]
 	if !ok {
 		return nil, nil, nil
