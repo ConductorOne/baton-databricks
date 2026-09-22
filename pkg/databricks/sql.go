@@ -151,7 +151,7 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 		select {
 		case <-pollCtx.Done():
 			if err := ctx.Err(); err != nil {
-				c.cancelStatement(workspaceId, res.StatementID)
+				c.cancelStatement(ctx, workspaceId, res.StatementID)
 				return res, rateLimit, err
 			}
 			l.Debug("sql statement did not reach a terminal state before poll timeout, canceling",
@@ -159,7 +159,7 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 				zap.String("state", string(res.Status.State)),
 				zap.Duration("max_wait", statementPollMaxWait),
 			)
-			c.cancelStatement(workspaceId, res.StatementID)
+			c.cancelStatement(ctx, workspaceId, res.StatementID)
 			return res, rateLimit, fmt.Errorf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait)
 		case <-time.After(statementPollInterval):
 		}
@@ -181,17 +181,20 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 	return res, rateLimit, nil
 }
 
-// cancelStatement best-effort cancels a statement we've given up polling on, using a fresh
-// context since ctx/pollCtx may already be done. Uses /cancel, not DELETE (which only closes
-// an already-terminal statement and wouldn't stop one still running).
-func (c *Client) cancelStatement(workspaceId, statementId string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// cancelStatement best-effort cancels a statement we've given up polling on. The request uses
+// ctx's values (for the logger) but not its cancellation, since ctx/pollCtx may already be
+// done. Uses /cancel, not DELETE (which only closes an already-terminal statement and
+// wouldn't stop one still running).
+func (c *Client) cancelStatement(ctx context.Context, workspaceId, statementId string) {
+	l := ctxzap.Extract(ctx)
+
+	reqCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
 	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, statementId, "cancel")
 	response := struct{}{}
-	if _, err := c.Post(ctx, u, nil, &response); err != nil {
-		ctxzap.Extract(ctx).Debug("failed to cancel timed-out sql statement", zap.String("statement_id", statementId), zap.Error(err))
+	if _, err := c.Post(reqCtx, u, nil, &response); err != nil {
+		l.Debug("failed to cancel timed-out sql statement", zap.String("statement_id", statementId), zap.Error(err))
 	}
 }
 

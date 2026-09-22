@@ -25,6 +25,28 @@ func testEarliestEvent() *timestamppb.Timestamp {
 	return timestamppb.New(time.Now().Add(-2 * auditLogTrailingLag))
 }
 
+func TestBootstrapStartAt(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name          string
+		earliestEvent *timestamppb.Timestamp
+		want          time.Time
+	}{
+		{"nil earliestEvent uses the lookback default", nil, now.Add(-auditLogLookback)},
+		{"zero-valued earliestEvent is treated like nil", timestamppb.New(time.Unix(0, 0)), now.Add(-auditLogLookback)},
+		{"recent earliestEvent is used as-is", timestamppb.New(now.Add(-time.Hour)), now.Add(-time.Hour)},
+		{"earliestEvent older than retention is clamped", timestamppb.New(now.AddDate(-2, 0, 0)), now.Add(-auditLogRetention)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bootstrapStartAt(now, tc.earliestEvent); !got.Equal(tc.want) {
+				t.Errorf("bootstrapStartAt() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // writeJSONNotFound writes a 404 with a JSON body; a plain-text one (e.g. http.NotFound)
 // breaks the client's JSON decoder.
 func writeJSONNotFound(w http.ResponseWriter) {
@@ -206,43 +228,41 @@ func TestDecodeEventCursorResetsStaleCursor(t *testing.T) {
 	}
 }
 
-// TestAdvanceEventCursorAdvancesToLastRow verifies a full page, including one where many
-// rows share the same event_time, advances to the last row processed rather than stalling.
-func TestAdvanceEventCursorAdvancesToLastRow(t *testing.T) {
-	tied := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	rows := make([]auditLogRow, auditLogPageLimit)
-	for i := range rows {
-		rows[i] = auditLogRow{EventID: fmt.Sprintf("evt-%04d", i), EventTime: tied}
-	}
+func TestAdvanceEventCursorAdvancesToLastRawBoundary(t *testing.T) {
+	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	lastRawBoundary := eventPageCursor{StartAt: cursor.StartAt.Add(time.Minute), StartAfterEventID: "evt-999"}
 
-	next := advanceEventCursor(rows, true, tied.Add(auditLogTrailingLag))
+	next := advanceEventCursor(cursor, lastRawBoundary, true, cursor.StartAt.Add(auditLogTrailingLag))
 
-	lastID := rows[len(rows)-1].EventID
-	if !next.StartAt.Equal(tied) || next.StartAfterEventID != lastID {
-		t.Errorf("next = %+v, want StartAt=%v StartAfterEventID=%q", next, tied, lastID)
+	if next != lastRawBoundary {
+		t.Errorf("next = %+v, want %+v", next, lastRawBoundary)
 	}
 }
 
-// TestAdvanceEventCursorDrainedJumpsToLagCutoff verifies a drained page, with or without
-// rows, advances straight to lagCutoff: rows are already bounded by it (see queryAuditLog),
-// so draining proves nothing else exists up to that point.
-func TestAdvanceEventCursorDrainedJumpsToLagCutoff(t *testing.T) {
-	lagCutoff := time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC)
+// TestAdvanceEventCursorFullyMalformedPageKeepsCursor covers a full page where every row
+// failed to parse: lastRawBoundary is zero-value, so this must not panic indexing an empty
+// rows slice, and must not skip ahead past unparsed rows either.
+func TestAdvanceEventCursorFullyMalformedPageKeepsCursor(t *testing.T) {
+	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), StartAfterEventID: "evt-1"}
 
-	cases := []struct {
-		name string
-		rows []auditLogRow
-	}{
-		{"with rows", []auditLogRow{{EventID: "1", EventTime: lagCutoff.Add(-time.Hour)}}},
-		{"empty window", nil},
+	next := advanceEventCursor(cursor, eventPageCursor{}, true, cursor.StartAt.Add(auditLogTrailingLag))
+
+	if next != cursor {
+		t.Errorf("next = %+v, want unchanged cursor %+v", next, cursor)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			next := advanceEventCursor(tc.rows, false, lagCutoff)
-			if !next.StartAt.Equal(lagCutoff) || next.StartAfterEventID != "" {
-				t.Errorf("next = %+v, want StartAt=%v with no tiebreaker", next, lagCutoff)
-			}
-		})
+}
+
+// TestAdvanceEventCursorDrainedJumpsToLagCutoff verifies a drained page advances straight to
+// lagCutoff: rows are already bounded by it (see queryAuditLog), so draining proves nothing
+// else exists up to that point.
+func TestAdvanceEventCursorDrainedJumpsToLagCutoff(t *testing.T) {
+	cursor := eventPageCursor{StartAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	lagCutoff := cursor.StartAt.Add(4 * time.Hour)
+
+	next := advanceEventCursor(cursor, eventPageCursor{}, false, lagCutoff)
+
+	if !next.StartAt.Equal(lagCutoff) || next.StartAfterEventID != "" {
+		t.Errorf("next = %+v, want StartAt=%v with no tiebreaker", next, lagCutoff)
 	}
 }
 
@@ -475,7 +495,7 @@ func TestParseAuditLogRowsDedupesNothingAndParsesFields(t *testing.T) {
 		},
 	}
 
-	rows, err := parseAuditLogRows(context.Background(), result)
+	rows, _, err := parseAuditLogRows(context.Background(), result)
 	if err != nil {
 		t.Fatalf("parseAuditLogRows() error = %v", err)
 	}
@@ -496,7 +516,7 @@ func TestParseAuditLogRowsMissingColumnErrors(t *testing.T) {
 		Rows:    [][]string{{"evt-1", "2026-01-01 00:00:00.000"}},
 	}
 
-	if _, err := parseAuditLogRows(context.Background(), result); err == nil {
+	if _, _, err := parseAuditLogRows(context.Background(), result); err == nil {
 		t.Error("parseAuditLogRows() error = nil, want error for missing required column")
 	}
 }
@@ -512,7 +532,7 @@ func TestParseAuditLogRowsSkipsMalformedRow(t *testing.T) {
 		},
 	}
 
-	rows, err := parseAuditLogRows(context.Background(), result)
+	rows, _, err := parseAuditLogRows(context.Background(), result)
 	if err != nil {
 		t.Fatalf("parseAuditLogRows() error = %v, want the malformed row skipped instead", err)
 	}

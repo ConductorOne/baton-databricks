@@ -267,6 +267,21 @@ func (f *auditEventFeed) EventFeedMetadata(_ context.Context) *v2.EventFeedMetad
 	}
 }
 
+// bootstrapStartAt picks the watermark for a feed with no prior cursor. A zero-valued
+// earliestEvent (unset) is treated like nil; a real one is clamped to auditLogRetention so a
+// very old value can't trigger a full-table scan against system.access.audit.
+func bootstrapStartAt(now time.Time, earliestEvent *timestamppb.Timestamp) time.Time {
+	if earliestEvent == nil || earliestEvent.AsTime().Unix() == 0 {
+		return now.Add(-auditLogLookback)
+	}
+
+	start := earliestEvent.AsTime()
+	if floor := now.Add(-auditLogRetention); start.Before(floor) {
+		return floor
+	}
+	return start
+}
+
 func (f *auditEventFeed) ListEvents(
 	ctx context.Context,
 	earliestEvent *timestamppb.Timestamp,
@@ -283,11 +298,7 @@ func (f *auditEventFeed) ListEvents(
 	cursor := decodeEventCursor(ctx, pToken.Cursor, now)
 
 	if cursor.StartAt.IsZero() {
-		start := now.Add(-auditLogLookback)
-		if earliestEvent != nil {
-			start = earliestEvent.AsTime()
-		}
-		cursor = eventPageCursor{StartAt: start}
+		cursor = eventPageCursor{StartAt: bootstrapStartAt(now, earliestEvent)}
 	}
 
 	// Rows are only ever fetched up to lagCutoff (see queryAuditLog), so slow-indexing rows
@@ -326,7 +337,7 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, annos, err
 	}
 
-	rows, rawRowCount, rateLimit, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor, lagCutoff)
+	rows, rawRowCount, lastRawBoundary, rateLimit, err := f.queryAuditLog(ctx, queryWorkspaceId, cursor, lagCutoff)
 	if err != nil {
 		if rateLimit != nil {
 			annos.WithRateLimiting(rateLimit)
@@ -373,7 +384,7 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	hasMore := rawRowCount >= auditLogPageLimit
-	nextCursor := advanceEventCursor(rows, hasMore, lagCutoff)
+	nextCursor := advanceEventCursor(cursor, lastRawBoundary, hasMore, lagCutoff)
 
 	encoded, err := encodeEventCursor(nextCursor)
 	if err != nil {
@@ -385,11 +396,14 @@ func (f *auditEventFeed) ListEvents(
 
 // advanceEventCursor advances to the last row processed while more of the page remains, or
 // to lagCutoff once drained: rows are already bounded by lagCutoff (see queryAuditLog), so a
-// drained page proves nothing else exists up to that point.
-func advanceEventCursor(rows []auditLogRow, hasMore bool, lagCutoff time.Time) eventPageCursor {
+// drained page proves nothing else exists up to that point. lastRawBoundary comes from the
+// raw page (not the parsed rows), so a page where every row fails to parse still advances.
+func advanceEventCursor(cursor eventPageCursor, lastRawBoundary eventPageCursor, hasMore bool, lagCutoff time.Time) eventPageCursor {
 	if hasMore {
-		last := rows[len(rows)-1]
-		return eventPageCursor{StartAt: last.EventTime, StartAfterEventID: last.EventID}
+		if !lastRawBoundary.StartAt.IsZero() {
+			return lastRawBoundary
+		}
+		return cursor
 	}
 	return eventPageCursor{StartAt: lagCutoff}
 }
@@ -560,7 +574,7 @@ func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, w
 
 // queryAuditLog returns rows in (cursor, lagCutoff], plus the raw row count (before
 // parseAuditLogRows may drop malformed ones) so callers can tell if the page was full.
-func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor, lagCutoff time.Time) ([]auditLogRow, int, *v2.RateLimitDescription, error) {
+func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, cursor eventPageCursor, lagCutoff time.Time) ([]auditLogRow, int, eventPageCursor, *v2.RateLimitDescription, error) {
 	// The (event_time, event_id) tiebreaker keeps ordering deterministic and lets us page
 	// with a composite > predicate, so progress never stalls even if many rows share one
 	// event_time (see advanceEventCursor); this holds as long as event_id compares consistently
@@ -590,11 +604,11 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		databricks.StatementParameter{Name: "lag_cutoff", Value: lagCutoff.UTC().Format(time.RFC3339Nano), Type: "TIMESTAMP"},
 	)
 	if err != nil {
-		return nil, 0, rateLimit, err
+		return nil, 0, eventPageCursor{}, rateLimit, err
 	}
 
-	rows, err := parseAuditLogRows(ctx, result)
-	return rows, len(result.Rows), rateLimit, err
+	rows, lastRawBoundary, err := parseAuditLogRows(ctx, result)
+	return rows, len(result.Rows), lastRawBoundary, rateLimit, err
 }
 
 func quotedInClause(values []string) string {
@@ -617,7 +631,9 @@ const (
 
 // parseAuditLogRows skips (and logs) any individual row that fails to parse instead of
 // failing the whole page; a missing expected column is a schema problem, so that still fails.
-func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) ([]auditLogRow, error) {
+// lastRawBoundary is the last row's (event_time, event_id) regardless of whether the rest of
+// that row parsed, so a page where every row fails can still page forward.
+func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) ([]auditLogRow, eventPageCursor, error) {
 	colIndex := make(map[string]int, len(result.Columns))
 	for i, name := range result.Columns {
 		colIndex[name] = i
@@ -627,7 +643,7 @@ func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) 
 	for _, name := range []string{colEventID, colEventTime, colWorkspaceID, colActionName, colServiceName, colRequestParams} {
 		idx, ok := colIndex[name]
 		if !ok {
-			return nil, fmt.Errorf("audit log query result missing column %q", name)
+			return nil, eventPageCursor{}, fmt.Errorf("audit log query result missing column %q", name)
 		}
 		if idx > maxColIndex {
 			maxColIndex = idx
@@ -646,7 +662,31 @@ func parseAuditLogRows(ctx context.Context, result *databricks.StatementResult) 
 		rows = append(rows, row)
 	}
 
-	return rows, nil
+	var lastRawBoundary eventPageCursor
+	if len(result.Rows) > 0 {
+		lastRawBoundary, _ = parseEventBoundary(result.Rows[len(result.Rows)-1], colIndex)
+	}
+
+	return rows, lastRawBoundary, nil
+}
+
+// parseEventBoundary extracts just event_id/event_time from a raw row, tolerating failures
+// elsewhere in the row (e.g. malformed request_params) that would fail parseAuditLogRow.
+func parseEventBoundary(r []string, colIndex map[string]int) (eventPageCursor, error) {
+	idIdx, timeIdx := colIndex[colEventID], colIndex[colEventTime]
+	if len(r) <= idIdx || len(r) <= timeIdx {
+		return eventPageCursor{}, fmt.Errorf("audit log query result row has %d columns, expected event_id/event_time", len(r))
+	}
+
+	eventTime, err := time.Parse("2006-01-02 15:04:05.999", r[timeIdx])
+	if err != nil {
+		eventTime, err = time.Parse(time.RFC3339, r[timeIdx])
+		if err != nil {
+			return eventPageCursor{}, fmt.Errorf("failed to parse event_time %q: %w", r[timeIdx], err)
+		}
+	}
+
+	return eventPageCursor{StartAt: eventTime, StartAfterEventID: r[idIdx]}, nil
 }
 
 func parseAuditLogRow(r []string, colIndex map[string]int, maxColIndex int) (auditLogRow, error) {
@@ -654,12 +694,9 @@ func parseAuditLogRow(r []string, colIndex map[string]int, maxColIndex int) (aud
 		return auditLogRow{}, fmt.Errorf("audit log query result row has %d columns, expected at least %d", len(r), maxColIndex+1)
 	}
 
-	eventTime, err := time.Parse("2006-01-02 15:04:05.999", r[colIndex[colEventTime]])
+	boundary, err := parseEventBoundary(r, colIndex)
 	if err != nil {
-		eventTime, err = time.Parse(time.RFC3339, r[colIndex[colEventTime]])
-		if err != nil {
-			return auditLogRow{}, fmt.Errorf("failed to parse event_time %q: %w", r[colIndex[colEventTime]], err)
-		}
+		return auditLogRow{}, err
 	}
 
 	var workspaceId int64
@@ -678,8 +715,8 @@ func parseAuditLogRow(r []string, colIndex map[string]int, maxColIndex int) (aud
 	}
 
 	return auditLogRow{
-		EventID:       r[colIndex[colEventID]],
-		EventTime:     eventTime,
+		EventID:       boundary.StartAfterEventID,
+		EventTime:     boundary.StartAt,
 		WorkspaceID:   workspaceId,
 		ActionName:    r[colIndex[colActionName]],
 		ServiceName:   r[colIndex[colServiceName]],
