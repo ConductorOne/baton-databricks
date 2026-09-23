@@ -197,6 +197,9 @@ func (s *servicePrincipalBuilder) Grants(ctx context.Context, resource *v2.Resou
 
 			var annotations []protoreflect.ProtoMessage
 			if resourceId.ResourceType == groupResourceType.Id {
+				// Name the group parent from the service principal's own profile rather
+				// than its ParentResourceId, so the expansion matches how the group was
+				// synced.
 				groupParentResourceId := &v2.ResourceId{ResourceType: parentType, Resource: parentID}
 				groupResourceStr := groupResourceId(ctx, resourceId.Resource, groupParentResourceId)
 				annotations = append(annotations, &v2.GrantExpandable{
