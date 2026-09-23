@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -41,21 +42,22 @@ func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return roleResourceType
 }
 
+// roleResourceId builds a role's resource ID, namespaced by workspace for workspace roles.
+func roleResourceId(role string, parent *v2.ResourceId) string {
+	if parent.GetResourceType() == workspaceResourceType.Id {
+		return fmt.Sprintf("%s:%s", parent.Resource, role)
+	}
+	return role
+}
+
 func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.Resource, error) {
-	var roleID string
 	profile := map[string]interface{}{
 		"role_name":   role,
-		"parent_type": parent.ResourceType,
-		"parent_id":   parent.Resource,
+		"parent_type": parent.GetResourceType(),
+		"parent_id":   parent.GetResource(),
 	}
 
-	// To differentiate between what type of role does the resource represent.
-	switch parent.ResourceType {
-	case workspaceResourceType.Id:
-		roleID = fmt.Sprintf("%s:%s", parent.Resource, role)
-	case accountResourceType.Id:
-		roleID = role
-	}
+	roleID := roleResourceId(role, parent)
 
 	resource, err := rs.NewRoleResource(
 		role,
@@ -291,6 +293,27 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 	}
 
 	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+}
+
+// Get rebuilds a single role resource, used to re-sync it after a RESOURCE_CHANGE event.
+// Roles are synthetic (not fetched from an API), so this just reconstructs the resource
+// from its resource ID the same way List does.
+func (r *roleBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	roleName := resourceId.Resource
+	if parentResourceId.GetResourceType() == workspaceResourceType.Id {
+		_, name, found := strings.Cut(resourceId.Resource, ":")
+		if !found {
+			return nil, nil, fmt.Errorf("databricks-connector: invalid workspace role resource id: %s", resourceId.Resource)
+		}
+		roleName = name
+	}
+
+	resource, err := roleResource(ctx, roleName, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resource, nil, nil
 }
 
 func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {

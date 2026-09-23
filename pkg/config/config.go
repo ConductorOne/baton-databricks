@@ -70,6 +70,22 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
+	EnableIncrementalSyncField = field.BoolField(
+		"enable-incremental-sync",
+		field.WithDescription("Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync."),
+		field.WithDisplayName("Enable Incremental Sync"),
+		field.WithDefaultValue(false),
+	)
+	// system.access.audit is account-wide, so this warehouse can be in any workspace
+	// in the account — its workspace is just query compute, not a data scope.
+	SQLWarehouseIDField = field.StringField(
+		"sql-warehouse-id",
+		field.WithDescription(
+			"ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental "+
+				"sync is enabled; the workspace hosting it is discovered automatically.",
+		),
+		field.WithDisplayName("SQL Warehouse ID"),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -80,6 +96,8 @@ var (
 		WorkspaceTokensField,
 		BaseURLField,
 		ExcludeWorkspacesField,
+		EnableIncrementalSyncField,
+		SQLWarehouseIDField,
 	}
 )
 
@@ -101,6 +119,7 @@ var Config = field.NewConfiguration(
 			Fields: []field.SchemaField{
 				AccountIdField, DatabricksClientIdField, DatabricksClientSecretField,
 				HostnameField, AccountHostnameField, WorkspacesField, ExcludeWorkspacesField,
+				EnableIncrementalSyncField, SQLWarehouseIDField,
 			},
 			Default: true,
 		},
@@ -141,6 +160,10 @@ var Config = field.NewConfiguration(
 		// Restore this block once CXE-1374 ships. Do NOT delete it, and do NOT remove the
 		// PAT documentation: this connector already lost PAT once in e84a1aef with the docs
 		// left in place, and that mismatch is exactly what CXH-2166 was filed to fix.
+		//
+		// Incremental sync requires the Account API, which workspace tokens can't reach
+		// (see Validate) — omitted from this group so the UI doesn't offer an option that
+		// can never work, once the group itself is restored.
 		//
 		// {
 		// 	Name:        DatabricksWorkspaceTokenGroup,
