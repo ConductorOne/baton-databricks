@@ -69,7 +69,7 @@ func newProbeTestClient(t *testing.T, handler http.HandlerFunc) *databricks.Clie
 	}
 
 	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
-	auth := databricks.NewTokenAuth(nil, nil)
+	auth := &databricks.NoAuth{}
 	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
@@ -696,7 +696,7 @@ func TestListEventsSkipsQueryPastLagCutoff(t *testing.T) {
 		t.Fatalf("unexpected request %s %s: should have been skipped by the lagCutoff guard", r.Method, r.URL.Path)
 	})
 
-	feed := newAuditEventFeed(client, nil, true, "wh-1")
+	feed := newAuditEventFeed(client, true, "wh-1")
 	events, streamState, _, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
@@ -795,15 +795,14 @@ func TestListEventsEndToEnd(t *testing.T) {
 	}
 
 	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
-	auth := databricks.NewTokenAuth([]string{"ws1"}, []string{"token-1"})
+	auth := &databricks.NoAuth{}
 	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 	// Mirrors what Validate() sets before any sync/event-feed call runs in production.
-	client.UpdateAvailability(true, true)
 
-	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1")
+	feed := newAuditEventFeed(client, true, "wh-1")
 
 	events, streamState, annos, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
@@ -889,14 +888,13 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 	}
 
 	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
-	auth := databricks.NewTokenAuth([]string{"ws1"}, []string{"token-1"})
+	auth := &databricks.NoAuth{}
 	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	client.UpdateAvailability(true, true)
 
-	feed := newAuditEventFeed(client, []string{"ws1"}, true, "wh-1")
+	feed := newAuditEventFeed(client, true, "wh-1")
 	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
@@ -919,86 +917,3 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 	}
 }
 
-// TestListEventsFindsWarehouseOutsideWorkspacesAllowlist verifies that resolving the SQL
-// warehouse's workspace is NOT scoped by --workspaces: the warehouse can live in any
-// workspace in the account, so the allowlist must only narrow which workspaces' audit
-// rows get resolved to resources, not which workspaces are searched for the warehouse.
-func TestListEventsFindsWarehouseOutsideWorkspacesAllowlist(t *testing.T) {
-	queriedWorkspace := ""
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
-			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode([]map[string]any{
-				{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"},
-				{"workspace_id": 2, "workspace_name": "ws2", "deployment_name": "ws2"},
-			}); err != nil {
-				t.Fatalf("failed to encode mock workspaces response: %v", err)
-			}
-			return
-		}
-
-		// The warehouse only exists in ws1, which is NOT in the --workspaces allowlist
-		// below (only ws2 is configured). Resolution must still find it in ws1.
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
-			isWs1 := strings.HasPrefix(r.Header.Get("X-Test-Original-Host"), "ws1.")
-			w.Header().Set("Content-Type", "application/json")
-			if isWs1 {
-				fmt.Fprintf(w, `{"id":"wh-1"}`)
-				return
-			}
-			writeJSONNotFound(w)
-			return
-		}
-
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
-			queriedWorkspace = r.Header.Get("X-Test-Original-Host")
-			w.Header().Set("Content-Type", "application/json")
-			resp := map[string]any{
-				"statement_id": "stmt-1",
-				"status":       map[string]any{"state": "SUCCEEDED"},
-				"manifest": map[string]any{
-					"schema": map[string]any{
-						"columns": []map[string]any{
-							{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
-							{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
-						},
-					},
-				},
-				"result": map[string]any{"data_array": [][]string{}},
-			}
-			if err := json.NewEncoder(w).Encode(resp); err != nil {
-				t.Fatalf("failed to encode mock statement response: %v", err)
-			}
-			return
-		}
-
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		http.NotFound(w, r)
-	}))
-	defer server.Close()
-
-	target, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("failed to parse test server URL: %v", err)
-	}
-
-	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
-	auth := databricks.NewTokenAuth([]string{"ws1", "ws2"}, []string{"token-1", "token-2"})
-	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-	client.UpdateAvailability(true, true)
-
-	// --workspaces is scoped to ws2 only; the warehouse lives in ws1.
-	feed := newAuditEventFeed(client, []string{"ws2"}, true, "wh-1")
-
-	_, _, _, err = feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
-	if err != nil {
-		t.Fatalf("ListEvents() error = %v, want warehouse resolution to succeed despite living outside --workspaces", err)
-	}
-	if !strings.HasPrefix(queriedWorkspace, "ws1.") {
-		t.Errorf("audit query ran against %q, want it to run against ws1 (where the warehouse actually lives)", queriedWorkspace)
-	}
-}

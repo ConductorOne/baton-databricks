@@ -17,26 +17,18 @@ of an account, after you log into account platform and click on your username in
 right top corner that will open a dropdown menu with the account ID along other
 options.
 
-Another requirement is to have valid credentials to run the connector with. This
-will decide how connector will be executed. You can use either the OAuth client
-credentials flow or the Bearer auth flow. OAuth can be used across account and
-all workspaces you have access to. Bearer auth can be used only for a specific
-workspace.
+Another requirement is to have valid credentials to run the connector with. The
+connector authenticates with the OAuth client credentials flow, using an
+account-level service principal that works across the account and every
+workspace it has access to.
 
-To use the OAuth, you need to create a service principal and add OAuth secret
-(client id and secret) to it. You can do that by going to the user management
-tab and clicking on the Service Principals tab. Then click on the Add Service
-principal button and name it. You then need to add OAuth secret to it by
-clicking on the Generate secret button. You can use this secret to authenticate
-across all workspaces that service principal has access to. This requires admin
-access to the Databricks account and each workspace you want to sync.
-
-To use bearer auth, you need to provide a Databricks workspace access token. You
-can create a new token by logging into the workspace and going into user
-settings. Then go to Developer tab and create a new access token. This will try
-to work with only specified workspaces and their respective tokens. You can
-provide multiple tokens by separating them with a comma. This method requires
-admin access to each workspace you want to sync.
+To set this up, create a service principal and add an OAuth secret (client ID
+and secret) to it. You can do that by going to the user management tab and
+clicking on the Service Principals tab. Then click on the Add Service principal
+button and name it. You then need to add an OAuth secret to it by clicking on
+the Generate secret button. You can use this secret to authenticate across all
+workspaces that service principal has access to. This requires admin access to
+the Databricks account and each workspace you want to sync.
 
 # Using Azure Databricks
 
@@ -60,7 +52,7 @@ baton resources
 ## docker
 
 ```
-docker run --rm -v $(pwd):/out -e BATON_ACCOUNT_ID=account_id BATON_DATABRICKS_CLIENT_ID=client_id BATON_DATABRICKS_CLIENT_SECRET=client_secret ghcr.io/conductorone/baton-databricks:latest -f "/out/sync.c1z"
+docker run --rm -v $(pwd):/out -e BATON_ACCOUNT_ID=account_id BATON_DATABRICKS_CLIENT_ID=client_id BATON_DATABRICKS_CLIENT_SECRET=client_secret public.ecr.aws/conductorone/baton-databricks:latest -f "/out/sync.c1z"
 docker run --rm -v $(pwd):/out ghcr.io/conductorone/baton:latest -f "/out/sync.c1z" resources
 ```
 
@@ -85,32 +77,22 @@ baton resources
 - Users
 - Roles
 
-By default (OAuth), the connector fetches all resources from the account and all
-workspaces. To limit the scope, pass a comma-separated list of workspace
-deployment names to the `--workspaces` flag.
+The connector fetches all resources from the account and every workspace the
+service principal can access. There is no workspace allowlist; to narrow the
+scope, exclude workspaces as described below.
 
 ## Authentication
 
-OAuth is the only authentication method currently available: an account-level
-service principal's client ID and secret.
-
-> **Workspace-token (PAT) authentication is temporarily unavailable.**
-> `--auth-method workspace-token` is not offered, and a config specifying it is
-> rejected at startup with a clear error. `--workspace-tokens` still appears in
-> `--help` but no authentication method consumes it. `--workspaces` remains
-> supported under OAuth for limiting the sync scope, as described above.
->
-> The implementation is intact and commented out in `pkg/config/config.go`
-> rather than deleted; it is withheld while a platform-side defect is resolved.
-> The defect is not in this connector — a credential declared as a list of
-> secrets is not treated as secret by the configuration layer, so a workspace
-> token supplied through the UI is stored unencrypted and shown in clear text.
+OAuth is the only authentication method: an account-level service principal's
+client ID and secret, supplied through `--databricks-client-id` and
+`--databricks-client-secret`. There is no personal access token (PAT) or
+workspace-token option, and no username/password option.
 
 OAuth requires a reachable account API. If the account API check fails at
-startup, the connector fails validation instead of falling back to a
-workspace-only sync, even when `--workspaces` is set.
+startup, the connector fails validation rather than falling back to a
+workspace-only sync.
 
-To instead exclude specific workspaces from the sync, pass them to the
+To exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
 `BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated
 list. Each entry can be a workspace name, deployment name, or numeric workspace
@@ -125,9 +107,8 @@ between full syncs to pick up access changes early, by setting
 still run as the correctness backstop; incremental sync does not detect
 deletions, which are only caught by the next full sync.
 
-Incremental sync requires OAuth2 (service principal) authentication — it's not
-available with workspace tokens, since the Account API needed to resolve audit
-events back to synced resources is unreachable that way.
+Incremental sync requires a reachable Account API to resolve audit events back
+to synced resources, same as the rest of the connector.
 
 Incremental sync also requires:
 
@@ -153,9 +134,7 @@ access; no further elevated privilege is required.
 
 ## Group provisioning
 
-Account groups are provisioned through the OAuth client ID and secret flow. The
-Databricks API does not allow provisioning account groups from a workspace
-token, which is one reason the OAuth flow is the supported path.
+Account groups are provisioned through the OAuth client ID and secret flow.
 [Here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.)
 are the different types of groups in Databricks.
 
@@ -192,7 +171,7 @@ Flags:
       --client-secret string                             The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
-      --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
       --enable-incremental-sync                          Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync. ($BATON_ENABLE_INCREMENTAL_SYNC)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
@@ -214,15 +193,13 @@ Flags:
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
       --sql-warehouse-id string                          ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled; the workspace hosting it is discovered automatically. ($BATON_SQL_WAREHOUSE_ID)
-      --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Leave unset to use the baton-sdk default. ($BATON_STORAGE_ENGINE)
+      --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Defaults to pebble when unset. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)
       --task-concurrency int                             The number of Baton tasks to run concurrently in service mode. Tasks may include sync, grant, revoke, and more. Minimum value is 1, maximum value is 100. ($BATON_TASK_CONCURRENCY) (default 3)
       --ticketing                                        This must be set to enable ticketing support ($BATON_TICKETING)
   -v, --version                                          version for baton-databricks
       --workers int                                      The number of sync workers to use. -1 for auto-detect, 0 for sequential, >0 for parallel ($BATON_WORKERS)
-      --workspace-tokens strings                         required: The Databricks personal access tokens scoped to specific workspaces used to connect to the Databricks Workspace API ($BATON_WORKSPACE_TOKENS)
-      --workspaces strings                               Limit syncing to the specified workspaces, by deployment name, not workspace ID. Required when using workspace tokens, in the same order as workspace-tokens. Mutually exclusive with databricks-exclude-workspaces. ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```

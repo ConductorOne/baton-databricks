@@ -47,7 +47,6 @@ type Client struct {
 	excludeWorkspaces map[string]struct{}
 
 	isAccAPIAvailable bool
-	isWSAPIAvailable  bool
 }
 
 // hostMatches reports whether hostname equals suffix or sits under it at a DNS
@@ -111,6 +110,11 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 		accountBaseUrl:    accountBaseUrl,
 		baseUrl:           baseUrl,
 		excludeWorkspaces: excludeSet,
+
+		// OAuth is the only auth method, and Validate hard-fails when the account
+		// plane is unreachable, so availability is an invariant rather than
+		// something callers must wait for Validate to establish.
+		isAccAPIAvailable: true,
 	}, err
 }
 
@@ -131,18 +135,6 @@ func (c *Client) isWorkspaceExcluded(w Workspace) ([]string, bool) {
 	return keys, len(keys) > 0
 }
 
-// IsWorkspaceNameExcluded reports whether deploymentName matches the
-// databricks-exclude-workspaces set. Checks the name only, not via
-// isWorkspaceExcluded: that also matches on ID, and a zero-value ID here would
-// let an exclude entry of "0" match every workspace.
-func (c *Client) IsWorkspaceNameExcluded(deploymentName string) bool {
-	if len(c.excludeWorkspaces) == 0 {
-		return false
-	}
-	_, ok := c.excludeWorkspaces[strings.ToLower(deploymentName)]
-	return ok
-}
-
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
 	return &url.URL{
 		Scheme: "https",
@@ -150,22 +142,8 @@ func (c *Client) workspaceUrl(workspaceId string) *url.URL {
 	}
 }
 
-func (c *Client) IsWorkspaceAPIAvailable() bool {
-	return c.isWSAPIAvailable
-}
-
 func (c *Client) IsAccountAPIAvailable() bool {
 	return c.isAccAPIAvailable
-}
-
-func (c *Client) UpdateAvailability(accAPI, wsAPI bool) {
-	c.isAccAPIAvailable = accAPI
-	c.isWSAPIAvailable = wsAPI
-}
-
-func (c *Client) IsTokenAuth() bool {
-	_, ok := c.auth.(*TokenAuth)
-	return ok
 }
 
 func (c *Client) UpdateEtag(etag string) {

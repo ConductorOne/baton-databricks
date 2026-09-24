@@ -42,7 +42,6 @@ func (a *accountBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return accountResourceType
 }
 
-// The Account API check below mirrors groupGrantParent (helpers.go); keep both in sync.
 func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error) {
 	accountId := a.client.GetAccountId()
 	children := []protoreflect.ProtoMessage{
@@ -131,8 +130,10 @@ func (a *accountBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs
 
 				var annotations []protoreflect.ProtoMessage
 				if resourceId.ResourceType == groupResourceType.Id {
-					// Grants already returned early above when the account API is unavailable,
-					// so groups reaching this point are always account-parented.
+					// Groups sync parented under the account, so the expansion must name
+					// the same parent. The account resource's own ParentResourceId is
+					// nil, which would yield an unparented group id that matches no
+					// synced resource.
 					groupParentResourceId, err := rs.NewResourceID(accountResourceType, a.client.GetAccountId())
 					if err != nil {
 						return rv, nil, err
