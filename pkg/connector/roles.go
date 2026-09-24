@@ -64,6 +64,7 @@ func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.
 		nil,
 		rs.WithParentResourceID(parent),
 		rs.WithResourceProfile(profile),
+		rs.WithAnnotation(&v2.RawId{Id: roleID}),
 	)
 
 	if err != nil {

@@ -55,6 +55,9 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 	groupId := groupResourceId(ctx, group.ID, parent)
+	// RawId is the resource ID so the same Databricks group synced under the account and
+	// under workspaces stays unique for match_baton_id.
+	options = append(options, rs.WithAnnotation(&v2.RawId{Id: groupId}))
 
 	resource, err := rs.NewGroupResource(
 		group.DisplayName,

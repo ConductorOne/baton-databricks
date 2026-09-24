@@ -62,6 +62,7 @@ func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error
 		accountResourceType,
 		accountId,
 		rs.WithAnnotation(children...),
+		rs.WithAnnotation(&v2.RawId{Id: accountId}),
 	)
 
 	if err != nil {
