@@ -47,6 +47,7 @@ func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, 
 		v2.NonHumanIdentityTrait_NHI_TYPE_APP_REGISTRATION,
 		"databricks.service_principal",
 	))
+	options = append(options, rs.WithAnnotation(&v2.RawId{Id: servicePrincipal.ID}))
 
 	resource, err := rs.NewGroupResource(
 		servicePrincipal.DisplayName,
