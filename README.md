@@ -104,6 +104,16 @@ Account groups are provisioned through the OAuth client ID and secret flow.
 [Here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.)
 are the different types of groups in Databricks.
 
+## Role provisioning
+
+The account admin role and workspace entitlements (`workspace-access`,
+`databricks-sql-access`, `allow-cluster-create`, `allow-instance-pool-create`)
+can be granted and revoked.
+
+A workspace entitlement can only be granted to a principal that is already
+assigned to that workspace. Otherwise the grant fails with a
+`FailedPrecondition` error; grant the workspace membership first.
+
 # Contributing, Support and Issues
 
 We started Baton because we were tired of taking screenshots and manually
