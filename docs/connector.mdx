@@ -19,6 +19,10 @@ sidebarTitle: "Databricks"
 
 The Databricks connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
 
+<Note>
+Workspace roles (such as **workspace-access** or **databricks-sql-access**) can only be granted to users, groups, and service principals that are already members of that workspace. If the request fails because the identity isn't a member, grant them membership in the workspace first, then request the role again.
+</Note>
+
 [This connector syncs non-human identities](/product/admin/nhi) and displays them on the **Identities overview** dashboard.
 
 ## Authentication methods

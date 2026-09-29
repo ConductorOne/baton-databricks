@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -192,6 +194,11 @@ func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, enti
 			}
 		}
 	}
+}
+
+func isNotFoundError(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 func prepareWorkspaceRole(entitlement string) string {
