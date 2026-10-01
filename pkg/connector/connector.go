@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/config"
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -13,8 +14,14 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 )
 
+// validateAuditLogAccessTimeout bounds the one-off audit-log probe in Validate() so a cold
+// warehouse doesn't hang credential validation for minutes.
+const validateAuditLogAccessTimeout = 90 * time.Second
+
 type Databricks struct {
-	client *databricks.Client
+	client                *databricks.Client
+	enableIncrementalSync bool
+	sqlWarehouseID        string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -29,6 +36,14 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 	}
 
 	return syncers
+}
+
+// EventFeeds registers the audit-log event feed unconditionally; enable-incremental-sync
+// gates its behavior inside ListEvents instead.
+func (d *Databricks) EventFeeds(ctx context.Context) []connectorbuilder.EventFeed {
+	return []connectorbuilder.EventFeed{
+		newAuditEventFeed(d.client, d.enableIncrementalSync, d.sqlWarehouseID),
+	}
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
@@ -111,8 +126,32 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// Workspace enumeration is the other account-plane call every sync depends on.
 	// Per-workspace probing is deliberately not done here: a workspace the service
 	// principal can't reach is skipped during sync rather than failing validation.
-	if _, _, err := d.client.ListWorkspaces(ctx); err != nil {
+	allWorkspaces, _, err := d.client.ListWorkspaces(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+	}
+
+	if d.enableIncrementalSync {
+		if d.sqlWarehouseID == "" {
+			return nil, fmt.Errorf("databricks-connector: sql-warehouse-id is required when incremental sync is enabled")
+		}
+		if len(allWorkspaces) == 0 {
+			return nil, fmt.Errorf("databricks-connector: incremental sync requires at least one workspace to query system.access.audit")
+		}
+
+		queryWorkspaceId, _, err := resolveWarehouseWorkspace(ctx, d.client, allWorkspaces, d.sqlWarehouseID)
+		if err != nil {
+			return nil, err
+		}
+		validateCtx, cancel := context.WithTimeout(ctx, validateAuditLogAccessTimeout)
+		err = d.client.ValidateAuditLogAccess(validateCtx, queryWorkspaceId, d.sqlWarehouseID)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"databricks-connector: incremental sync is enabled but the connector cannot query system.access.audit via warehouse %s: %w",
+				d.sqlWarehouseID, err,
+			)
+		}
 	}
 
 	return nil, nil
@@ -127,6 +166,8 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
+	enableIncrementalSync bool,
+	sqlWarehouseID string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -139,7 +180,9 @@ func New(
 	}
 
 	return &Databricks{
-		client: client,
+		client:                client,
+		enableIncrementalSync: enableIncrementalSync,
+		sqlWarehouseID:        sqlWarehouseID,
 	}, nil
 }
 
@@ -156,6 +199,8 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
+		cfg.EnableIncrementalSync,
+		cfg.SqlWarehouseId,
 	)
 	if err != nil {
 		return nil, nil, err

@@ -11,6 +11,8 @@ type Databricks struct {
 	Hostname string `mapstructure:"hostname"`
 	BaseUrl string `mapstructure:"base-url"`
 	DatabricksExcludeWorkspaces []string `mapstructure:"databricks-exclude-workspaces"`
+	EnableIncrementalSync bool `mapstructure:"enable-incremental-sync"`
+	SqlWarehouseId string `mapstructure:"sql-warehouse-id"`
 }
 
 func (c *Databricks) findFieldByTag(tagValue string) (any, bool) {
