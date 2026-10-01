@@ -14,7 +14,8 @@ import (
 )
 
 type Databricks struct {
-	client *databricks.Client
+	client     *databricks.Client
+	workspaces []string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
@@ -24,7 +25,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client),
+		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
 	}
 
@@ -127,6 +128,7 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
+	workspaces []string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -139,7 +141,8 @@ func New(
 	}
 
 	return &Databricks{
-		client: client,
+		client:     client,
+		workspaces: workspaces,
 	}, nil
 }
 
@@ -156,6 +159,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
+		cfg.Workspaces,
 	)
 	if err != nil {
 		return nil, nil, err
