@@ -27,7 +27,7 @@ var (
 	WorkspacesField = field.StringSliceField(
 		"workspaces",
 		field.WithDescription(
-			"Limit syncing to the specified workspaces, by deployment name, not workspace ID. "+
+			"Limit syncing to the specified workspaces, identified by workspace name, deployment name, or numeric workspace ID. "+
 				"Mutually exclusive with databricks-exclude-workspaces.",
 		),
 		field.WithDisplayName("Workspaces"),

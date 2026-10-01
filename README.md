@@ -79,7 +79,8 @@ baton resources
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
-workspace deployment names to the `--workspaces` flag.
+workspaces to the `--workspaces` flag. Each entry can be a workspace name,
+deployment name, or numeric workspace ID, matched case-insensitively.
 
 ## Authentication
 
@@ -174,7 +175,7 @@ Flags:
       --ticketing                                        This must be set to enable ticketing support ($BATON_TICKETING)
   -v, --version                                          version for baton-databricks
       --workers int                                      The number of sync workers to use. -1 for auto-detect, 0 for sequential, >0 for parallel ($BATON_WORKERS)
-      --workspaces strings                               Limit syncing to the specified workspaces, by deployment name, not workspace ID. Mutually exclusive with databricks-exclude-workspaces. ($BATON_WORKSPACES)
+      --workspaces strings                               Limit syncing to the specified workspaces, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with databricks-exclude-workspaces. ($BATON_WORKSPACES)
 
 Use "baton-databricks [command] --help" for more information about a command.
 ```
