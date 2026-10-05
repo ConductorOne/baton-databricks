@@ -141,9 +141,15 @@
       }
     },
     {
+      "name": "workspaces",
+      "displayName": "Workspaces",
+      "description": "Limit syncing to the specified workspaces, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with databricks-exclude-workspaces.",
+      "stringSliceField": {}
+    },
+    {
       "name": "databricks-exclude-workspaces",
       "displayName": "Exclude Workspaces",
-      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID",
+      "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces.",
       "stringSliceField": {}
     },
     {
@@ -157,6 +163,15 @@
       "displayName": "SQL Warehouse ID",
       "description": "ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled; the workspace hosting it is discovered automatically.",
       "stringField": {}
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "workspaces",
+        "databricks-exclude-workspaces"
+      ]
     }
   ],
   "displayName": "Databricks",

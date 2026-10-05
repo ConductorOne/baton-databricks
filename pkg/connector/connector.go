@@ -20,6 +20,7 @@ const validateAuditLogAccessTimeout = 90 * time.Second
 
 type Databricks struct {
 	client                *databricks.Client
+	workspaces            []string
 	enableIncrementalSync bool
 	sqlWarehouseID        string
 }
@@ -31,7 +32,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client),
+		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
 	}
 
@@ -42,7 +43,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 // gates its behavior inside ListEvents instead.
 func (d *Databricks) EventFeeds(ctx context.Context) []connectorbuilder.EventFeed {
 	return []connectorbuilder.EventFeed{
-		newAuditEventFeed(d.client, d.enableIncrementalSync, d.sqlWarehouseID),
+		newAuditEventFeed(d.client, d.workspaces, d.enableIncrementalSync, d.sqlWarehouseID),
 	}
 }
 
@@ -135,7 +136,9 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		if d.sqlWarehouseID == "" {
 			return nil, fmt.Errorf("databricks-connector: sql-warehouse-id is required when incremental sync is enabled")
 		}
-		if len(allWorkspaces) == 0 {
+		// allWorkspaces (unfiltered) locates the query warehouse, which can live in any
+		// workspace in the account regardless of --workspaces.
+		if len(filterConfiguredWorkspaces(allWorkspaces, d.workspaces)) == 0 {
 			return nil, fmt.Errorf("databricks-connector: incremental sync requires at least one workspace to query system.access.audit")
 		}
 
@@ -166,6 +169,7 @@ func New(
 	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
+	workspaces []string,
 	enableIncrementalSync bool,
 	sqlWarehouseID string,
 ) (*Databricks, error) {
@@ -181,6 +185,7 @@ func New(
 
 	return &Databricks{
 		client:                client,
+		workspaces:            workspaces,
 		enableIncrementalSync: enableIncrementalSync,
 		sqlWarehouseID:        sqlWarehouseID,
 	}, nil
@@ -199,6 +204,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		cfg.BaseUrl,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
+		cfg.Workspaces,
 		cfg.EnableIncrementalSync,
 		cfg.SqlWarehouseId,
 	)

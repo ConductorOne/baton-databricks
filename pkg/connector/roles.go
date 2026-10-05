@@ -12,8 +12,10 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -66,6 +68,7 @@ func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.
 		nil,
 		rs.WithParentResourceID(parent),
 		rs.WithResourceProfile(profile),
+		rs.WithAnnotation(&v2.RawId{Id: roleID}),
 	)
 
 	if err != nil {
@@ -347,7 +350,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	case userResourceType.Id:
 		u, _, err := r.client.GetUser(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
+			return nil, principalLookupError(err, "user", principal.Id.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		addPermissions(isWorkspaceRole, &u.Permissions, permissionName)
@@ -360,7 +363,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	case groupResourceType.Id:
 		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource, databricks.NewGroupRolesAttrVars())
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
+			return nil, principalLookupError(err, "group", principal.Id.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
@@ -373,7 +376,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 	case servicePrincipalResourceType.Id:
 		sp, _, err := r.client.GetServicePrincipal(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
+			return nil, principalLookupError(err, "service principal", principal.Id.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		addPermissions(isWorkspaceRole, &sp.Permissions, permissionName)
@@ -423,7 +426,7 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 	case userResourceType.Id:
 		u, _, err := r.client.GetUser(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to get user: %w", err)
+			return nil, principalLookupError(err, "user", principal.Id.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		removePermissions(isWorkspaceRole, &u.Permissions, permissionName)
@@ -436,7 +439,7 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 	case groupResourceType.Id:
 		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource, databricks.NewGroupRolesAttrVars())
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to get group: %w", err)
+			return nil, principalLookupError(err, "group", principal.Id.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
@@ -449,7 +452,7 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 	case servicePrincipalResourceType.Id:
 		sp, _, err := r.client.GetServicePrincipal(ctx, workspaceId, principal.Id.Resource)
 		if err != nil {
-			return nil, fmt.Errorf("databricks-connector: failed to get service principal: %w", err)
+			return nil, principalLookupError(err, "service principal", principal.Id.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		removePermissions(isWorkspaceRole, &sp.Permissions, permissionName)
@@ -464,6 +467,21 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 	}
 
 	return nil, nil
+}
+
+// principalLookupError explains a failed principal lookup for a role grant or revoke. The workspace
+// SCIM API answers 404 for principals that are not assigned to the workspace.
+func principalLookupError(err error, principalLabel, principalId string, isWorkspaceRole bool, workspaceId string) error {
+	if isWorkspaceRole && isNotFoundError(err) {
+		return uhttp.WrapErrors(
+			codes.FailedPrecondition,
+			fmt.Sprintf("databricks-connector: %s %s is not assigned to workspace %s; grant workspace membership first",
+				principalLabel, principalId, workspaceId),
+			err,
+		)
+	}
+
+	return fmt.Errorf("databricks-connector: failed to get %s: %w", principalLabel, err)
 }
 
 func newRoleBuilder(client *databricks.Client) *roleBuilder {

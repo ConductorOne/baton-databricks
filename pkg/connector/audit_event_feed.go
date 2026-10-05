@@ -211,6 +211,7 @@ type auditLogRow struct {
 
 type auditEventFeed struct {
 	client                *databricks.Client
+	workspaces            []string
 	enableIncrementalSync bool
 	sqlWarehouseID        string
 
@@ -221,11 +222,13 @@ type auditEventFeed struct {
 
 func newAuditEventFeed(
 	client *databricks.Client,
+	workspaces []string,
 	enableIncrementalSync bool,
 	sqlWarehouseID string,
 ) *auditEventFeed {
 	return &auditEventFeed{
 		client:                client,
+		workspaces:            workspaces,
 		enableIncrementalSync: enableIncrementalSync,
 		sqlWarehouseID:        sqlWarehouseID,
 	}
@@ -312,18 +315,20 @@ func (f *auditEventFeed) ListEvents(
 		return nil, &pagination.StreamState{Cursor: encoded, HasMore: false}, annos, nil
 	}
 
-	// ListWorkspaces already applies --databricks-exclude-workspaces, so allWorkspaces is
-	// exactly the set both the warehouse lookup and audit-row resolution should use.
+	// ListWorkspaces already applies --databricks-exclude-workspaces. allWorkspaces (not
+	// narrowed by --workspaces) locates the query warehouse; scopedWorkspaces decides which
+	// workspaces' audit rows get resolved, so events never surface a workspace a full sync skips.
 	allWorkspaces, _, err := f.client.ListWorkspaces(ctx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
-	if len(allWorkspaces) == 0 {
+	scopedWorkspaces := filterConfiguredWorkspaces(allWorkspaces, f.workspaces)
+	if len(scopedWorkspaces) == 0 {
 		return nil, nil, nil, fmt.Errorf("databricks-connector: no workspace available to query system.access.audit")
 	}
 
-	workspaceLookup := make(map[int64]string, len(allWorkspaces))
-	for _, w := range allWorkspaces {
+	workspaceLookup := make(map[int64]string, len(scopedWorkspaces))
+	for _, w := range scopedWorkspaces {
 		workspaceLookup[int64(w.ID)] = w.DeploymentName
 	}
 
@@ -616,6 +621,31 @@ func principalExists[T any](_ T, rateLimit *v2.RateLimitDescription, err error) 
 		return false, rateLimit, nil
 	}
 	return false, rateLimit, err
+}
+
+// filterConfiguredWorkspaces narrows workspaces to configuredWorkspaces (the --workspaces
+// allowlist), or returns workspaces unchanged when the allowlist is empty. This scopes
+// which workspaces' audit rows get resolved to resources — it must NOT be applied before
+// locating the query warehouse (resolveWarehouseWorkspace), which can live in any workspace
+// in the account regardless of this allowlist.
+func filterConfiguredWorkspaces(workspaces []databricks.Workspace, configuredWorkspaces []string) []databricks.Workspace {
+	if len(configuredWorkspaces) == 0 {
+		return workspaces
+	}
+
+	configured := make(map[string]struct{}, len(configuredWorkspaces))
+	for _, name := range configuredWorkspaces {
+		configured[name] = struct{}{}
+	}
+
+	filtered := make([]databricks.Workspace, 0, len(workspaces))
+	for _, w := range workspaces {
+		if _, ok := matchConfiguredWorkspace(configured, w.DeploymentName, w.Name, strconv.Itoa(w.ID)); ok {
+			filtered = append(filtered, w)
+		}
+	}
+
+	return filtered
 }
 
 // resolveWarehouseWorkspace finds which workspace hosts warehouseId by probing each
