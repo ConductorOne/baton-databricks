@@ -240,7 +240,7 @@ func (u *userBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parent
 		workspaceId = parentResourceId.Resource
 	}
 
-	user, rateLimitData, err := u.client.GetUser(ctx, workspaceId, resourceId.Resource)
+	user, rateLimitData, err := u.client.GetUser(databricks.WithoutCache(ctx), workspaceId, resourceId.Resource)
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)

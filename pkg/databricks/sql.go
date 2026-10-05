@@ -175,7 +175,9 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 
 		u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint, res.StatementID)
 		var polled statementResponse
-		polledRateLimit, err := c.Get(pollCtx, u, &polled)
+		// No cache: the URL is identical on every poll, so a cached PENDING/RUNNING
+		// response would otherwise be returned until statementPollMaxWait.
+		polledRateLimit, err := c.Get(WithoutCache(pollCtx), u, &polled)
 		if polledRateLimit != nil {
 			rateLimit = polledRateLimit
 		}

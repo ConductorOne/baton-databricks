@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -152,6 +155,51 @@ func TestResolveWarehouseWorkspace(t *testing.T) {
 		_, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
 		if err == nil {
 			t.Fatal("resolveWarehouseWorkspace() error = nil, want error when no workspace has the warehouse")
+		}
+	})
+
+	t.Run("an inaccessible workspace is skipped, not fatal", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.Header.Get("X-Test-Original-Host"), "dbc-aaa.") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"message":"not assigned to workspace"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%q}`, warehouseId)
+		})
+		workspaces := []databricks.Workspace{
+			{ID: 1, DeploymentName: "dbc-aaa"},
+			{ID: 2, DeploymentName: "dbc-bbb"},
+		}
+
+		got, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
+		if err != nil {
+			t.Fatalf("resolveWarehouseWorkspace() error = %v", err)
+		}
+		if got != "dbc-bbb" {
+			t.Errorf("got %q, want %q", got, "dbc-bbb")
+		}
+	})
+
+	t.Run("all workspaces inaccessible is a not-found naming them", func(t *testing.T) {
+		client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
+		})
+		workspaces := []databricks.Workspace{
+			{ID: 1, DeploymentName: "dbc-aaa"},
+			{ID: 2, DeploymentName: "dbc-bbb"},
+		}
+
+		_, _, err := resolveWarehouseWorkspace(context.Background(), client, workspaces, warehouseId)
+		if got := status.Code(err); got != codes.NotFound {
+			t.Fatalf("error code = %s (%v), want %s", got, err, codes.NotFound)
+		}
+		if !strings.Contains(err.Error(), "skipped 2 inaccessible: dbc-aaa, dbc-bbb") {
+			t.Errorf("error = %q, want it to name the skipped workspaces", err.Error())
 		}
 	})
 
@@ -1029,5 +1077,65 @@ func TestFilterConfiguredWorkspaces(t *testing.T) {
 				t.Errorf("filterConfiguredWorkspaces(%v) = %v, want %v", tt.configured, ids, tt.want)
 			}
 		})
+	}
+}
+
+// TestExecuteStatementPollsPastCache guards against the uhttp GET cache freezing
+// pollStatement: the poll URL never changes, so a cached RUNNING response would be
+// returned until statementPollMaxWait.
+func TestExecuteStatementPollsPastCache(t *testing.T) {
+	var polls atomic.Int32
+	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		state := "PENDING"
+		if r.Method == http.MethodGet {
+			state = "RUNNING"
+			if polls.Add(1) >= 2 {
+				state = "SUCCEEDED"
+			}
+		}
+		fmt.Fprintf(w, `{"statement_id":"stmt-1","status":{"state":%q},"manifest":{"schema":{"columns":[{"name":"x"}]}},"result":{"data_array":[]}}`, state)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, _, err := client.ExecuteStatement(ctx, "dbc-aaa", "wh-1", "SELECT 1"); err != nil {
+		t.Fatalf("ExecuteStatement() error = %v", err)
+	}
+	if got := polls.Load(); got < 2 {
+		t.Errorf("server received %d poll GETs, want >= 2 (poll response was served from cache)", got)
+	}
+}
+
+// TestGetBypassesCacheButSyncCallersDont verifies incremental-sync refreshes (builder Get)
+// always hit the API, while the same client call from the regular sync path stays cached.
+func TestGetBypassesCacheButSyncCallersDont(t *testing.T) {
+	var hits atomic.Int32
+	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"u-1","userName":"alice@example.com","active":true}`)
+	})
+	ctx := context.Background()
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acct-1"}
+	userId := &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "u-1"}
+
+	for range 2 {
+		if _, _, err := client.GetUser(ctx, "", "u-1"); err != nil {
+			t.Fatalf("GetUser() error = %v", err)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("regular GetUser calls made %d API calls, want 1 (second must be cached)", got)
+	}
+
+	builder := newUserBuilder(client)
+	for range 2 {
+		if _, _, err := builder.Get(ctx, userId, accountParent); err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+	}
+	if got := hits.Load() - 1; got != 2 {
+		t.Errorf("builder Get made %d API calls, want 2 (must bypass the cache)", got)
 	}
 }

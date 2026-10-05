@@ -655,12 +655,18 @@ func filterConfiguredWorkspaces(workspaces []databricks.Workspace, configuredWor
 // candidate workspace, since Databricks has no account-level lookup for this.
 func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, workspaces []databricks.Workspace, warehouseId string) (string, *v2.RateLimitDescription, error) {
 	var rateLimit *v2.RateLimitDescription
+	var inaccessible []string
 	for _, w := range workspaces {
 		found, rl, err := client.WarehouseExists(ctx, w.DeploymentName, warehouseId)
 		if rl != nil {
 			rateLimit = rl
 		}
 		if err != nil {
+			// The service principal needn't be assigned to every workspace; keep looking.
+			if isAccessDenied(err) {
+				inaccessible = append(inaccessible, w.DeploymentName)
+				continue
+			}
 			return "", rateLimit, fmt.Errorf(
 				"databricks-connector: failed to check workspace %s for sql-warehouse-id %s: %w",
 				w.DeploymentName, warehouseId, err,
@@ -671,16 +677,27 @@ func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, w
 		}
 	}
 
+	skipped := ""
+	if len(inaccessible) > 0 {
+		skipped = fmt.Sprintf(" (skipped %d inaccessible: %s)", len(inaccessible), strings.Join(inaccessible, ", "))
+	}
 	if len(workspaces) == 1 {
 		return "", rateLimit, uhttp.WrapErrors(codes.NotFound, fmt.Sprintf(
-			"databricks-connector: sql-warehouse-id %q was not found in workspace %s",
-			warehouseId, workspaces[0].DeploymentName,
+			"databricks-connector: sql-warehouse-id %q was not found in workspace %s%s",
+			warehouseId, workspaces[0].DeploymentName, skipped,
 		))
 	}
 	return "", rateLimit, uhttp.WrapErrors(codes.NotFound, fmt.Sprintf(
-		"databricks-connector: sql-warehouse-id %q was not found in any of the %d available workspaces",
-		warehouseId, len(workspaces),
+		"databricks-connector: sql-warehouse-id %q was not found in any of the %d available workspaces%s",
+		warehouseId, len(workspaces), skipped,
 	))
+}
+
+// isAccessDenied reports whether err is a 401/403 from the Databricks API.
+func isAccessDenied(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) &&
+		(apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden)
 }
 
 // queryAuditLog returns rows in (cursor, lagCutoff], plus the raw row count (before

@@ -243,7 +243,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 // GetWorkspace excludes it the same way ListWorkspaces does, so a deliberately excluded
 // workspace naturally comes back not-found rather than needing a separate check here.
 func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
-	workspace, rateLimitData, err := w.client.GetWorkspace(ctx, resourceId.Resource)
+	workspace, rateLimitData, err := w.client.GetWorkspace(databricks.WithoutCache(ctx), resourceId.Resource)
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)

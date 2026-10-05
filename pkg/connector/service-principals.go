@@ -227,7 +227,7 @@ func (s *servicePrincipalBuilder) Get(ctx context.Context, resourceId *v2.Resour
 		workspaceId = parentResourceId.Resource
 	}
 
-	servicePrincipal, rateLimitData, err := s.client.GetServicePrincipal(ctx, workspaceId, resourceId.Resource)
+	servicePrincipal, rateLimitData, err := s.client.GetServicePrincipal(databricks.WithoutCache(ctx), workspaceId, resourceId.Resource)
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)

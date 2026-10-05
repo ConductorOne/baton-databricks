@@ -276,7 +276,7 @@ func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, paren
 		workspaceId = parentId.Resource
 	}
 
-	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
+	group, rateLimitData, err := g.client.GetGroup(databricks.WithoutCache(ctx), workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)
