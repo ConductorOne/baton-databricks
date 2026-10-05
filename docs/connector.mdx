@@ -33,7 +33,7 @@ The connector authenticates with **OAuth** — an account-level service principa
 
 By default, the Databricks connector picks up access changes on its regular sync schedule. You can optionally turn on incremental sync, which checks Databricks' activity log between full syncs so that changes like new group members show up in C1 sooner. Full syncs still run as usual and remain the source of truth; removed access is only reflected after the next full sync.
 
-Turning this on requires a small Databricks SQL warehouse and a one-time setup step performed by a Databricks admin (granting the connector read access to Databricks' `system.access` activity log). Ask your connector operator or C1 support contact to enable it for you. The SQL warehouse can live in any workspace in your account — the connector finds it automatically, and it still picks up activity from every workspace, not just the one the warehouse happens to be in.
+Incremental sync is turned on by providing the ID of a small Databricks SQL warehouse (the **SQL Warehouse ID** setting, `BATON_SQL_WAREHOUSE_ID`) and turned off by leaving it empty — there is no separate on/off switch. It also needs a one-time setup step performed by a Databricks admin (granting the connector read access to Databricks' `system.access` activity log). Ask your connector operator or C1 support contact to enable it for you. The SQL warehouse can live in any workspace in your account — the connector finds it automatically, and it picks up activity from every workspace in sync scope, not just the one the warehouse happens to be in.
 
 ## Gather Databricks credentials
 
@@ -217,6 +217,10 @@ stringData:
   # (workspace name, deployment name, or numeric ID).
   # Mutually exclusive with BATON_WORKSPACES — set one or the other, never both.
   BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
+
+  # Optional: setting this enables incremental sync; leave it unset to disable it.
+  # ID of the SQL warehouse used to query the system.access.audit log between full syncs.
+  # BATON_SQL_WAREHOUSE_ID: <SQL warehouse ID>
 
   # Optional: include if you want C1 to provision access using this connector
   BATON_PROVISIONING: true

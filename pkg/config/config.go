@@ -54,19 +54,16 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
-	EnableIncrementalSyncField = field.BoolField(
-		"enable-incremental-sync",
-		field.WithDescription("Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync."),
-		field.WithDisplayName("Enable Incremental Sync"),
-		field.WithDefaultValue(false),
-	)
-	// SQLWarehouseIDField: system.access.audit is account-wide, so this warehouse can be in
-	// any workspace in the account — its workspace is just query compute, not a data scope.
+	// SQLWarehouseIDField doubles as the incremental-sync switch: set enables it, empty disables it.
+	// system.access.audit is account-wide, so this warehouse can be in any workspace in the
+	// account — its workspace is just query compute, not a data scope.
 	SQLWarehouseIDField = field.StringField(
 		"sql-warehouse-id",
 		field.WithDescription(
-			"ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental "+
-				"sync is enabled; the workspace hosting it is discovered automatically.",
+			"Setting this enables incremental sync; leaving it empty disables it. "+
+				"ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, "+
+				"so access changes show up before the next full sync (deletions are still only caught by full syncs). "+
+				"The warehouse can live in any workspace; the connector discovers which one automatically.",
 		),
 		field.WithDisplayName("SQL Warehouse ID"),
 	)
@@ -79,7 +76,6 @@ var (
 		WorkspacesField,
 		BaseURLField,
 		ExcludeWorkspacesField,
-		EnableIncrementalSyncField,
 		SQLWarehouseIDField,
 	}
 )

@@ -103,17 +103,26 @@ ID. Excluded workspaces and their roles are skipped entirely.
 
 By default, `baton-databricks` does a full resync of every resource on every run.
 You can opt into an additional, cheap pathway that polls a Databricks audit log
-between full syncs to pick up access changes early, by setting
-`--enable-incremental-sync` (or `BATON_ENABLE_INCREMENTAL_SYNC`). Full syncs
-still run as the correctness backstop; incremental sync does not detect
-deletions, which are only caught by the next full sync.
+between full syncs to pick up access changes early. Full syncs still run as the
+correctness backstop; incremental sync does not detect deletions, which are
+only caught by the next full sync.
+
+**Incremental sync is enabled by setting `--sql-warehouse-id` (or
+`BATON_SQL_WAREHOUSE_ID`) and disabled by leaving it unset or empty.** There is
+no separate on/off flag. When it is set, the connector validates the whole
+incremental-sync setup at startup (warehouse found, `system.access.audit`
+queryable, at least one workspace in sync scope) and fails validation if any
+check fails, rather than silently falling back to full syncs only.
 
 Incremental sync requires a reachable Account API to resolve audit events back
-to synced resources, same as the rest of the connector.
+to synced resources, same as the rest of the connector. Audit events are only
+resolved for workspaces in sync scope, so `--workspaces` and
+`--databricks-exclude-workspaces` apply to incremental sync the same way they
+apply to full syncs.
 
 Incremental sync also requires:
 
-- `--sql-warehouse-id` (or `BATON_SQL_WAREHOUSE_ID`), the ID of a Databricks SQL
+- `--sql-warehouse-id` itself: the ID of a Databricks SQL
   warehouse the connector can use to query the `system.access.audit` table. A
   small serverless warehouse is recommended to minimize cold-start latency.
   The connector automatically discovers which workspace hosts it. This can be
@@ -183,7 +192,6 @@ Flags:
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
-      --enable-incremental-sync                          Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync. ($BATON_ENABLE_INCREMENTAL_SYNC)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)
@@ -203,7 +211,7 @@ Flags:
   -p, --provisioning                                     This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
-      --sql-warehouse-id string                          ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled; the workspace hosting it is discovered automatically. ($BATON_SQL_WAREHOUSE_ID)
+      --sql-warehouse-id string                          Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deletions are still only caught by full syncs). The warehouse can live in any workspace; the connector discovers which one automatically. ($BATON_SQL_WAREHOUSE_ID)
       --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Defaults to pebble when unset. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)

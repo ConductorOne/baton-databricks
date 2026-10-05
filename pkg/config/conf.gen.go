@@ -12,7 +12,6 @@ type Databricks struct {
 	Workspaces []string `mapstructure:"workspaces"`
 	BaseUrl string `mapstructure:"base-url"`
 	DatabricksExcludeWorkspaces []string `mapstructure:"databricks-exclude-workspaces"`
-	EnableIncrementalSync bool `mapstructure:"enable-incremental-sync"`
 	SqlWarehouseId string `mapstructure:"sql-warehouse-id"`
 }
 

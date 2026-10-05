@@ -153,15 +153,9 @@
       "stringSliceField": {}
     },
     {
-      "name": "enable-incremental-sync",
-      "displayName": "Enable Incremental Sync",
-      "description": "Poll a Databricks audit-log event feed between full syncs to pick up access changes early. Deletions are still only caught by the next full sync.",
-      "boolField": {}
-    },
-    {
       "name": "sql-warehouse-id",
       "displayName": "SQL Warehouse ID",
-      "description": "ID of the Databricks SQL warehouse used to query system.access.audit. Required when incremental sync is enabled; the workspace hosting it is discovered automatically.",
+      "description": "Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deletions are still only caught by full syncs). The warehouse can live in any workspace; the connector discovers which one automatically.",
       "stringField": {}
     }
   ],

@@ -210,10 +210,10 @@ type auditLogRow struct {
 }
 
 type auditEventFeed struct {
-	client                *databricks.Client
-	workspaces            []string
-	enableIncrementalSync bool
-	sqlWarehouseID        string
+	client     *databricks.Client
+	workspaces []string
+	// sqlWarehouseID enables the feed when non-empty; empty means incremental sync is off.
+	sqlWarehouseID string
 
 	// queryWorkspaceID caches which workspace hosts sqlWarehouseID across polls. It's a discovered value, not provided by configs.
 	queryWorkspaceMu sync.Mutex
@@ -223,14 +223,12 @@ type auditEventFeed struct {
 func newAuditEventFeed(
 	client *databricks.Client,
 	workspaces []string,
-	enableIncrementalSync bool,
 	sqlWarehouseID string,
 ) *auditEventFeed {
 	return &auditEventFeed{
-		client:                client,
-		workspaces:            workspaces,
-		enableIncrementalSync: enableIncrementalSync,
-		sqlWarehouseID:        sqlWarehouseID,
+		client:         client,
+		workspaces:     workspaces,
+		sqlWarehouseID: sqlWarehouseID,
 	}
 }
 
@@ -255,8 +253,8 @@ func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, allWorkspa
 	return id, rateLimit, nil
 }
 
-// EventFeedMetadata is registered unconditionally; enable-incremental-sync gates behavior
-// inside ListEvents instead, to avoid confusing "feed not found" errors when it's off.
+// EventFeedMetadata is registered unconditionally; whether sql-warehouse-id is set gates
+// behavior inside ListEvents instead, to avoid confusing "feed not found" errors when it's off.
 func (f *auditEventFeed) EventFeedMetadata(_ context.Context) *v2.EventFeedMetadata {
 	return &v2.EventFeedMetadata{
 		Id: auditEventFeedId,
@@ -291,7 +289,7 @@ func (f *auditEventFeed) ListEvents(
 	l := ctxzap.Extract(ctx)
 	annos := annotations.Annotations{}
 
-	if !f.enableIncrementalSync {
+	if f.sqlWarehouseID == "" {
 		return nil, &pagination.StreamState{}, nil, nil
 	}
 

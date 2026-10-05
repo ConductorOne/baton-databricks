@@ -696,7 +696,7 @@ func TestListEventsSkipsQueryPastLagCutoff(t *testing.T) {
 		t.Fatalf("unexpected request %s %s: should have been skipped by the lagCutoff guard", r.Method, r.URL.Path)
 	})
 
-	feed := newAuditEventFeed(client, nil, true, "wh-1")
+	feed := newAuditEventFeed(client, nil, "wh-1")
 	events, streamState, _, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
@@ -802,7 +802,7 @@ func TestListEventsEndToEnd(t *testing.T) {
 	}
 	// Mirrors what Validate() sets before any sync/event-feed call runs in production.
 
-	feed := newAuditEventFeed(client, nil, true, "wh-1")
+	feed := newAuditEventFeed(client, nil, "wh-1")
 
 	events, streamState, annos, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
@@ -894,7 +894,7 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	feed := newAuditEventFeed(client, nil, true, "wh-1")
+	feed := newAuditEventFeed(client, nil, "wh-1")
 	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
@@ -989,7 +989,7 @@ func TestListEventsFindsWarehouseOutsideWorkspacesAllowlist(t *testing.T) {
 	}
 
 	// --workspaces is scoped to ws2 only; the warehouse lives in ws1.
-	feed := newAuditEventFeed(client, []string{"ws2"}, true, "wh-1")
+	feed := newAuditEventFeed(client, []string{"ws2"}, "wh-1")
 
 	_, _, _, err = feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
