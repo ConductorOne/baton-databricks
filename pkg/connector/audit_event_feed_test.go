@@ -201,7 +201,7 @@ func TestDecodeEventCursorSelfHeals(t *testing.T) {
 }
 
 // TestDecodeEventCursorResetsStaleCursor covers a valid cursor whose StartAt has aged past
-// system.access.audit's retention window, which must self-heal like a corrupt cursor.
+// the audit log retention window, which must self-heal like a corrupt cursor.
 func TestDecodeEventCursorResetsStaleCursor(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 

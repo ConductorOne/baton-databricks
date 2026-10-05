@@ -10,6 +10,8 @@ import (
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // rolesTransport answers the assignable-roles calls Validate makes. failAccount
@@ -124,6 +126,9 @@ func TestValidateWithWarehouseIDFailsWhenWarehouseMissing(t *testing.T) {
 	if !strings.Contains(err.Error(), "sql-warehouse-id") {
 		t.Errorf("Validate error = %q, want it to name sql-warehouse-id", err)
 	}
+	if got := status.Code(err); got != codes.NotFound {
+		t.Errorf("Validate error code = %s, want %s", got, codes.NotFound)
+	}
 }
 
 // With sql-warehouse-id set, an allowlist matching no workspace leaves nothing to resolve
@@ -137,6 +142,9 @@ func TestValidateWithWarehouseIDFailsWhenNoWorkspaceInScope(t *testing.T) {
 	_, err := d.Validate(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "no workspace is in sync scope") {
 		t.Fatalf("Validate error = %v, want a no-workspace-in-scope error", err)
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("Validate error code = %s, want %s", got, codes.FailedPrecondition)
 	}
 }
 

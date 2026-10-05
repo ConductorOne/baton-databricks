@@ -241,13 +241,12 @@ func (u *userBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parent
 	}
 
 	user, rateLimitData, err := u.client.GetUser(ctx, workspaceId, resourceId.Resource)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get user %s: %w", resourceId.Resource, err)
-	}
-
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return nil, annos, fmt.Errorf("databricks-connector: failed to get user %s: %w", resourceId.Resource, err)
 	}
 
 	resource, err := u.userResource(ctx, user, parentResourceId)

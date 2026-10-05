@@ -9,8 +9,10 @@ import (
 	"time"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -125,7 +127,12 @@ func (c *Client) ExecuteStatement(
 		if res.Status.Error != nil {
 			msg = res.Status.Error.Message
 		}
-		return nil, rateLimit, fmt.Errorf("statement %s did not succeed: state=%s message=%s", res.StatementID, res.Status.State, msg)
+		// FAILED is usually a query/permission problem; CANCELED/CLOSED means it was stopped.
+		code := codes.FailedPrecondition
+		if res.Status.State != StatementStateFailed {
+			code = codes.Aborted
+		}
+		return nil, rateLimit, uhttp.WrapErrors(code, fmt.Sprintf("statement %s did not succeed: state=%s message=%s", res.StatementID, res.Status.State, msg))
 	}
 
 	result, resultRateLimit, err := c.collectStatementResult(ctx, workspaceId, res)
@@ -160,7 +167,7 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 				zap.Duration("max_wait", statementPollMaxWait),
 			)
 			c.cancelStatement(ctx, workspaceId, res.StatementID)
-			return res, rateLimit, fmt.Errorf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait)
+			return res, rateLimit, uhttp.WrapErrors(codes.DeadlineExceeded, fmt.Sprintf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait))
 		case <-time.After(statementPollInterval):
 		}
 
@@ -228,11 +235,12 @@ func (c *Client) collectStatementResult(ctx context.Context, workspaceId string,
 
 // ValidateAuditLogAccess confirms the configured warehouse can query system.access.audit,
 // which requires a one-time SELECT grant from a metastore admin (see README).
-func (c *Client) ValidateAuditLogAccess(ctx context.Context, workspaceId, warehouseId string) error {
-	if _, _, err := c.ExecuteStatement(ctx, workspaceId, warehouseId, "SELECT 1 FROM system.access.audit LIMIT 1"); err != nil {
-		return fmt.Errorf("failed to query system.access.audit: %w", err)
+func (c *Client) ValidateAuditLogAccess(ctx context.Context, workspaceId, warehouseId string) (*v2.RateLimitDescription, error) {
+	_, rateLimit, err := c.ExecuteStatement(ctx, workspaceId, warehouseId, "SELECT 1 FROM system.access.audit LIMIT 1")
+	if err != nil {
+		return rateLimit, fmt.Errorf("failed to query system.access.audit: %w", err)
 	}
-	return nil
+	return rateLimit, nil
 }
 
 // WarehouseExists reports whether warehouseId exists in workspaceId, since SQL warehouses

@@ -13,8 +13,10 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 )
 
 // validateAuditLogAccessTimeout bounds the one-off audit-log probe in Validate() so a cold
@@ -130,9 +132,13 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// Workspace enumeration is the other account-plane call every sync depends on.
 	// Per-workspace probing is deliberately not done here: a workspace the service
 	// principal can't reach is skipped during sync rather than failing validation.
-	allWorkspaces, _, err := d.client.ListWorkspaces(ctx)
+	annos := annotations.Annotations{}
+	allWorkspaces, rateLimit, err := d.client.ListWorkspaces(ctx)
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		return annos, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
 	l := ctxzap.Extract(ctx)
@@ -140,7 +146,7 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// An empty sql-warehouse-id is how incremental sync is turned off, not a misconfiguration.
 	if d.sqlWarehouseID == "" {
 		l.Info("databricks-connector: incremental sync disabled (sql-warehouse-id not set)")
-		return nil, nil
+		return annos, nil
 	}
 
 	// A set sql-warehouse-id is an explicit opt-in, so every check below fails validation
@@ -148,29 +154,35 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// allWorkspaces (unfiltered) locates the query warehouse, which can live in any
 	// workspace in the account regardless of --workspaces.
 	if len(filterConfiguredWorkspaces(allWorkspaces, d.workspaces)) == 0 {
-		return nil, fmt.Errorf(
-			"databricks-connector: sql-warehouse-id is set (incremental sync enabled) but no workspace is in sync scope " +
+		return annos, uhttp.WrapErrors(codes.FailedPrecondition,
+			"databricks-connector: sql-warehouse-id is set (incremental sync enabled) but no workspace is in sync scope "+
 				"to resolve audit events against; check workspaces / databricks-exclude-workspaces, or unset sql-warehouse-id to disable incremental sync",
 		)
 	}
 
-	queryWorkspaceId, _, err := resolveWarehouseWorkspace(ctx, d.client, allWorkspaces, d.sqlWarehouseID)
+	queryWorkspaceId, rateLimit, err := resolveWarehouseWorkspace(ctx, d.client, allWorkspaces, d.sqlWarehouseID)
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
 	if err != nil {
 		// Already names sql-warehouse-id and the workspaces searched.
-		return nil, err
+		return annos, err
 	}
 	validateCtx, cancel := context.WithTimeout(ctx, validateAuditLogAccessTimeout)
-	err = d.client.ValidateAuditLogAccess(validateCtx, queryWorkspaceId, d.sqlWarehouseID)
+	rateLimit, err = d.client.ValidateAuditLogAccess(validateCtx, queryWorkspaceId, d.sqlWarehouseID)
 	cancel()
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
 	if err != nil {
-		return nil, fmt.Errorf(
+		return annos, fmt.Errorf(
 			"databricks-connector: sql-warehouse-id is set (incremental sync enabled) but the connector cannot query system.access.audit via warehouse %s: %w",
 			d.sqlWarehouseID, err,
 		)
 	}
 
 	l.Info("databricks-connector: incremental sync enabled", zap.String("sql_warehouse_id", d.sqlWarehouseID))
-	return nil, nil
+	return annos, nil
 }
 
 // New returns a new instance of the connector.

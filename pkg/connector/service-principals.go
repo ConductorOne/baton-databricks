@@ -228,13 +228,12 @@ func (s *servicePrincipalBuilder) Get(ctx context.Context, resourceId *v2.Resour
 	}
 
 	servicePrincipal, rateLimitData, err := s.client.GetServicePrincipal(ctx, workspaceId, resourceId.Resource)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get service principal %s: %w", resourceId.Resource, err)
-	}
-
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return nil, annos, fmt.Errorf("databricks-connector: failed to get service principal %s: %w", resourceId.Resource, err)
 	}
 
 	resource, err := s.servicePrincipalResource(ctx, servicePrincipal, parentResourceId)

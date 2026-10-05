@@ -18,8 +18,10 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -36,9 +38,9 @@ const (
 
 	auditLogPageLimit = 1000
 
-	// auditLogRetention mirrors system.access.audit's documented 365-day retention; a cursor
-	// older than this can no longer be satisfied by the table and is treated as stale.
-	auditLogRetention = 365 * 24 * time.Hour
+	// auditLogRetention caps how far back the feed reads; C1 doesn't request event-feed data
+	// older than ~30 days, so an older cursor is treated as stale.
+	auditLogRetention = 30 * 24 * time.Hour
 
 	auditServiceAccounts = "accounts"
 )
@@ -191,7 +193,7 @@ func decodeEventCursor(ctx context.Context, s string, now time.Time) eventPageCu
 	}
 
 	if !c.StartAt.IsZero() && now.Sub(c.StartAt) > auditLogRetention {
-		l.Debug("databricks-connector: event cursor is older than system.access.audit's retention window, resetting to lookback default",
+		l.Debug("databricks-connector: event cursor is older than the audit log retention window, resetting to lookback default",
 			zap.Time("cursor_start_at", c.StartAt),
 		)
 		return eventPageCursor{}
@@ -316,13 +318,16 @@ func (f *auditEventFeed) ListEvents(
 	// ListWorkspaces already applies --databricks-exclude-workspaces. allWorkspaces (not
 	// narrowed by --workspaces) locates the query warehouse; scopedWorkspaces decides which
 	// workspaces' audit rows get resolved, so events never surface a workspace a full sync skips.
-	allWorkspaces, _, err := f.client.ListWorkspaces(ctx)
+	allWorkspaces, rateLimit, err := f.client.ListWorkspaces(ctx)
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		return nil, nil, annos, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 	scopedWorkspaces := filterConfiguredWorkspaces(allWorkspaces, f.workspaces)
 	if len(scopedWorkspaces) == 0 {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: no workspace available to query system.access.audit")
+		return nil, nil, annos, uhttp.WrapErrors(codes.FailedPrecondition, "databricks-connector: no workspace available to query system.access.audit")
 	}
 
 	workspaceLookup := make(map[int64]string, len(scopedWorkspaces))
@@ -403,7 +408,7 @@ func (f *auditEventFeed) ListEvents(
 
 	encoded, err := encodeEventCursor(nextCursor)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("databricks-connector: failed to encode event cursor: %w", err)
+		return nil, nil, annos, fmt.Errorf("databricks-connector: failed to encode event cursor: %w", err)
 	}
 
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
@@ -667,15 +672,15 @@ func resolveWarehouseWorkspace(ctx context.Context, client *databricks.Client, w
 	}
 
 	if len(workspaces) == 1 {
-		return "", rateLimit, fmt.Errorf(
+		return "", rateLimit, uhttp.WrapErrors(codes.NotFound, fmt.Sprintf(
 			"databricks-connector: sql-warehouse-id %q was not found in workspace %s",
 			warehouseId, workspaces[0].DeploymentName,
-		)
+		))
 	}
-	return "", rateLimit, fmt.Errorf(
+	return "", rateLimit, uhttp.WrapErrors(codes.NotFound, fmt.Sprintf(
 		"databricks-connector: sql-warehouse-id %q was not found in any of the %d available workspaces",
 		warehouseId, len(workspaces),
-	)
+	))
 }
 
 // queryAuditLog returns rows in (cursor, lagCutoff], plus the raw row count (before

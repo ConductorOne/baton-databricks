@@ -277,13 +277,12 @@ func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, paren
 	}
 
 	group, rateLimitData, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupAttrVars())
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
-	}
-
 	annos := annotations.Annotations{}
 	if rateLimitData != nil {
 		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return nil, annos, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 	}
 
 	resource, err := groupResource(ctx, group, parentResourceId)

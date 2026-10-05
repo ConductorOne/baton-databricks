@@ -13,6 +13,7 @@ import (
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -619,7 +620,7 @@ func (c *Client) GetWorkspace(
 		}
 	}
 
-	return nil, ratelimitData, fmt.Errorf("workspace %s not found", deploymentName)
+	return nil, ratelimitData, uhttp.WrapErrors(codes.NotFound, fmt.Sprintf("workspace %s not found", deploymentName))
 }
 
 func (c *Client) ListWorkspaceMembers(
