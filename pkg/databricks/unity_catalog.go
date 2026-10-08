@@ -29,6 +29,7 @@ const (
 	// uppercase securable_type a listed securable carries. A metastore is
 	// addressed by its UUID: its name is rejected.
 	SecurableMetastore = "metastore"
+	SecurableCatalog   = "catalog"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
@@ -125,6 +126,22 @@ func (c *Client) listCatalogs(
 	}
 
 	return catalogs, next, ratelimitData, nil
+}
+
+// DrainCatalogs walks listCatalogs to exhaustion. A catalog's metastore is only
+// known once its page has been read, so no caller can page these for the SDK.
+func (c *Client) DrainCatalogs(
+	ctx context.Context,
+	workspaceId string,
+	maxResults uint,
+) (
+	[]Catalog,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return drainPagesFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
+		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults)
+	})
 }
 
 // ForEachCatalogPage walks listCatalogs without retaining the pages.

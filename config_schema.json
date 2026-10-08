@@ -151,9 +151,28 @@
       "displayName": "Exclude Workspaces",
       "description": "Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces.",
       "stringSliceField": {}
+    },
+    {
+      "name": "databricks-catalogs",
+      "displayName": "Catalogs",
+      "description": "Catalogs to limit Unity Catalog syncing to, identified by catalog name. No catalog outside this list is synced, and neither is anything under it",
+      "stringSliceField": {}
+    },
+    {
+      "name": "databricks-exclude-catalogs",
+      "displayName": "Exclude Catalogs",
+      "description": "Catalogs to exclude from Unity Catalog syncing, identified by catalog name. The schemas, tables and volumes under an excluded catalog are excluded with it",
+      "stringSliceField": {}
     }
   ],
   "constraints": [
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "databricks-catalogs",
+        "databricks-exclude-catalogs"
+      ]
+    },
     {
       "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
       "fieldNames": [

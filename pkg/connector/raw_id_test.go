@@ -10,6 +10,26 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
+func buildSecurable(
+	t *testing.T,
+	resourceType *v2.ResourceType,
+	typeEnum, parentType string,
+	childTypes []*v2.ResourceType,
+	metastoreID string,
+	parentParts []string,
+	item securable,
+) (*v2.Resource, error) {
+	t.Helper()
+
+	parent := securableRef{metastoreID: metastoreID, parts: parentParts}
+	parentResourceID := &v2.ResourceId{
+		ResourceType: parentType,
+		Resource:     parent.resourceKey(),
+	}
+
+	return newSecurableResource(resourceType, typeEnum, childTypes, item, parent.child(item.name), parentResourceID)
+}
+
 // C1 matches Terraform-preloaded resources and entitlements (match_baton_id) against the
 // RawId annotation on the resource, so every resource must carry one equal to its resource ID.
 func TestResourcesHaveRawId(t *testing.T) {
@@ -69,6 +89,14 @@ func TestResourcesHaveRawId(t *testing.T) {
 			"metastore",
 			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account)),
 			"ms1",
+		},
+		{
+			// A securable is keyed by metastore, not workspace: a metastore is regional and
+			// shared, so a workspace-keyed id would duplicate the catalog per workspace.
+			"catalog",
+			build(buildSecurable(t, catalogResourceType, securableTypeCatalog, metastoreResourceType.Id,
+				nil, "ms1", nil, securable{name: "cat"})),
+			"ms1::cat",
 		},
 	}
 

@@ -70,7 +70,7 @@ func TestWorkspaceMetastoreLookupIsNotAnsweredByAnotherWorkspacesCachedListing(t
 		})
 	})
 
-	uc := newUnityCatalog(client, "app-1", nil)
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 	ctx := context.Background()
 
 	for _, workspace := range []string{"wsa", "wsb"} {
@@ -181,6 +181,47 @@ func routingHandlerWithCatalogs(
 	}
 }
 
+// An ISOLATED catalog is only listable from the workspaces it is bound to, so a
+// cache entry shared between hosts collapses the union onto the first host, and a
+// catalog nobody lists is one C1 deletes along with everything under it.
+func TestIsolatedCatalogIsNotHiddenByAnotherWorkspacesCachedListing(t *testing.T) {
+	client, router := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+		workspace := r.Header.Get("X-Test-Workspace")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalogs": []map[string]any{{
+				"name":           "isolated_in_" + workspace,
+				"metastore_id":   "ms-1",
+				"owner":          "someone",
+				"isolation_mode": "ISOLATED",
+			}},
+		})
+	})
+
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
+	facts, _, err := uc.collectCatalogs(context.Background(), "ms-1", []string{"wsa", "wsb"})
+	if err != nil {
+		t.Fatalf("collectCatalogs: %v", err)
+	}
+
+	for _, workspace := range []string{"wsa", "wsb"} {
+		if router.hits[workspace] == 0 {
+			t.Errorf("workspace %s was never asked for its catalogs; hits = %v", workspace, router.hits)
+		}
+
+		name := "isolated_in_" + workspace
+		catalog, ok := facts[name]
+		if !ok {
+			t.Errorf("catalog %s is missing from the index, so the sync would delete it", name)
+
+			continue
+		}
+		if catalog.workspace != workspace {
+			t.Errorf("catalog %s is routed through workspace %s, want %s", name, catalog.workspace, workspace)
+		}
+	}
+}
+
 // The allowlist is what the operator scoped the sync to, but ListWorkspaces only
 // applies the exclude list. Unity Catalog reads are addressed to a workspace, so
 // routing has to filter too or the connector reads the account through a
@@ -190,7 +231,7 @@ func TestRoutingSkipsAWorkspaceOutsideTheConfiguredAllowlist(t *testing.T) {
 	client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
 		map[string]any{"1": "ms-a", "2": "ms-a"}, probed))
 
-	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod"}))
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, configuredWorkspaceSet([]string{"prod"}))
 	snap, _, err := uc.buildRouting(context.Background())
 	if err != nil {
 		t.Fatalf("buildRouting: %v", err)
@@ -214,7 +255,7 @@ func TestAMetastoreOnlyAnOutOfScopeWorkspaceReachesIsAbsentRatherThanFatal(t *te
 	client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
 		map[string]any{"1": "ms-a", "2": "ms-b"}, probed))
 
-	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod"}))
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, configuredWorkspaceSet([]string{"prod"}))
 	snap, _, err := uc.buildRouting(context.Background())
 	if err != nil {
 		t.Fatalf("buildRouting: %v", err)
@@ -248,7 +289,7 @@ func TestAnUnreadableInScopeWorkspaceStopsTheMetastoreFromBeingPruned(t *testing
 		map[string]int{"wsb": http.StatusForbidden},
 		probed))
 
-	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod", "dev"}))
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, configuredWorkspaceSet([]string{"prod", "dev"}))
 	snap, _, err := uc.buildRouting(context.Background())
 	if err != nil {
 		t.Fatalf("buildRouting: %v", err)
@@ -285,7 +326,7 @@ func TestADeniedAssignmentWithAnEmptyCatalogListingIsNotEvidenceOfNothing(t *tes
 			client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
 				map[string]any{"1": "ms-a", "2": tc.assignment}, probed))
 
-			uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod", "dev"}))
+			uc := newUnityCatalog(client, "app-1", catalogFilter{}, configuredWorkspaceSet([]string{"prod", "dev"}))
 			snap, _, err := uc.buildRouting(context.Background())
 			if err != nil {
 				t.Fatalf("buildRouting: %v", err)
@@ -313,7 +354,7 @@ func TestRoutingSetsAsideAWorkspaceTheCredentialCannotRead(t *testing.T) {
 			client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
 				map[string]any{"1": "ms-a", "2": status}, probed))
 
-			uc := newUnityCatalog(client, "app-1", nil)
+			uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 			snap, _, err := uc.buildRouting(context.Background())
 			if err != nil {
 				t.Fatalf("one unreadable workspace failed the whole snapshot: %v", err)
@@ -326,5 +367,61 @@ func TestRoutingSetsAsideAWorkspaceTheCredentialCannotRead(t *testing.T) {
 				t.Errorf("unusable = %v, want it to name wsb", snap.unusable)
 			}
 		})
+	}
+}
+
+// Databricks creates a catalog named main in every metastore and addresses a
+// catalog's permissions by its undotted name, so a shared cache entry answers one
+// metastore's catalog with another's grants.
+func TestSameNamedCatalogsInTwoMetastoresDoNotShareGrants(t *testing.T) {
+	client, router := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+		workspace := r.Header.Get("X-Test-Workspace")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"privilege_assignments": []map[string]any{{
+				"principal":  "analyst_of_" + workspace,
+				"privileges": []string{"SELECT"},
+			}},
+		})
+	})
+
+	ctx := context.Background()
+	for _, workspace := range []string{"wsa", "wsb"} {
+		assignments, _, _, err := client.ListPermissions(ctx, workspace, databricks.SecurableCatalog, "main", "", "")
+		if err != nil {
+			t.Fatalf("ListPermissions through %s: %v", workspace, err)
+		}
+
+		if router.hits[workspace] == 0 {
+			t.Errorf("workspace %s was never asked for the grants on main; hits = %v", workspace, router.hits)
+		}
+		if len(assignments) != 1 {
+			t.Fatalf("workspace %s returned %d assignments, want 1", workspace, len(assignments))
+		}
+
+		want := "analyst_of_" + workspace
+		if got := assignments[0].Principal; got != want {
+			t.Errorf("catalog main through %s is held by %s, want %s: a grant crossed between metastores", workspace, got, want)
+		}
+	}
+}
+
+// Databricks excludes MANAGE and READ METADATA from ALL_PRIVILEGES, so accepting it
+// as full visibility makes the connector trust a partial read and report every
+// privilege it cannot see as revoked access.
+func TestHoldsManageIgnoresAllPrivileges(t *testing.T) {
+	t.Parallel()
+
+	if holdsManage([]databricks.PrivilegeAssignment{{
+		Principal:  "sp",
+		Privileges: []string{privilegeAllPrivileges, "SELECT"},
+	}}) {
+		t.Fatal("ALL_PRIVILEGES must not count as full grant visibility")
+	}
+	if !holdsManage([]databricks.PrivilegeAssignment{{
+		Principal:  "group",
+		Privileges: []string{privilegeManage},
+	}}) {
+		t.Fatal("MANAGE must count as full grant visibility")
 	}
 }
