@@ -95,8 +95,14 @@ func TestResourcesHaveRawId(t *testing.T) {
 			// shared, so a workspace-keyed id would duplicate the catalog per workspace.
 			"catalog",
 			build(buildSecurable(t, catalogResourceType, securableTypeCatalog, metastoreResourceType.Id,
-				nil, "ms1", nil, securable{name: "cat"})),
+				[]*v2.ResourceType{schemaResourceType}, "ms1", nil, securable{name: "cat"})),
 			"ms1::cat",
+		},
+		{
+			"schema",
+			build(buildSecurable(t, schemaResourceType, securableTypeSchema, catalogResourceType.Id,
+				nil, "ms1", []string{"cat"}, securable{name: "sch"})),
+			"ms1::cat.sch",
 		},
 	}
 

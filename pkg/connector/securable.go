@@ -24,6 +24,7 @@ const (
 	profileKeyCatalogName   = "catalog_name"
 	profileKeyCatalogType   = "catalog_type"
 	profileKeyIsolationMode = "isolation_mode"
+	profileKeySchemaName    = "schema_name"
 	profileKeyRegion        = "region"
 
 	// Not a dot: a securable's full name is already dot-separated.

@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs the Unity Catalog securables it currently covers: metastores and catalogs. Both resource types are opt-in — each one stays off until it is enabled per resource type in ConductorOne.
+   > It also syncs the Unity Catalog securables it currently covers: metastores, catalogs and schemas. Those three resource types are opt-in — each one stays off until it is enabled per resource type in ConductorOne.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on both securable levels it covers (metastore, catalog). The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on all three securable levels it covers (metastore, catalog, schema). The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
 
 ## Connector credentials
 
@@ -62,6 +62,7 @@ and issues the securable calls against one of those workspace hosts.
 | Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
 | Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
 | Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
+| Schemas | `GET /api/2.1/unity-catalog/schemas` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 Behaviours that shape the implementation:
@@ -82,8 +83,7 @@ Behaviours that shape the implementation:
   keys on the path, the query and a header set, with no host component, and every
   workspace deployment answers the catalog listing at the same path and query. The
   client adds a host header to the key so one workspace's listing is never served
-  for another, which would both hide an isolated catalog and answer one
-  metastore's catalog with another's grants.
+  for another.
 
 ## Permission model
 
@@ -98,7 +98,7 @@ The scopes:
 
 | Scope | Covers |
 |-------|--------|
-| `unity-catalog` | Metastores, workspace metastore assignments, catalogs, and the permissions endpoint |
+| `unity-catalog` | Metastores, workspace metastore assignments, catalogs, schemas, and the permissions endpoint |
 | `scim` | Account users, groups and service principals |
 | `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
 | `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
@@ -149,12 +149,13 @@ revoke build different request bodies.
   on a catalog grants `SELECT` on every table under it — but the connector
   reports the privilege assignments recorded on each object. Inherited access
   shows on the ancestor that carries it and is not repeated on each descendant,
-  so a catalog that inherits `READ_METADATA` from its metastore shows no holders
-  of its own. The endpoint that exposes inheritance
+  so in a metastore where a catalog grants `SELECT` to a large group, the schemas
+  under it show no holders of their own. The endpoint that exposes inheritance
   does not return principal IDs, which are what the connector needs to resolve a
   principal unambiguously.
 - **Object-level privileges only.** Row filters, column masks and ABAC policies
   are not synced.
+- **`information_schema` is skipped**, along with everything under it.
 - **Ownership is read-only.** The owner of an object is shown but cannot be
   provisioned. An owner that is not an account identity — `System user`, or a
   workspace admins group such as `_workspace_admins_<workspace_id>` — does not
@@ -164,9 +165,9 @@ revoke build different request bodies.
 - **`MANAGE` and `ALL_PRIVILEGES` do not exist at the metastore level** —
   Databricks rejects them there. `READ_METADATA` granted at the metastore
   inherits to every object beneath it.
-- **Other securables are not synced yet:** schemas, tables, volumes, functions,
-  registered models, external locations, storage credentials, connections, shares
-  and Delta Sharing recipients.
+- **Other securables are not synced yet:** tables, volumes, functions, registered models,
+  external locations, storage credentials, connections, shares and Delta Sharing
+  recipients.
 - **Tags are not synced**, including the `SYSTEM.TEAM` convention some customers
   use to drive just-in-time access.
 - **Isolated catalogs need a reachable workspace.** A catalog whose isolation
@@ -174,13 +175,15 @@ revoke build different request bodies.
   connector enumerates catalogs through every workspace it can reach and
   de-duplicates the result. A catalog bound only to a workspace the connector
   cannot reach fails the sync rather than being silently omitted.
-- **The first sync attempts both types.** Because the types are opt-in,
+- **The first sync attempts all three types.** Because the types are opt-in,
   ConductorOne does not know they exist until the first sync reports them, so
-  that sync covers both. On a large metastore that can be very long. Scope it with `--databricks-catalogs`, or restrict the run with
+  that sync covers every one of them. On a large metastore that can be very
+  long. Scope it with `--databricks-catalogs`, or restrict the run with
   `--sync-resource-types`, then opt in per type in ConductorOne afterwards.
 - **Narrowing the catalog filter removes data.** Shrinking
   `--databricks-catalogs`, or widening `--databricks-exclude-catalogs`, after a
-  successful sync removes the previously synced catalogs from ConductorOne, because they are legitimately absent from the new sync.
+  successful sync removes the previously synced catalogs and their subtrees from
+  ConductorOne, because they are legitimately absent from the new sync.
 - **Grants land after resources.** ConductorOne ingests grants a few minutes
   behind resources, so a resource can briefly show zero grants right after a
   sync.
