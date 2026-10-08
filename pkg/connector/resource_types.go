@@ -101,4 +101,18 @@ var (
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
 		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
 	}
+
+	tableResourceType = &v2.ResourceType{
+		Id:          "table",
+		DisplayName: "Table",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
+		Annotations: annotationsForSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
+	}
+
+	volumeResourceType = &v2.ResourceType{
+		Id:          "volume",
+		DisplayName: "Volume",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
+		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
+	}
 )

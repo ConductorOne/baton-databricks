@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
@@ -423,5 +424,65 @@ func TestHoldsManageIgnoresAllPrivileges(t *testing.T) {
 		Privileges: []string{privilegeManage},
 	}}) {
 		t.Fatal("MANAGE must count as full grant visibility")
+	}
+}
+
+// Databricks documents ALL_PRIVILEGES on a view but answers 400 for it, and a
+// materialized view accepts it and adds REFRESH. table_type is the only field that
+// says which of the three a row is. The offered entitlements must also equal the
+// set Grant validates, or C1 shows an entitlement that fails on every request.
+func TestTablePrivilegesFollowTableType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		tableType   string
+		setType     bool
+		wantAll     bool
+		wantRefresh bool
+	}{
+		{name: "view", tableType: "VIEW", setType: true, wantAll: false, wantRefresh: false},
+		{name: "managed", tableType: "MANAGED", setType: true, wantAll: true, wantRefresh: false},
+		{name: "materialized view", tableType: "MATERIALIZED_VIEW", setType: true, wantAll: true, wantRefresh: true},
+		{name: "missing type", setType: false, wantAll: true, wantRefresh: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			profile := map[string]any{}
+			if tc.setType {
+				profile[profileKeyTableType] = tc.tableType
+			}
+			resource, err := rs.NewAppResource("main.sales.orders", tableResourceType, "ms::main.sales.orders", nil, rs.WithResourceProfile(profile))
+			if err != nil {
+				t.Fatalf("build resource: %v", err)
+			}
+
+			offered := privilegesForTable(context.Background(), resource)
+			if slices.Contains(offered, privilegeAllPrivileges) != tc.wantAll {
+				t.Errorf("ALL_PRIVILEGES present = %v, want %v", slices.Contains(offered, privilegeAllPrivileges), tc.wantAll)
+			}
+			if slices.Contains(offered, privilegeRefresh) != tc.wantRefresh {
+				t.Errorf("REFRESH present = %v, want %v", slices.Contains(offered, privilegeRefresh), tc.wantRefresh)
+			}
+
+			entitlements, _, err := (&tableBuilder{}).Entitlements(context.Background(), resource, rs.SyncOpAttrs{})
+			if err != nil {
+				t.Fatalf("entitlements: %v", err)
+			}
+
+			var slugs []string
+			for _, entitlement := range entitlements {
+				if entitlement.GetSlug() == ownerEntitlement {
+					continue
+				}
+				slugs = append(slugs, entitlement.GetSlug())
+			}
+			if !slices.Equal(slugs, offered) {
+				t.Errorf("entitlement slugs %v differ from the set Grant validates %v", slugs, offered)
+			}
+		})
 	}
 }

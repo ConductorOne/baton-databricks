@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs the Unity Catalog securables it currently covers: metastores, catalogs and schemas. Those three resource types are opt-in — each one stays off until it is enabled per resource type in ConductorOne.
+   > It also syncs the Unity Catalog securables: metastores, catalogs, schemas, tables and volumes. Those five resource types are opt-in — each one stays off until it is enabled per resource type in ConductorOne.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on all three securable levels it covers (metastore, catalog, schema). The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on all five securable levels (metastore, catalog, schema, table, volume). The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
 
 ## Connector credentials
 
@@ -63,6 +63,8 @@ and issues the securable calls against one of those workspace hosts.
 | Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
 | Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
 | Schemas | `GET /api/2.1/unity-catalog/schemas` |
+| Tables | `GET /api/2.1/unity-catalog/tables` |
+| Volumes | `GET /api/2.1/unity-catalog/volumes` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 Behaviours that shape the implementation:
@@ -78,12 +80,13 @@ Behaviours that shape the implementation:
   token produces an endless re-read rather than an error. Only an absent token
   terminates a sequence: an empty page, and a page shorter than `max_results`,
   can both still carry one.
+- **The tables endpoint caps `max_results` at 50 and requires `schema_name`.**
+  Listing tables therefore costs one call per catalog-schema pair.
 - **A metastore is addressed by its UUID.** Its name is rejected with HTTP 400.
-- **A cached response is keyed to the host it came from.** The SDK's HTTP cache
-  keys on the path, the query and a header set, with no host component, and every
-  workspace deployment answers the catalog listing at the same path and query. The
-  client adds a host header to the key so one workspace's listing is never served
-  for another.
+- **Table listings are requested with `omit_columns` and `omit_properties`**,
+  which carry most of a table response's weight, but deliberately not
+  `omit_username` — that flag also drops `owner`, which the table's profile and
+  its owner grant both depend on.
 
 ## Permission model
 
@@ -98,7 +101,7 @@ The scopes:
 
 | Scope | Covers |
 |-------|--------|
-| `unity-catalog` | Metastores, workspace metastore assignments, catalogs, schemas, and the permissions endpoint |
+| `unity-catalog` | Metastores, workspace metastore assignments, catalogs, schemas, tables, volumes, and the permissions endpoint |
 | `scim` | Account users, groups and service principals |
 | `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
 | `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
@@ -149,7 +152,7 @@ revoke build different request bodies.
   on a catalog grants `SELECT` on every table under it — but the connector
   reports the privilege assignments recorded on each object. Inherited access
   shows on the ancestor that carries it and is not repeated on each descendant,
-  so in a metastore where a catalog grants `SELECT` to a large group, the schemas
+  so in a metastore where a catalog grants `SELECT` to a large group, the tables
   under it show no holders of their own. The endpoint that exposes inheritance
   does not return principal IDs, which are what the connector needs to resolve a
   principal unambiguously.
@@ -165,17 +168,18 @@ revoke build different request bodies.
 - **`MANAGE` and `ALL_PRIVILEGES` do not exist at the metastore level** —
   Databricks rejects them there. `READ_METADATA` granted at the metastore
   inherits to every object beneath it.
-- **Other securables are not synced yet:** tables, volumes, functions, registered models,
+- **Other securables are not synced yet:** functions, registered models,
   external locations, storage credentials, connections, shares and Delta Sharing
   recipients.
 - **Tags are not synced**, including the `SYSTEM.TEAM` convention some customers
-  use to drive just-in-time access.
+  use to drive just-in-time access. The connector also requests table listings
+  without properties to keep payloads small, which omits tags.
 - **Isolated catalogs need a reachable workspace.** A catalog whose isolation
   mode is `ISOLATED` is only visible from the workspaces it is bound to, so the
   connector enumerates catalogs through every workspace it can reach and
   de-duplicates the result. A catalog bound only to a workspace the connector
   cannot reach fails the sync rather than being silently omitted.
-- **The first sync attempts all three types.** Because the types are opt-in,
+- **The first sync attempts all five types.** Because the types are opt-in,
   ConductorOne does not know they exist until the first sync reports them, so
   that sync covers every one of them. On a large metastore that can be very
   long. Scope it with `--databricks-catalogs`, or restrict the run with

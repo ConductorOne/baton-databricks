@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
+	"strconv"
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -89,6 +92,43 @@ func TestUpdatePermissionsDrainsFromPatchToken(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Principal != "alice" || got[1].Principal != "bob" {
 		t.Fatalf("assignments = %+v, want alice then bob", got)
+	}
+}
+
+// omit_username is deliberately absent: it also drops owner, and the drop is
+// silent — the response still parses and every owner simply becomes empty. The
+// exact-set assertion is what makes adding it fail here.
+func TestListTablesSendsOnlyTheOmitColumnsAndPropertiesPayloadVars(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	var query url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tablesResponse{Tables: []Table{{Name: "t"}}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if _, _, _, err := c.ListTables(context.Background(), "ws", "main", "default", "", unityCatalogTablesMaxResults); err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+
+	want := url.Values{
+		"catalog_name":    []string{"main"},
+		"schema_name":     []string{"default"},
+		"max_results":     []string{strconv.FormatUint(uint64(unityCatalogTablesMaxResults), 10)},
+		"omit_columns":    []string{"true"},
+		"omit_properties": []string{"true"},
+	}
+	if !reflect.DeepEqual(query, want) {
+		t.Fatalf("query = %v, want exactly %v", query, want)
 	}
 }
 

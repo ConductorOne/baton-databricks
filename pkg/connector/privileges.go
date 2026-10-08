@@ -12,6 +12,11 @@ const (
 	privilegeManage        = "MANAGE"
 	privilegeRefresh       = "REFRESH"
 
+	// A view and a materialized view are both securable_type "table", so table_type
+	// is the only field that says which privileges apply.
+	tableTypeView             = "VIEW"
+	tableTypeMaterializedView = "MATERIALIZED_VIEW"
+
 	// ownerEntitlement names the securable's owner. Ownership is single-valued and
 	// Databricks has no notion of removing an owner, so it is never grantable.
 	ownerEntitlement = "owner"
@@ -78,6 +83,44 @@ var (
 		"USE_SHARE",
 	}
 
+	// tablePrivileges is the set for a real table. BROWSE is catalog-only.
+	tablePrivileges = []string{
+		privilegeAllPrivileges,
+		"APPLY_TAG",
+		"DELETE",
+		"INSERT",
+		privilegeManage,
+		"MODIFY",
+		"READ_METADATA",
+		"SELECT",
+		"UPDATE",
+	}
+
+	// viewPrivileges drops the DML trio and ALL_PRIVILEGES. The documentation lists
+	// ALL_PRIVILEGES on a view, but the API answers 400 for it.
+	viewPrivileges = []string{
+		"APPLY_TAG",
+		privilegeManage,
+		"READ_METADATA",
+		"SELECT",
+	}
+
+	// A materialized view accepts ALL_PRIVILEGES where a view does not, and a
+	// permissions read returns only it, not the implied SELECT and REFRESH.
+	materializedViewPrivileges = append(slices.Clone(viewPrivileges), privilegeRefresh, privilegeAllPrivileges)
+
+	// For a grant whose table variant is not knowable.
+	anyTablePrivileges = append(slices.Clone(tablePrivileges), privilegeRefresh)
+
+	volumePrivileges = []string{
+		privilegeAllPrivileges,
+		"APPLY_TAG",
+		privilegeManage,
+		"READ_METADATA",
+		"READ_VOLUME",
+		"WRITE_VOLUME",
+	}
+
 	// legacyPrivileges are Hive-era aliases the API accepts on input and silently
 	// rewrites: CREATE on a schema becomes CREATE_TABLE plus CREATE_FUNCTION. They are
 	// never echoed back, so they must not be offered.
@@ -92,6 +135,19 @@ func withoutPrivileges(privileges []string, drop ...string) []string {
 	return slices.DeleteFunc(slices.Clone(privileges), func(privilege string) bool {
 		return slices.Contains(drop, privilege)
 	})
+}
+
+// privilegesForTableType falls back to the full table set for an absent or
+// unrecognised table_type.
+func privilegesForTableType(tableType string) []string {
+	switch strings.ToUpper(strings.TrimSpace(tableType)) {
+	case tableTypeView:
+		return viewPrivileges
+	case tableTypeMaterializedView:
+		return materializedViewPrivileges
+	default:
+		return tablePrivileges
+	}
 }
 
 // An alias is never in a level's set, so this only changes the explanation.

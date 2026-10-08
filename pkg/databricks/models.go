@@ -165,6 +165,18 @@ type Schema struct {
 	Owner string `json:"owner"`
 }
 
+type Table struct {
+	Name      string `json:"name"`
+	Owner     string `json:"owner"`
+	TableType string `json:"table_type"`
+}
+
+type Volume struct {
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	VolumeType string `json:"volume_type"`
+}
+
 type PrivilegeAssignment struct {
 	Principal   string      `json:"principal"`
 	PrincipalID json.Number `json:"principal_id"`
@@ -212,6 +224,16 @@ type catalogsResponse struct {
 
 type schemasResponse struct {
 	Schemas       []Schema `json:"schemas"`
+	NextPageToken string   `json:"next_page_token"`
+}
+
+type tablesResponse struct {
+	Tables        []Table `json:"tables"`
+	NextPageToken string  `json:"next_page_token"`
+}
+
+type volumesResponse struct {
+	Volumes       []Volume `json:"volumes"`
 	NextPageToken string   `json:"next_page_token"`
 }
 

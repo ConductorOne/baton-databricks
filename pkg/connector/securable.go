@@ -25,6 +25,10 @@ const (
 	profileKeyCatalogType   = "catalog_type"
 	profileKeyIsolationMode = "isolation_mode"
 	profileKeySchemaName    = "schema_name"
+	profileKeyTableName     = "table_name"
+	profileKeyTableType     = "table_type"
+	profileKeyVolumeName    = "volume_name"
+	profileKeyVolumeType    = "volume_type"
 	profileKeyRegion        = "region"
 
 	// Not a dot: a securable's full name is already dot-separated.
@@ -76,6 +80,10 @@ func (r securableRef) resourceKey() string {
 
 func (r securableRef) catalog() string {
 	return r.part(0)
+}
+
+func (r securableRef) schema() string {
+	return r.part(1)
 }
 
 func (r securableRef) part(i int) string {
