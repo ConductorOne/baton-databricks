@@ -1,5 +1,7 @@
 package databricks
 
+import "encoding/json"
+
 type BaseResponse struct {
 	ID string `json:"id"`
 }
@@ -129,7 +131,8 @@ type WorkspacePrincipal struct {
 }
 
 type WorkspaceAssignment struct {
-	Principal *WorkspacePrincipal `json:"principal"`
+	Principal   *WorkspacePrincipal `json:"principal"`
+	Permissions []string            `json:"permissions"`
 }
 
 type Role struct {
@@ -139,4 +142,68 @@ type Role struct {
 type RuleSet struct {
 	Principals []string `json:"principals"`
 	Role       string   `json:"role"`
+}
+
+type Metastore struct {
+	MetastoreID string `json:"metastore_id"`
+	Name        string `json:"name"`
+	Region      string `json:"region"`
+	Owner       string `json:"owner"`
+}
+
+// Catalog carries only what resolving an access path needs: which metastore a
+// workspace can list catalogs for.
+type Catalog struct {
+	Name        string `json:"name"`
+	MetastoreID string `json:"metastore_id"`
+}
+
+type PrivilegeAssignment struct {
+	Principal   string      `json:"principal"`
+	PrincipalID json.Number `json:"principal_id"`
+	Privileges  []string    `json:"privileges"`
+}
+
+type PermissionsChange struct {
+	Principal   string      `json:"principal,omitempty"`
+	PrincipalID json.Number `json:"principal_id,omitempty"`
+	Add         []string    `json:"add,omitempty"`
+	Remove      []string    `json:"remove,omitempty"`
+}
+
+func (p PermissionsChange) validate() error {
+	switch {
+	case p.Principal == "" && p.PrincipalID == "":
+		return invalidArgument("a principal or a principal id is required")
+	case p.Principal != "" && p.PrincipalID != "":
+		return invalidArgument("principal %q and principal id %s cannot both be set", p.Principal, p.PrincipalID)
+	case p.PrincipalID != "" && len(p.Add) > 0:
+		return invalidArgument("principal id %s addresses removals only, so it cannot add %v", p.PrincipalID, p.Add)
+	case len(p.Add) == 0 && len(p.Remove) == 0:
+		return invalidArgument("no privileges to add or remove")
+	}
+
+	return nil
+}
+
+type metastoresResponse struct {
+	Metastores []Metastore `json:"metastores"`
+}
+
+type metastoreAssignment struct {
+	MetastoreID string `json:"metastore_id"`
+}
+
+type workspaceMetastoreResponse struct {
+	MetastoreAssignment metastoreAssignment `json:"metastore_assignment"`
+}
+
+type catalogsResponse struct {
+	Catalogs      []Catalog `json:"catalogs"`
+	NextPageToken string    `json:"next_page_token"`
+}
+
+type permissionsResponse struct {
+	PrivilegeAssignments []PrivilegeAssignment `json:"privilege_assignments"`
+	NextPageToken        string                `json:"next_page_token"`
 }

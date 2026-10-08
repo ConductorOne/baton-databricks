@@ -32,7 +32,7 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 }
 
 func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"workspace_id": workspace.ID,
 	}
 

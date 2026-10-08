@@ -65,6 +65,11 @@ func TestResourcesHaveRawId(t *testing.T) {
 			build((&servicePrincipalBuilder{}).servicePrincipalResource(ctx, &databricks.ServicePrincipal{BaseResponse: databricks.BaseResponse{ID: "sp1"}}, account)),
 			"sp1",
 		},
+		{
+			"metastore",
+			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account)),
+			"ms1",
+		},
 	}
 
 	for _, tc := range cases {
