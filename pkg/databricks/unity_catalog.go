@@ -21,6 +21,9 @@ const (
 	// https://docs.databricks.com/api/workspace/catalogs/list
 	unityCatalogCatalogsEndpoint = "/api/2.1/unity-catalog/catalogs"
 
+	// https://docs.databricks.com/api/workspace/schemas/list
+	unityCatalogSchemasEndpoint = "/api/2.1/unity-catalog/schemas"
+
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
@@ -30,6 +33,7 @@ const (
 	// addressed by its UUID: its name is rejected.
 	SecurableMetastore = "metastore"
 	SecurableCatalog   = "catalog"
+	SecurableSchema    = "schema"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
@@ -154,6 +158,31 @@ func (c *Client) ForEachCatalogPage(
 	return forEachPageFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
 		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults)
 	}, visit)
+}
+
+// ListSchemas (GET /api/2.1/unity-catalog/schemas?catalog_name=) pages a catalog's schemas.
+func (c *Client) ListSchemas(
+	ctx context.Context,
+	workspaceId, catalogName, pageToken string,
+	maxResults uint,
+) (
+	[]Schema,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	schemas, next, ratelimitData, err := listSecurables(ctx, c, workspaceId, unityCatalogSchemasEndpoint,
+		func(res *schemasResponse) ([]Schema, string) { return res.Schemas, res.NextPageToken },
+		&unityCatalogVars{
+			catalogName: catalogName,
+			maxResults:  &maxResults,
+			pageToken:   pageToken,
+		})
+	if err != nil {
+		return nil, "", ratelimitData, fmt.Errorf("failed to list schemas in catalog %s: %w", catalogName, err)
+	}
+
+	return schemas, next, ratelimitData, nil
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).

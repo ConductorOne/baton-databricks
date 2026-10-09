@@ -15,6 +15,7 @@ sidebarTitle: "Databricks"
 | Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Schemas | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Service principals | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Users | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Workspaces | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
@@ -29,25 +30,26 @@ Workspace roles (such as **workspace-access** or **databricks-sql-access**) can 
 
 ## Understanding Unity Catalog in Databricks
 
-Unity Catalog is how Databricks governs access to data. A **metastore** is the regional container at the top of it, and it holds **catalogs**. One metastore usually serves several workspaces, so Unity Catalog access is granted once per object rather than once per workspace. The schemas, tables and volumes beneath a catalog are not synced yet.
+Unity Catalog is how Databricks governs access to data. Metastores, catalogs and schemas are its top three objects, and they nest: a **metastore** holds catalogs, and a **catalog** holds schemas. One metastore usually serves several workspaces, so Unity Catalog access is granted once per object rather than once per workspace. The tables and volumes inside a schema are not synced yet.
 
-Databricks records a set of privileges on each of those objects — **USE_CATALOG** and **CREATE_SCHEMA** on a catalog, **CREATE_CATALOG** on a metastore, and so on. C1 turns each privilege into an entitlement on that object, so you can review who holds it, request it, and revoke it for users, groups and service principals at both levels. Each object also carries a read-only **owner** entitlement that shows who owns it; ownership cannot be requested or revoked through C1.
+Databricks records a set of privileges on each of those objects — **USE_CATALOG** on a catalog, **USE_SCHEMA** and **SELECT** on a schema, and so on. C1 turns each privilege into an entitlement on that object, so you can review who holds it, request it, and revoke it for users, groups and service principals at every level. Each object also carries a read-only **owner** entitlement that shows who owns it; ownership cannot be requested or revoked through C1.
 
 When a group holds a privilege, C1 shows the group's members as holders of it, so access granted to a team still resolves to the people who have it.
 
 <Note>
-The two Unity Catalog resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1.
+The three Unity Catalog resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1.
 
-Because C1 doesn't know a resource type exists until a sync reports it, the first sync covers both, which can take a long time on a large metastore. Narrow that first run using the **Catalogs** or **Exclude Catalogs** settings described below, then turn on the types you want.
+Because C1 doesn't know a resource type exists until a sync reports it, the first sync covers all three, which can take a long time on a large metastore. Narrow that first run using the **Catalogs** or **Exclude Catalogs** settings described below, then turn on the types you want.
 </Note>
 
 <Note>
 **Notes on Unity Catalog access in C1:**
 
-- C1 shows the privileges recorded directly on each object. Unity Catalog privileges inherit downward, and inherited access stays on the object that carries it rather than being repeated on everything beneath it — so a catalog that inherits **READ_METADATA** from its metastore shows no holders of its own, because the grant lives on the metastore.
+- C1 shows the privileges recorded directly on each object. Unity Catalog privileges inherit downward, and inherited access stays on the object that carries it rather than being repeated on everything beneath it — so a schema under a catalog that grants **SELECT** to a group shows no holders of its own, because the grant lives on the catalog.
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
+- `information_schema` is skipped, along with everything under it.
 - Unity Catalog tags are not synced.
-- Narrowing the **Catalogs** setting, or adding to **Exclude Catalogs**, after a successful sync removes the catalogs that drop out from C1.
+- Narrowing the **Catalogs** setting, or adding to **Exclude Catalogs**, after a successful sync removes the catalogs that drop out — and everything under them — from C1.
 - Grants are ingested a few minutes behind resources, so an object can briefly show no access right after a sync.
 </Note>
 
@@ -115,7 +117,7 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
 
 ### Let the service principal read Unity Catalog privileges
 
-Skip this section if you are not syncing metastores or catalogs, or if you already made the service principal a workspace **Admin** in the step above — that is enough on its own.
+Skip this section if you are not syncing metastores, catalogs or schemas, or if you already made the service principal a workspace **Admin** in the step above — that is enough on its own.
 
 Otherwise, pick one of the two options below. They are alternatives to each other — do not do both.
 
@@ -214,7 +216,7 @@ To complete this task, you'll need:
     - **Catalogs**: the only catalogs Unity Catalog syncing covers, by catalog name.
     - **Exclude Catalogs**: catalogs to leave out of Unity Catalog syncing, by catalog name.
 
-  Fill in **Workspaces** or **Exclude Workspaces**, not both. Fill in **Catalogs** or **Exclude Catalogs**, not both — setting both stops the connector from starting.
+  Fill in **Workspaces** or **Exclude Workspaces**, not both. The schemas under a catalog follow the catalog. Fill in **Catalogs** or **Exclude Catalogs**, not both — setting both stops the connector from starting.
   </Step>
   <Step>
   **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks account hostname and hostname in the **Account Hostname** and **Hostname** fields.

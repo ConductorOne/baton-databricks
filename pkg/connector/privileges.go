@@ -52,6 +52,9 @@ var (
 		privilegeManage,
 	}
 
+	// schemaPrivileges is the catalog set minus the three a schema rejects.
+	schemaPrivileges = withoutPrivileges(catalogPrivileges, "BROWSE", "CREATE_SCHEMA", "USE_CATALOG")
+
 	// metastorePrivileges is the set for the metastore itself. ALL_PRIVILEGES and MANAGE
 	// are both rejected here, which is why a metastore's grant visibility cannot be
 	// answered by a privilege read. READ_METADATA is the only entry that inherits down.
@@ -84,6 +87,12 @@ var (
 		"USAGE",
 	}
 )
+
+func withoutPrivileges(privileges []string, drop ...string) []string {
+	return slices.DeleteFunc(slices.Clone(privileges), func(privilege string) bool {
+		return slices.Contains(drop, privilege)
+	})
+}
 
 // An alias is never in a level's set, so this only changes the explanation.
 func isLegacyPrivilege(privilege string) bool {
