@@ -27,6 +27,12 @@ type routingSnapshot struct {
 	workspaceIDs map[string]string
 	unusable     []string
 	asked        int
+
+	// unreadable names the in-scope workspaces that answered neither their
+	// assignment nor a catalog listing, so what they serve is unknown rather than
+	// known to be nothing. It is separate from unusable, where a successful but
+	// empty catalog listing settles that the workspace carries nothing.
+	unreadable []string
 }
 
 // unityCatalog holds no state beyond the client and the workspace filter: every
@@ -108,7 +114,13 @@ func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.R
 	// listed-but-unreachable. Keeping it would make every securable under it fail
 	// with FailedPrecondition, so scoping a sync to one workspace would break the
 	// sync for every metastore the other workspaces hold.
-	if len(u.workspaces) > 0 {
+	//
+	// Only when every in-scope workspace answered, though. An unrouted metastore
+	// means "out of scope" only if the workspaces left out are the reason; if an
+	// in-scope workspace could not be read, the same metastore may well be one it
+	// serves, and dropping it here would report it deleted and take its grants
+	// with it. Unknown is not absence, so that case keeps the loud failure.
+	if len(u.workspaces) > 0 && len(snap.unreadable) == 0 {
 		for metastoreID := range snap.metastores {
 			if len(snap.workspaces[metastoreID]) == 0 {
 				delete(snap.metastores, metastoreID)
@@ -196,7 +208,7 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 
 	// A catalog payload names its metastore, so the listing settles which metastore
 	// this workspace serves, if any.
-	var unusable []string
+	var unusable, unreadable []string
 	for _, workspace := range unassigned {
 		if err := ctx.Err(); err != nil {
 			return rateLimit, err
@@ -208,7 +220,9 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 		}
 		if err != nil {
 			if isUnreadableWorkspaceError(err) {
+				// Neither endpoint answered, so this workspace's metastores are unknown.
 				unusable = append(unusable, workspace)
+				unreadable = append(unreadable, workspace)
 
 				continue
 			}
@@ -245,6 +259,7 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 	}
 
 	snap.unusable = unusable
+	snap.unreadable = unreadable
 	snap.asked = asked
 
 	return rateLimit, nil

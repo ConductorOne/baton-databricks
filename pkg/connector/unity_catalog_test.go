@@ -124,6 +124,19 @@ func TestLookupDoesNotFallBackFromAnUnknownID(t *testing.T) {
 func routingHandler(t *testing.T, assignments map[string]any, probed map[string]int) http.HandlerFunc {
 	t.Helper()
 
+	return routingHandlerWithCatalogs(t, assignments, nil, probed)
+}
+
+// catalogStatus, keyed by deployment name, makes the catalog listing fail for a
+// workspace, which is how a credential that is not a member of it answers.
+func routingHandlerWithCatalogs(
+	t *testing.T,
+	assignments map[string]any,
+	catalogStatus map[string]int,
+	probed map[string]int,
+) http.HandlerFunc {
+	t.Helper()
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
@@ -156,7 +169,13 @@ func routingHandler(t *testing.T, assignments map[string]any, probed map[string]
 				http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
 			}
 		default:
-			probed[r.Header.Get("X-Test-Workspace")]++
+			workspace := r.Header.Get("X-Test-Workspace")
+			probed[workspace]++
+			if status, ok := catalogStatus[workspace]; ok {
+				http.Error(w, `{"message":"denied"}`, status)
+
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": []map[string]any{}})
 		}
 	}
@@ -214,6 +233,36 @@ func TestAMetastoreOnlyAnOutOfScopeWorkspaceReachesIsAbsentRatherThanFatal(t *te
 	}
 	if exists || workspace != "" {
 		t.Errorf("ms-b resolved to workspace %q (exists=%v), want absent", workspace, exists)
+	}
+}
+
+// Dropping an unrouted metastore is only safe when the workspaces left out are
+// the reason it is unrouted. An in-scope workspace that answered neither its
+// assignment nor a catalog listing may be exactly the one serving it, so pruning
+// there would report the metastore deleted and take its grants with it. Failing
+// the sync is recoverable; a deletion is not.
+func TestAnUnreadableInScopeWorkspaceStopsTheMetastoreFromBeingPruned(t *testing.T) {
+	probed := map[string]int{}
+	client, _ := newWorkspaceRoutedClient(t, routingHandlerWithCatalogs(t,
+		map[string]any{"1": "ms-a", "2": http.StatusForbidden},
+		map[string]int{"wsb": http.StatusForbidden},
+		probed))
+
+	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod", "dev"}))
+	snap, _, err := uc.buildRouting(context.Background())
+	if err != nil {
+		t.Fatalf("buildRouting: %v", err)
+	}
+
+	if !slices.Contains(snap.unreadable, "wsb") {
+		t.Fatalf("unreadable = %v, want it to name wsb", snap.unreadable)
+	}
+	if _, ok := snap.metastores["ms-b"]; !ok {
+		t.Fatal("ms-b was pruned while an in-scope workspace was unreadable, so C1 would delete it and its grants")
+	}
+
+	if _, _, _, err := workspaceFromSnapshot(snap, "ms-b", nil); err == nil {
+		t.Error("ms-b resolved without an error, want the sync to fail loudly rather than report an absence")
 	}
 }
 
