@@ -88,6 +88,19 @@ func nameWorkspace403Remedy(workspaceId string, err error) error {
 	return err
 }
 
+type noCacheKey struct{}
+
+// WithoutCache marks ctx so GETs made with it bypass the uhttp response cache, for
+// callers that need fresh data (statement polling, incremental-sync refreshes).
+func WithoutCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noCacheKey{}, true)
+}
+
+func isNoCache(ctx context.Context) bool {
+	v, _ := ctx.Value(noCacheKey{}).(bool)
+	return v
+}
+
 func (c *Client) Get(
 	ctx context.Context,
 	urlAddress *url.URL,
@@ -186,6 +199,9 @@ func (c *Client) doRequest(
 	}
 	if body != nil {
 		options = append(options, uhttp.WithJSONBody(body))
+	}
+	if method == http.MethodGet && isNoCache(ctx) {
+		options = append(options, uhttp.WithNoCache())
 	}
 
 	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)

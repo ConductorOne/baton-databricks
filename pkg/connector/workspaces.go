@@ -239,6 +239,27 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	return rv, nil, nil
 }
 
+// Get re-fetches a single workspace, used to re-sync it after a RESOURCE_CHANGE event.
+// GetWorkspace excludes it the same way ListWorkspaces does, so a deliberately excluded
+// workspace naturally comes back not-found rather than needing a separate check here.
+func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	workspace, rateLimitData, err := w.client.GetWorkspace(databricks.WithoutCache(ctx), resourceId.Resource)
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return nil, annos, fmt.Errorf("databricks-connector: failed to get workspace %s: %w", resourceId.Resource, err)
+	}
+
+	resource, err := workspaceResource(ctx, workspace, parentResourceId)
+	if err != nil {
+		return nil, annos, err
+	}
+
+	return resource, annos, nil
+}
+
 func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
