@@ -521,9 +521,12 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 				ref.catalog(), databricks.SecurableSchema, ref.permissionsName(), b.uc.scope.describe())
 		}
 
-		return annos, status.Errorf(codes.NotFound,
-			"databricks-connector: catalog %s is no longer listed in metastore %s, so %s %s cannot be changed",
-			ref.catalog(), ref.metastoreID, databricks.SecurableSchema, ref.permissionsName())
+		// The catalog is gone, so the schema's privilege is gone with it and the end
+		// state the revoke asked for already holds. Reporting NotFound instead would
+		// fail the task on every retry against a securable that can never return.
+		annos.Update(&v2.GrantAlreadyRevoked{})
+
+		return annos, nil
 	}
 
 	trustworthy, rateLimit, err := b.uc.grantsAreTrustworthy(ctx, snap, ref, workspace)
@@ -581,7 +584,7 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 	}
 
 	var seen []databricks.PrivilegeAssignment
-	rateLimit, err = b.client.ForEachPermissionsPage(ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "",
+	rateLimit, err = b.client.ForEachUncachedPermissionsPage(ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "",
 		func(page []databricks.PrivilegeAssignment) (bool, error) {
 			seen = append(seen, page...)
 			matched, ok := matchHeld(seen)
