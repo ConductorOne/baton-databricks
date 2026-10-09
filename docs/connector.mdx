@@ -12,6 +12,7 @@ sidebarTitle: "Databricks"
 | :--- | :--- | :--- |
 | Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Service principals | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Users | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
@@ -25,6 +26,28 @@ Workspace roles (such as **workspace-access** or **databricks-sql-access**) can 
 
 [This connector syncs non-human identities](/product/admin/nhi) and displays them on the **Identities overview** dashboard.
 
+## Understanding Unity Catalog in Databricks
+
+Unity Catalog is how Databricks governs access to data, and a **metastore** is the top of it: it is the regional container that holds the catalogs, schemas, tables and volumes underneath. One metastore usually serves several workspaces, so Unity Catalog access is granted once per object rather than once per workspace.
+
+Databricks records a set of privileges on a metastore — **CREATE_CATALOG**, **READ_METADATA**, **USE_SHARE**, and so on. C1 turns each privilege into an entitlement on the metastore, so you can review who holds it, request it, and revoke it for users, groups and service principals. The metastore also carries a read-only **owner** entitlement that shows who owns it; ownership cannot be requested or revoked through C1.
+
+When a group holds a privilege, C1 shows the group's members as holders of it, so access granted to a team still resolves to the people who have it.
+
+<Note>
+The Metastores resource type is turned off by default. Turn it on from the connector's configuration page in C1.
+</Note>
+
+<Note>
+**Notes on Unity Catalog access in C1:**
+
+- C1 shows the privileges recorded directly on the metastore. Unity Catalog privileges inherit downward, and inherited access stays on the object that carries it rather than being repeated on everything beneath it.
+- Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
+- **MANAGE** and **ALL_PRIVILEGES** are not offered as entitlements, because Databricks rejects both at the metastore level.
+- Unity Catalog tags are not synced.
+- Grants are ingested a few minutes behind resources, so an object can briefly show no access right after a sync.
+</Note>
+
 ## Authentication methods
 
 The connector authenticates with **OAuth** — an account-level service principal's client ID and secret. This is the only authentication method the connector supports.
@@ -37,6 +60,8 @@ Configuring the connector requires you to pass in credentials generated in Datab
 A user with the **Account admin** role in each Databricks workspace you want to sync must perform this task.
 </Warning>
 
+Every step below happens in the Databricks **account console**. On AWS that is [https://accounts.cloud.databricks.com](https://accounts.cloud.databricks.com). Azure Databricks and Google Cloud Platform customers use their own account console host, and also have to supply the account hostname and hostname when they configure the connector.
+
 ### Look up your Databricks account ID
 
 <Steps>
@@ -47,22 +72,64 @@ A user with the **Account admin** role in each Databricks workspace you want to 
   In the Databricks account console, open the menu that appears next to your username in the upper right corner.
   </Step>
   <Step>
-  Carefully and copy and save account ID.
+  Carefully copy and save the account ID.
   </Step>
 </Steps>
 
-### Generate Databricks credentials
+### Create a service principal and an OAuth secret
 
 The Databricks connector authenticates with OAuth, which syncs info from all Databricks workspaces the service principal can access.
 
 <Steps>
   <Step>
-  Follow the [Databricks OAuth authentication documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and create an OAuth secret.
+  In the account console, go to **User management** > **Service principals** and click **Add service principal**. Give it a name you will recognize, such as `ConductorOne`.
   </Step>
   <Step>
-  Carefully copy and save the OAuth client ID and secret.
+  Open the new service principal, go to its **Secrets** tab, and generate an OAuth secret.
+
+  Carefully copy and save the **Client ID** and **Secret**. The secret is shown only once.
+
+  For the full walkthrough, see the [Databricks OAuth machine-to-machine documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html).
   </Step>
 </Steps>
+
+<Note>
+There is no scope to pick in the console. The connector requests the `all-apis` scope itself when it exchanges the client ID and secret for a token, which covers the four API surfaces it reads: Unity Catalog, SCIM, access management and account provisioning.
+</Note>
+
+### Grant the service principal the roles it needs
+
+<Steps>
+  <Step>
+  Make the service principal an account admin: in the account console, go to **User management** > **Service principals**, open the service principal, select its **Roles** tab, and enable **Account admin**.
+  </Step>
+  <Step>
+  Assign it to each workspace you want C1 to sync, as an admin: in the account console, go to **Workspaces**, open the workspace, select **Permissions**, click **Add permissions**, select the service principal, and choose **Admin**.
+
+  Repeat this for every workspace you want synced. Workspace **Admin** also satisfies the Unity Catalog requirement in the next step for every catalog reached through that workspace.
+  </Step>
+</Steps>
+
+### Let the service principal read Unity Catalog privileges
+
+Skip this section if you are not syncing metastores, or if you already made the service principal a workspace **Admin** in the step above — that is enough on its own.
+
+Otherwise, make the service principal a metastore admin:
+
+<Steps>
+  <Step>
+  In the account console, go to **Catalog** and open the metastore.
+  </Step>
+  <Step>
+  Set the **Metastore Admin** field to the service principal's application ID.
+  </Step>
+</Steps>
+
+<Warning>
+This Unity Catalog permission is a hard requirement, not a recommendation. When a service principal without it reads the privileges on a metastore, Databricks returns a partial list rather than an error, and a partial list is indistinguishable from an object that has no access granted on it at all. C1 would read the privileges missing from that list as access that had been revoked. Rather than report an incomplete picture, the connector stops the sync and names the metastore it could not read in full.
+</Warning>
+
+For more information, see the [Databricks Unity Catalog privileges documentation](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges).
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
 
@@ -117,10 +184,19 @@ To complete this task, you'll need:
   Enter your OAuth client ID and client secret into the **OAuth2 Client ID** and **OAuth2 Client Secret** fields.
   </Step>
   <Step>
-  **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks account hostname and hostname in the relevant fields.
+  Optionally, narrow what the connector syncs:
+
+    - **Workspaces**: limit the sync to these workspaces, by workspace name, deployment name, or numeric workspace ID.
+    - **Exclude Workspaces**: workspaces to leave out of the sync, by workspace name, deployment name, or numeric workspace ID.
+
+  Fill in **Workspaces** or **Exclude Workspaces**, not both.
+  </Step>
+  <Step>
+  **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks account hostname and hostname in the **Account Hostname** and **Hostname** fields.
     - For more on how to look up these values for GCP, see the GCP Databricks [REST API reference](https://docs.databricks.com/api/gcp/account/introduction) and [identifiers for workspace objects](https://docs.gcp.databricks.com/en/workspace/workspace-details.html) documentation.
     - For more on how to look up these values for Azure Databricks, see the the Azure Databricks [REST API reference](https://docs.databricks.com/api/azure/account/introduction) and [identifiers for workspace objects](https://learn.microsoft.com/en-us/azure/databricks/workspace/workspace-details) documentation.
   </Step>
+
   <Step>
   Click **Save**.
   </Step>
@@ -224,6 +300,10 @@ stringData:
 OAuth requires a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
 </Note>
 
+<Note>
+**Accounts with many workspaces:** to decide which metastore each workspace serves, the connector may list a workspace's catalogs, and it holds one such listing per workspace while it runs — so a wider account needs a larger buffer. The 5 MB default suits about ten workspaces with a few hundred catalogs each. Above that the connector re-reads listings it has already fetched, which lengthens the sync and uses more of your Databricks API rate limit. Set `BATON_HTTP_CACHE_MAX_SIZE` to a larger number of megabytes in the Secret above.
+</Note>
+
 See the connector's README or run `--help` to see all available configuration flags and environment variables.
 
 #### Deployment configuration
@@ -274,3 +354,7 @@ spec:
 
 </Tab>
 </Tabs>
+
+<Tip>
+Stable binaries and container images for the Databricks connector are available from the [official download center](https://dist.conductorone.com/ConductorOne/baton-databricks).
+</Tip>

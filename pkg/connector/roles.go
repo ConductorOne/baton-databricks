@@ -45,7 +45,7 @@ func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 
 func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.Resource, error) {
 	var roleID string
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"role_name":   role,
 		"parent_type": parent.ResourceType,
 		"parent_id":   parent.Resource,

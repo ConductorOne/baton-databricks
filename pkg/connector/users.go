@@ -42,7 +42,7 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 	}
 
 	firstName, lastName := rs.SplitFullName(user.DisplayName)
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"first_name": firstName,
 		"last_name":  lastName,
 		"email":      primaryEmail,

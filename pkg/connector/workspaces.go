@@ -32,7 +32,7 @@ func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 }
 
 func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"workspace_id": workspace.ID,
 	}
 
@@ -300,15 +300,21 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	return nil, nil
 }
 
-func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
+// configuredWorkspaceSet indexes the allowlist. Both the workspace builder and
+// Unity Catalog routing filter on it, so they read it from one place.
+func configuredWorkspaceSet(workspaces []string) map[string]struct{} {
 	wMap := make(map[string]struct{}, len(workspaces))
 	for _, w := range workspaces {
 		wMap[w] = struct{}{}
 	}
 
+	return wMap
+}
+
+func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
 	return &workspaceBuilder{
 		client:       client,
 		resourceType: workspaceResourceType,
-		workspaces:   wMap,
+		workspaces:   configuredWorkspaceSet(workspaces),
 	}
 }

@@ -5,7 +5,7 @@
 `baton-databricks` is a connector for Databricks built using the
 [Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
 Databricks API, to sync data about Databricks identities (users, groups and
-service principals), roles and workspaces.
+service principals), roles, workspaces and Unity Catalog metastores.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
@@ -29,6 +29,11 @@ button and name it. You then need to add an OAuth secret to it by clicking on
 the Generate secret button. You can use this secret to authenticate across all
 workspaces that service principal has access to. This requires admin access to
 the Databricks account and each workspace you want to sync.
+
+Syncing Unity Catalog needs more than account admin on its own: the service
+principal also has to be able to read the privileges recorded on each metastore.
+See [Unity Catalog permissions](#unity-catalog-permissions) for the exact
+requirement.
 
 # Using Azure Databricks
 
@@ -76,11 +81,15 @@ baton resources
 - Service Principals
 - Users
 - Roles
+- Metastores
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
 workspaces to the `--workspaces` flag. Each entry can be a workspace name,
 deployment name, or numeric workspace ID, matched case-insensitively.
+
+Metastores are Unity Catalog securables and are opt-in: the type stays off until
+it is enabled for the connector in ConductorOne.
 
 ## Authentication
 
@@ -114,6 +123,70 @@ can be granted and revoked.
 A workspace entitlement can only be granted to a principal that is already
 assigned to that workspace. Otherwise the grant fails with a
 `FailedPrecondition` error; grant the workspace membership first.
+
+## Unity Catalog
+
+A metastore is the top of the Databricks Unity Catalog hierarchy. The resource
+tree the connector syncs is:
+
+```
+account
+├── workspace
+│   └── role
+├── user
+├── group
+├── service principal
+└── metastore
+```
+
+A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
+`READ_METADATA`, `USE_SHARE` and so on) plus a non-grantable `owner`. A
+privilege held by a group is expandable, so ConductorOne resolves the group's
+members as holders.
+
+`MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
+metastore level.
+
+The endpoints, the permission model, principal resolution and the connector's
+limitations are in [docs/docs-info.md](./docs/docs-info.md).
+
+## Unity Catalog provisioning
+
+A metastore privilege can be granted to and revoked from a user, group or
+service principal. The `owner` entitlement is read-only: granting or revoking it
+fails with an `InvalidArgument` error.
+
+## Unity Catalog permissions
+
+Unity Catalog uses the same OAuth service principal as the rest of the
+connector. It must be an account admin, and it must be assigned to a running
+workspace the metastore is attached to, because the privilege endpoints are not
+served on the account plane. To read a metastore's grants it must additionally
+own the metastore or be an admin of that workspace — a privilege read cannot
+settle it, since `MANAGE` is rejected there. When neither holds, the connector
+fails the sync with a `PermissionDenied` error naming the metastore rather than
+reporting a partial read. The scopes, roles and privileges behind each read, and
+the reason the connector fails closed, are in
+[docs/docs-info.md](./docs/docs-info.md).
+
+## Accounts with many workspaces
+
+Deciding which metastore a workspace serves needs a catalog listing from each
+workspace that reports no metastore assignment, so the connector caches those
+listings for the length of a run and keeps one per workspace. The working set
+grows with the number of workspaces in the account.
+
+The default budget is 5 MB, which covers roughly ten workspaces holding a few
+hundred catalogs each. Past that the cache evicts and the connector re-lists
+catalogs it has already read, which lengthens the sync and uses more of the
+Databricks API rate limit. Raising the budget removes the re-reads:
+
+```
+BATON_HTTP_CACHE_MAX_SIZE=32 baton-databricks
+```
+
+The value is in megabytes. It is a Baton SDK setting rather than a connector
+flag, so it does not appear in `--help`.
 
 # Contributing, Support and Issues
 

@@ -102,7 +102,7 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 		Host:   accountHostname,
 	}
 
-	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient)
+	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient, uhttp.WithCacheKeyHeaders(cacheScopeHeader))
 	return &Client{
 		httpClient:        cli,
 		auth:              auth,

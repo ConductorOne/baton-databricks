@@ -14,12 +14,19 @@ import (
 )
 
 type Databricks struct {
-	client     *databricks.Client
-	workspaces []string
+	client       *databricks.Client
+	workspaces   []string
+	unityCatalog *unityCatalog
+	opts         *cli.ConnectorOpts
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+	willSync := func(string) bool { return true }
+	if d.opts != nil {
+		willSync = d.opts.WillSyncResourceType
+	}
+
 	syncers := []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
@@ -27,6 +34,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
+		newMetastoreBuilder(d.client, d.unityCatalog, willSync),
 	}
 
 	return syncers
@@ -42,7 +50,8 @@ func (d *Databricks) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.
 func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
-		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton",
+		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton, " +
+			"along with Unity Catalog metastores and the privileges granted on them",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"email": {
@@ -119,16 +128,19 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	return nil, nil
 }
 
-// New returns a new instance of the connector.
+// New returns a new instance of the connector. clientID is the application id of
+// the service principal the connector authenticates as.
 func New(
 	ctx context.Context,
 	hostname,
 	accountHostname,
 	accountID,
-	baseURL string,
+	baseURL,
+	clientID string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
+	opts *cli.ConnectorOpts,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -141,13 +153,15 @@ func New(
 	}
 
 	return &Databricks{
-		client:     client,
-		workspaces: workspaces,
+		client:       client,
+		workspaces:   workspaces,
+		unityCatalog: newUnityCatalog(client, clientID, configuredWorkspaceSet(workspaces)),
+		opts:         opts,
 	}, nil
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 	auth := prepareClientAuth(cfg)
 
@@ -157,9 +171,11 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		accountHostname,
 		cfg.AccountId,
 		cfg.BaseUrl,
+		cfg.DatabricksClientId,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
+		opts,
 	)
 	if err != nil {
 		return nil, nil, err
