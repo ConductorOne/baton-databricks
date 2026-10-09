@@ -19,6 +19,17 @@ const (
 	workspaceStatusRunning = "RUNNING"
 )
 
+// catalogFacts is one catalog plus the workspace host its subtree is read through.
+// An empty workspace means the catalog is listed but no workspace this sync covers
+// can reach it, which is a state and not an absence.
+type catalogFacts struct {
+	name          string
+	owner         string
+	catalogType   string
+	isolationMode string
+	workspace     string
+}
+
 // routingSnapshot is the account's Unity Catalog access paths for the call that
 // just listed them. Nothing on the connector keeps it.
 type routingSnapshot struct {
@@ -27,6 +38,7 @@ type routingSnapshot struct {
 	workspaceIDs map[string]string
 	unusable     []string
 	asked        int
+	catalogs     map[string]map[string]catalogFacts
 
 	// unreadable names the in-scope workspaces that answered neither their
 	// assignment nor a catalog listing, so what they serve is unknown rather than
@@ -35,13 +47,16 @@ type routingSnapshot struct {
 	unreadable []string
 }
 
-// unityCatalog holds no state beyond the client and the workspace filter: every
-// call asks Databricks and drops the answer when it returns.
+// unityCatalog holds no state beyond the client and the filters: every call asks
+// Databricks and drops the answer when it returns.
 type unityCatalog struct {
 	client *databricks.Client
 
 	// ownPrincipal is the applicationId of the service principal the connector authenticates as.
 	ownPrincipal string
+
+	// scope is applied when catalogs are collected, so a filtered catalog is absent exactly as a deleted one is.
+	scope catalogFilter
 
 	// workspaces is the configured allowlist, empty when none was given. Every
 	// Unity Catalog read is addressed to a workspace, so routing through one the
@@ -51,12 +66,70 @@ type unityCatalog struct {
 	workspaces map[string]struct{}
 }
 
-func newUnityCatalog(client *databricks.Client, ownPrincipal string, workspaces map[string]struct{}) *unityCatalog {
+func newUnityCatalog(
+	client *databricks.Client,
+	ownPrincipal string,
+	scope catalogFilter,
+	workspaces map[string]struct{},
+) *unityCatalog {
 	return &unityCatalog{
 		client:       client,
 		ownPrincipal: ownPrincipal,
+		scope:        scope,
 		workspaces:   workspaces,
 	}
+}
+
+func (u *unityCatalog) catalogsFor(ctx context.Context, metastoreID string) (map[string]catalogFacts, *v2.RateLimitDescription, error) {
+	snap, rateLimit, err := u.buildRouting(ctx)
+	if err != nil {
+		return nil, rateLimit, err
+	}
+
+	facts, err := catalogsFromSnapshot(snap, metastoreID)
+
+	return facts, rateLimit, err
+}
+
+func catalogsFromSnapshot(snap routingSnapshot, metastoreID string) (map[string]catalogFacts, error) {
+	if _, err := requireUsable(snap, metastoreID); err != nil {
+		return nil, err
+	}
+
+	facts := snap.catalogs[metastoreID]
+	if facts == nil {
+		facts = map[string]catalogFacts{}
+	}
+
+	return facts, nil
+}
+
+// accessCatalog resolves the workspace a catalog-scoped securable is read through.
+// A catalog recorded with an empty workspace errors, because emitting it as absent
+// would delete it. A catalog the snapshot does not hold is gone (or out of scope).
+func accessCatalog(
+	snap routingSnapshot,
+	ref securableRef,
+	securableType string,
+	rateLimit *v2.RateLimitDescription,
+) (string, bool, *v2.RateLimitDescription, error) {
+	catalogs, err := catalogsFromSnapshot(snap, ref.metastoreID)
+	if err != nil {
+		return "", false, rateLimit, err
+	}
+	facts, ok := catalogs[ref.catalog()]
+	if !ok {
+		return "", false, rateLimit, nil
+	}
+	if facts.workspace == "" {
+		return "", true, rateLimit, status.Errorf(codes.PermissionDenied,
+			"databricks-connector: catalog %s exists in metastore %s but no workspace this sync covers can reach it, "+
+				"so %s %s cannot be read; grant the connector principal USE_CATALOG on the catalog, bind it to a workspace "+
+				"this sync covers, or remove that workspace from databricks-exclude-workspaces",
+			ref.catalog(), ref.metastoreID, securableType, ref.permissionsName())
+	}
+
+	return facts.workspace, true, rateLimit, nil
 }
 
 func workspaceFromSnapshot(snap routingSnapshot, metastoreID string, rateLimit *v2.RateLimitDescription) (string, bool, *v2.RateLimitDescription, error) {
@@ -66,6 +139,20 @@ func workspaceFromSnapshot(snap routingSnapshot, metastoreID string, rateLimit *
 	}
 
 	return workspaces[0], true, rateLimit, nil
+}
+
+// requireUsable fails when the metastore is on the account and no workspace can
+// read it. A metastore that is gone is an absence, not an error.
+func requireUsable(snap routingSnapshot, metastoreID string) ([]string, error) {
+	workspaces, exists, err := usableWorkspaces(snap, metastoreID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	return workspaces, nil
 }
 
 func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, bool, error) {
@@ -97,7 +184,7 @@ type deferredWorkspace struct {
 	denied bool
 }
 
-// buildRouting lists metastores and the workspaces each one is reachable through.
+// buildRouting lists metastores, workspace attachments and reachable catalogs.
 func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.RateLimitDescription, error) {
 	metastores, rateLimit, err := u.listMetastores(ctx)
 	if err != nil {
@@ -108,6 +195,7 @@ func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.R
 		metastores:   metastores,
 		workspaces:   make(map[string][]string),
 		workspaceIDs: make(map[string]string),
+		catalogs:     make(map[string]map[string]catalogFacts),
 	}
 
 	workspaceRateLimit, err := u.fillWorkspaces(ctx, &snap)
@@ -135,6 +223,20 @@ func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.R
 				delete(snap.metastores, metastoreID)
 			}
 		}
+	}
+
+	for metastoreID, workspaces := range snap.workspaces {
+		if len(workspaces) == 0 {
+			continue
+		}
+		facts, catalogRateLimit, err := u.collectCatalogs(ctx, metastoreID, workspaces)
+		if catalogRateLimit != nil {
+			rateLimit = catalogRateLimit
+		}
+		if err != nil {
+			return routingSnapshot{}, rateLimit, err
+		}
+		snap.catalogs[metastoreID] = facts
 	}
 
 	return snap, rateLimit, nil
@@ -315,4 +417,77 @@ func (u *unityCatalog) metastoresServedBy(ctx context.Context, workspace string)
 	slices.Sort(metastoreIDs)
 
 	return metastoreIDs, rateLimit, nil
+}
+
+// collectCatalogs unions a metastore's catalogs across every attached workspace.
+// An ISOLATED catalog is only listable from the workspaces bound to it, and a
+// workspace that cannot reach one omits it without failing.
+func (u *unityCatalog) collectCatalogs(ctx context.Context, metastoreID string, workspaces []string) (map[string]catalogFacts, *v2.RateLimitDescription, error) {
+	var rateLimit *v2.RateLimitDescription
+	facts := make(map[string]catalogFacts)
+	var seen []string
+	for _, workspace := range workspaces {
+		catalogs, pageRateLimit, err := u.client.DrainCatalogs(ctx, workspace, ResourcesPageSize)
+		if pageRateLimit != nil {
+			rateLimit = pageRateLimit
+		}
+		if err != nil {
+			return nil, rateLimit, fmt.Errorf("failed to list catalogs through workspace %s: %w", workspace, err)
+		}
+
+		for _, catalog := range catalogs {
+			name := catalog.Name
+			if name == "" {
+				continue
+			}
+			if catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID {
+				continue
+			}
+
+			seen = append(seen, name)
+
+			// Filtered here so an out-of-scope catalog never enters the snapshot,
+			// and every lookup reports it absent rather than unreachable.
+			if !u.scope.covers(name) {
+				continue
+			}
+
+			entry := catalogFacts{
+				name:          name,
+				owner:         catalog.Owner,
+				catalogType:   catalog.CatalogType,
+				isolationMode: catalog.IsolationMode,
+				workspace:     workspace,
+			}
+
+			// An absent accessible_in_current_workspace and a false one are different
+			// answers, so the catalog is still recorded: only "not listed" means gone.
+			if catalog.AccessibleInCurrentWorkspace != nil && !*catalog.AccessibleInCurrentWorkspace {
+				entry.workspace = ""
+				if _, ok := facts[name]; !ok {
+					facts[name] = entry
+				}
+
+				continue
+			}
+			if existing, ok := facts[name]; ok && existing.workspace != "" {
+				// Another workspace already derived the same resource key.
+				continue
+			}
+
+			facts[name] = entry
+		}
+	}
+
+	if u.scope.configured() {
+		// An entry matching nothing looks identical to a working filter, so it is named.
+		ctxzap.Extract(ctx).Debug("databricks-connector: applied the catalog filter",
+			zap.String("metastore", metastoreID),
+			zap.String("field", u.scope.describe()),
+			zap.Int("in_scope", len(facts)),
+			zap.Strings("entries_matching_no_catalog", u.scope.unmatched(seen)),
+		)
+	}
+
+	return facts, rateLimit, nil
 }

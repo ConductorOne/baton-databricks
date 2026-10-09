@@ -5,7 +5,7 @@
 `baton-databricks` is a connector for Databricks built using the
 [Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
 Databricks API, to sync data about Databricks identities (users, groups and
-service principals), roles, workspaces and Unity Catalog metastores.
+service principals), roles, workspaces and Unity Catalog metastores and catalogs.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
@@ -31,7 +31,7 @@ workspaces that service principal has access to. This requires admin access to
 the Databricks account and each workspace you want to sync.
 
 Syncing Unity Catalog needs more than account admin on its own: the service
-principal also has to be able to read the privileges recorded on each metastore.
+principal also has to be able to read the privileges recorded on each catalog.
 See [Unity Catalog permissions](#unity-catalog-permissions) for the exact
 requirement.
 
@@ -82,14 +82,15 @@ baton resources
 - Users
 - Roles
 - Metastores
+- Catalogs
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
 workspaces to the `--workspaces` flag. Each entry can be a workspace name,
 deployment name, or numeric workspace ID, matched case-insensitively.
 
-Metastores are Unity Catalog securables and are opt-in: the type stays off until
-it is enabled for the connector in ConductorOne.
+The last two resource types are Unity Catalog securables and are opt-in: each
+one stays off until it is enabled for the connector in ConductorOne.
 
 ## Authentication
 
@@ -126,8 +127,8 @@ assigned to that workspace. Otherwise the grant fails with a
 
 ## Unity Catalog
 
-A metastore is the top of the Databricks Unity Catalog hierarchy. The resource
-tree the connector syncs is:
+Metastores and catalogs are the top two levels of Databricks Unity Catalog. The
+resource hierarchy the connector syncs is:
 
 ```
 account
@@ -137,49 +138,55 @@ account
 ├── group
 ├── service principal
 └── metastore
+    └── catalog
 ```
 
-A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
-`READ_METADATA`, `USE_SHARE` and so on) plus a non-grantable `owner`. A
+Schemas, tables and volumes are not synced yet.
+
+Both levels expose their privileges as entitlements (`USE_CATALOG`, `SELECT`,
+`CREATE_SCHEMA` and so on) plus a non-grantable `owner`. A
 privilege held by a group is expandable, so ConductorOne resolves the group's
 members as holders.
 
-`MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
-metastore level.
+`--databricks-catalogs` (`BATON_DATABRICKS_CATALOGS`) limits Unity Catalog
+syncing to the catalogs named in it; `--databricks-exclude-catalogs`
+(`BATON_DATABRICKS_EXCLUDE_CATALOGS`) excludes them instead. The two flags are
+mutually exclusive; setting both fails at startup.
 
 The endpoints, the permission model, principal resolution and the connector's
 limitations are in [docs/docs-info.md](./docs/docs-info.md).
 
 ## Unity Catalog provisioning
 
-A metastore privilege can be granted to and revoked from a user, group or
-service principal. The `owner` entitlement is read-only: granting or revoking it
-fails with an `InvalidArgument` error.
+A privilege can be granted to and revoked from a user, group or service
+principal at both levels. The `owner` entitlement is read-only: granting or
+revoking it fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions
 
 Unity Catalog uses the same OAuth service principal as the rest of the
-connector. It must be an account admin, and it must be assigned to a running
-workspace the metastore is attached to, because the privilege endpoints are not
-served on the account plane. To read a metastore's grants it must additionally
-own the metastore or be an admin of that workspace — a privilege read cannot
-settle it, since `MANAGE` is rejected there. When neither holds, the connector
-fails the sync with a `PermissionDenied` error naming the metastore rather than
+connector. It must be an account admin, it must be assigned to every workspace a
+catalog is reached through, and for each catalog it must also be the metastore
+owner, be the catalog owner, hold `MANAGE` on the catalog,
+or be an admin of that workspace. When none of those hold, the connector fails
+the sync with a `PermissionDenied` error naming the catalog rather than
 reporting a partial read. The scopes, roles and privileges behind each read, and
 the reason the connector fails closed, are in
 [docs/docs-info.md](./docs/docs-info.md).
 
 ## Accounts with many workspaces
 
-Deciding which metastore a workspace serves needs a catalog listing from each
-workspace that reports no metastore assignment, so the connector caches those
+Resolving which workspace a catalog is reached through needs a catalog listing
+from each workspace attached to the metastore, so the connector caches those
 listings for the length of a run and keeps one per workspace. The working set
 grows with the number of workspaces in the account.
 
 The default budget is 5 MB, which covers roughly ten workspaces holding a few
 hundred catalogs each. Past that the cache evicts and the connector re-lists
-catalogs it has already read, which lengthens the sync and uses more of the
-Databricks API rate limit. Raising the budget removes the re-reads:
+catalogs it has already read: on an account of fifty workspaces with about three
+hundred catalogs each, re-resolving the routing across a sync cost 1,506
+Databricks calls instead of 352. Raising the budget removes the re-reads, and
+32 MB was enough for that account:
 
 ```
 BATON_HTTP_CACHE_MAX_SIZE=32 baton-databricks
@@ -219,8 +226,10 @@ Flags:
       --auth-method string                               ($BATON_AUTH_METHOD)
       --client-id string                                 The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string                             The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
+      --databricks-catalogs strings                      Catalogs to limit Unity Catalog syncing to, identified by catalog name. No catalog outside this list is synced, and neither is anything under it ($BATON_DATABRICKS_CATALOGS)
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
+      --databricks-exclude-catalogs strings              Catalogs to exclude from Unity Catalog syncing, identified by catalog name. The schemas, tables and volumes under an excluded catalog are excluded with it ($BATON_DATABRICKS_EXCLUDE_CATALOGS)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)

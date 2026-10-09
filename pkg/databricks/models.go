@@ -151,11 +151,13 @@ type Metastore struct {
 	Owner       string `json:"owner"`
 }
 
-// Catalog carries only what resolving an access path needs: which metastore a
-// workspace can list catalogs for.
 type Catalog struct {
-	Name        string `json:"name"`
-	MetastoreID string `json:"metastore_id"`
+	Name                         string `json:"name"`
+	MetastoreID                  string `json:"metastore_id"`
+	Owner                        string `json:"owner"`
+	CatalogType                  string `json:"catalog_type"`
+	IsolationMode                string `json:"isolation_mode"`
+	AccessibleInCurrentWorkspace *bool  `json:"accessible_in_current_workspace"`
 }
 
 type PrivilegeAssignment struct {

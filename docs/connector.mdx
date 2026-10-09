@@ -11,6 +11,7 @@ sidebarTitle: "Databricks"
 | Resource | Sync | Provision |
 | :--- | :--- | :--- |
 | Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Catalogs | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
@@ -28,23 +29,25 @@ Workspace roles (such as **workspace-access** or **databricks-sql-access**) can 
 
 ## Understanding Unity Catalog in Databricks
 
-Unity Catalog is how Databricks governs access to data, and a **metastore** is the top of it: it is the regional container that holds the catalogs, schemas, tables and volumes underneath. One metastore usually serves several workspaces, so Unity Catalog access is granted once per object rather than once per workspace.
+Unity Catalog is how Databricks governs access to data. A **metastore** is the regional container at the top of it, and it holds **catalogs**. One metastore usually serves several workspaces, so Unity Catalog access is granted once per object rather than once per workspace. The schemas, tables and volumes beneath a catalog are not synced yet.
 
-Databricks records a set of privileges on a metastore — **CREATE_CATALOG**, **READ_METADATA**, **USE_SHARE**, and so on. C1 turns each privilege into an entitlement on the metastore, so you can review who holds it, request it, and revoke it for users, groups and service principals. The metastore also carries a read-only **owner** entitlement that shows who owns it; ownership cannot be requested or revoked through C1.
+Databricks records a set of privileges on each of those objects — **USE_CATALOG** and **CREATE_SCHEMA** on a catalog, **CREATE_CATALOG** on a metastore, and so on. C1 turns each privilege into an entitlement on that object, so you can review who holds it, request it, and revoke it for users, groups and service principals at both levels. Each object also carries a read-only **owner** entitlement that shows who owns it; ownership cannot be requested or revoked through C1.
 
 When a group holds a privilege, C1 shows the group's members as holders of it, so access granted to a team still resolves to the people who have it.
 
 <Note>
-The Metastores resource type is turned off by default. Turn it on from the connector's configuration page in C1.
+The two Unity Catalog resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1.
+
+Because C1 doesn't know a resource type exists until a sync reports it, the first sync covers both, which can take a long time on a large metastore. Narrow that first run using the **Catalogs** or **Exclude Catalogs** settings described below, then turn on the types you want.
 </Note>
 
 <Note>
 **Notes on Unity Catalog access in C1:**
 
-- C1 shows the privileges recorded directly on the metastore. Unity Catalog privileges inherit downward, and inherited access stays on the object that carries it rather than being repeated on everything beneath it.
+- C1 shows the privileges recorded directly on each object. Unity Catalog privileges inherit downward, and inherited access stays on the object that carries it rather than being repeated on everything beneath it — so a catalog that inherits **READ_METADATA** from its metastore shows no holders of its own, because the grant lives on the metastore.
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
-- **MANAGE** and **ALL_PRIVILEGES** are not offered as entitlements, because Databricks rejects both at the metastore level.
 - Unity Catalog tags are not synced.
+- Narrowing the **Catalogs** setting, or adding to **Exclude Catalogs**, after a successful sync removes the catalogs that drop out from C1.
 - Grants are ingested a few minutes behind resources, so an object can briefly show no access right after a sync.
 </Note>
 
@@ -112,9 +115,13 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
 
 ### Let the service principal read Unity Catalog privileges
 
-Skip this section if you are not syncing metastores, or if you already made the service principal a workspace **Admin** in the step above — that is enough on its own.
+Skip this section if you are not syncing metastores or catalogs, or if you already made the service principal a workspace **Admin** in the step above — that is enough on its own.
 
-Otherwise, make the service principal a metastore admin:
+Otherwise, pick one of the two options below. They are alternatives to each other — do not do both.
+
+#### Option 1: Make the service principal a metastore admin
+
+This is the broadest option. It covers every catalog in the metastore.
 
 <Steps>
   <Step>
@@ -125,8 +132,24 @@ Otherwise, make the service principal a metastore admin:
   </Step>
 </Steps>
 
+#### Option 2: Grant MANAGE on a single catalog
+
+This is the narrowest option. It covers one catalog, so repeat it for each catalog you want synced.
+
+<Steps>
+  <Step>
+  In the workspace, open **Catalog Explorer** and open the catalog.
+  </Step>
+  <Step>
+  Select **Permissions**, then click **Grant**.
+  </Step>
+  <Step>
+  Select the service principal, check **MANAGE**, and confirm.
+  </Step>
+</Steps>
+
 <Warning>
-This Unity Catalog permission is a hard requirement, not a recommendation. When a service principal without it reads the privileges on a metastore, Databricks returns a partial list rather than an error, and a partial list is indistinguishable from an object that has no access granted on it at all. C1 would read the privileges missing from that list as access that had been revoked. Rather than report an incomplete picture, the connector stops the sync and names the metastore it could not read in full.
+This Unity Catalog permission is a hard requirement, not a recommendation. When a service principal without it reads the privileges on a catalog, Databricks returns a partial list rather than an error, and a partial list is indistinguishable from an object that has no access granted on it at all. C1 would read the privileges missing from that list as access that had been revoked. Rather than report an incomplete picture, the connector stops the sync and names the catalog it could not read in full.
 </Warning>
 
 For more information, see the [Databricks Unity Catalog privileges documentation](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges).
@@ -188,8 +211,10 @@ To complete this task, you'll need:
 
     - **Workspaces**: limit the sync to these workspaces, by workspace name, deployment name, or numeric workspace ID.
     - **Exclude Workspaces**: workspaces to leave out of the sync, by workspace name, deployment name, or numeric workspace ID.
+    - **Catalogs**: the only catalogs Unity Catalog syncing covers, by catalog name.
+    - **Exclude Catalogs**: catalogs to leave out of Unity Catalog syncing, by catalog name.
 
-  Fill in **Workspaces** or **Exclude Workspaces**, not both.
+  Fill in **Workspaces** or **Exclude Workspaces**, not both. Fill in **Catalogs** or **Exclude Catalogs**, not both — setting both stops the connector from starting.
   </Step>
   <Step>
   **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks account hostname and hostname in the **Account Hostname** and **Hostname** fields.
@@ -288,6 +313,11 @@ stringData:
   # Mutually exclusive with BATON_WORKSPACES — set one or the other, never both.
   BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
 
+  # Optional: limit Unity Catalog syncing to these catalogs, or exclude these
+  # catalogs from it. Set one or the other, never both.
+  BATON_DATABRICKS_CATALOGS: <catalog-a,catalog-b>
+  # BATON_DATABRICKS_EXCLUDE_CATALOGS: <catalog-c>
+
   # Optional: include if you want C1 to provision access using this connector
   BATON_PROVISIONING: true
 ```
@@ -301,7 +331,7 @@ OAuth requires a reachable account API. If the account API check fails at startu
 </Note>
 
 <Note>
-**Accounts with many workspaces:** to decide which metastore each workspace serves, the connector may list a workspace's catalogs, and it holds one such listing per workspace while it runs — so a wider account needs a larger buffer. The 5 MB default suits about ten workspaces with a few hundred catalogs each. Above that the connector re-reads listings it has already fetched, which lengthens the sync and uses more of your Databricks API rate limit. Set `BATON_HTTP_CACHE_MAX_SIZE` to a larger number of megabytes in the Secret above.
+**Accounts with many workspaces:** the connector holds one catalog listing per workspace while it runs, so a wider account needs a larger buffer. The 5 MB default suits about ten workspaces with a few hundred catalogs each. Above that the connector re-reads catalogs it has already listed, which lengthens the sync and uses more of your Databricks API rate limit — an account of fifty workspaces with roughly three hundred catalogs each needed 32 MB. Set `BATON_HTTP_CACHE_MAX_SIZE` to that number of megabytes in the Secret above.
 </Note>
 
 See the connector's README or run `--help` to see all available configuration flags and environment variables.

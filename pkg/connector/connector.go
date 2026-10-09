@@ -35,6 +35,7 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
 		newMetastoreBuilder(d.client, d.unityCatalog, willSync),
+		newCatalogBuilder(d.client, d.unityCatalog, willSync),
 	}
 
 	return syncers
@@ -51,7 +52,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton, " +
-			"along with Unity Catalog metastores and the privileges granted on them",
+			"along with Unity Catalog data assets — metastores and catalogs — and the privileges granted on them",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"email": {
@@ -140,6 +141,7 @@ func New(
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
+	catalogs catalogFilter,
 	opts *cli.ConnectorOpts,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
@@ -155,7 +157,7 @@ func New(
 	return &Databricks{
 		client:       client,
 		workspaces:   workspaces,
-		unityCatalog: newUnityCatalog(client, clientID, configuredWorkspaceSet(workspaces)),
+		unityCatalog: newUnityCatalog(client, clientID, catalogs, configuredWorkspaceSet(workspaces)),
 		opts:         opts,
 	}, nil
 }
@@ -164,6 +166,11 @@ func New(
 func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 	auth := prepareClientAuth(cfg)
+
+	catalogs, err := newCatalogFilter(cfg.DatabricksCatalogs, cfg.DatabricksExcludeCatalogs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: %w", err)
+	}
 
 	cb, err := New(
 		ctx,
@@ -175,6 +182,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
+		catalogs,
 		opts,
 	)
 	if err != nil {

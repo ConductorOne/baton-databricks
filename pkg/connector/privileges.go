@@ -8,12 +8,50 @@ import (
 // The canonical UPPER_SNAKE form the API answers with. It accepts lowercase and
 // aliases on input, so a privilege offered under another spelling cannot round-trip.
 const (
+	privilegeAllPrivileges = "ALL_PRIVILEGES"
+	privilegeManage        = "MANAGE"
+	privilegeRefresh       = "REFRESH"
+
 	// ownerEntitlement names the securable's owner. Ownership is single-valued and
 	// Databricks has no notion of removing an owner, so it is never grantable.
 	ownerEntitlement = "owner"
 )
 
 var (
+	// catalogPrivileges is the widest set; BROWSE, CREATE_SCHEMA and USE_CATALOG stop here.
+	catalogPrivileges = []string{
+		privilegeAllPrivileges,
+		"APPLY_TAG",
+		"BROWSE",
+		"CREATE_SCHEMA",
+		"USE_CATALOG",
+		"USE_SCHEMA",
+		"CREATE_FUNCTION",
+		"CREATE_TABLE",
+		"CREATE_MATERIALIZED_VIEW",
+		"CREATE_MODEL",
+		"CREATE_VOLUME",
+		"CREATE_FEATURE",
+		"CREATE_SECRET",
+		"CREATE_SERVICE",
+		"SELECT",
+		"MODIFY",
+		"DELETE",
+		"INSERT",
+		"UPDATE",
+		"EXECUTE",
+		privilegeRefresh,
+		"READ_VOLUME",
+		"WRITE_VOLUME",
+		"READ_METADATA",
+		"READ_FEATURE",
+		"READ_SECRET",
+		"REFERENCE_SECRET",
+		"WRITE_SECRET",
+		"EXTERNAL_USE_SCHEMA",
+		privilegeManage,
+	}
+
 	// metastorePrivileges is the set for the metastore itself. ALL_PRIVILEGES and MANAGE
 	// are both rejected here, which is why a metastore's grant visibility cannot be
 	// answered by a privilege read. READ_METADATA is the only entry that inherits down.
