@@ -68,7 +68,10 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		return nil, nil, nil
 	}
 
-	metastores, rateLimit, err := m.client.ListMetastores(ctx)
+	// Read through the routing snapshot rather than the raw listing: with a
+	// workspace allowlist the two differ, and emitting a metastore no in-scope
+	// workspace can reach would advertise a resource whose grants cannot be read.
+	snap, rateLimit, err := m.uc.buildRouting(ctx)
 	annos := annotations.Annotations{}
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
@@ -76,7 +79,7 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	}
 
 	var rv []*v2.Resource
-	for _, metastore := range metastores {
+	for _, metastore := range snap.metastores {
 		if metastore.MetastoreID == "" {
 			continue
 		}

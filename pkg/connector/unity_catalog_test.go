@@ -131,7 +131,10 @@ func routingHandler(t *testing.T, assignments map[string]any, probed map[string]
 		switch {
 		case strings.HasSuffix(path, "/metastores"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"metastores": []map[string]any{{"metastore_id": "ms-a", "name": "main"}},
+				"metastores": []map[string]any{
+					{"metastore_id": "ms-a", "name": "main"},
+					{"metastore_id": "ms-b", "name": "other"},
+				},
 			})
 		case strings.HasSuffix(path, "/workspaces"):
 			_ = json.NewEncoder(w).Encode([]map[string]any{
@@ -179,6 +182,38 @@ func TestRoutingSkipsAWorkspaceOutsideTheConfiguredAllowlist(t *testing.T) {
 	}
 	if want := []string{"wsa"}; !slices.Equal(snap.workspaces["ms-a"], want) {
 		t.Errorf("ms-a routes through %v, want %v", snap.workspaces["ms-a"], want)
+	}
+}
+
+// Scoping the sync to one workspace must not fail it for the metastores the other
+// workspaces hold. A metastore only the excluded workspace can reach has to read
+// as absent, the way a filtered catalog does: left in the snapshot it reaches
+// usableWorkspaces, which answers FailedPrecondition, and that is not a warning
+// to the SDK, so every metastore-enabled sync would fail.
+func TestAMetastoreOnlyAnOutOfScopeWorkspaceReachesIsAbsentRatherThanFatal(t *testing.T) {
+	probed := map[string]int{}
+	client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
+		map[string]any{"1": "ms-a", "2": "ms-b"}, probed))
+
+	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod"}))
+	snap, _, err := uc.buildRouting(context.Background())
+	if err != nil {
+		t.Fatalf("buildRouting: %v", err)
+	}
+
+	if _, ok := snap.metastores["ms-a"]; !ok {
+		t.Error("ms-a is missing from the snapshot, so the in-scope metastore would not sync")
+	}
+	if _, ok := snap.metastores["ms-b"]; ok {
+		t.Error("ms-b is still in the snapshot; its Grants() would fail the whole sync with FailedPrecondition")
+	}
+
+	workspace, exists, _, err := workspaceFromSnapshot(snap, "ms-b", nil)
+	if err != nil {
+		t.Fatalf("resolving the out-of-scope metastore errored instead of reporting it absent: %v", err)
+	}
+	if exists || workspace != "" {
+		t.Errorf("ms-b resolved to workspace %q (exists=%v), want absent", workspace, exists)
 	}
 }
 

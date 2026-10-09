@@ -77,7 +77,8 @@ func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, bool,
 
 	return nil, true, status.Errorf(codes.FailedPrecondition,
 		"metastore %s exists on the account but no workspace this sync can use is attached to it, so its securables cannot be read: "+
-			"every attached workspace is either named in databricks-exclude-workspaces, not RUNNING, or reports no metastore assignment%s",
+			"every attached workspace is either left out of workspaces, named in databricks-exclude-workspaces, not RUNNING, "+
+			"or reports no metastore assignment%s",
 		metastoreID, unusable)
 }
 
@@ -100,6 +101,19 @@ func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.R
 	}
 	if err != nil {
 		return routingSnapshot{}, rateLimit, err
+	}
+
+	// With an allowlist, a metastore no in-scope workspace is attached to is out of
+	// scope, and out of scope is an absence here: the metastore is not listed, not
+	// listed-but-unreachable. Keeping it would make every securable under it fail
+	// with FailedPrecondition, so scoping a sync to one workspace would break the
+	// sync for every metastore the other workspaces hold.
+	if len(u.workspaces) > 0 {
+		for metastoreID := range snap.metastores {
+			if len(snap.workspaces[metastoreID]) == 0 {
+				delete(snap.metastores, metastoreID)
+			}
+		}
 	}
 
 	return snap, rateLimit, nil
