@@ -88,6 +88,15 @@ func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, bool,
 		metastoreID, unusable)
 }
 
+// deferredWorkspace is a workspace whose metastore assignment could not be read,
+// held over for the catalog listing. denied separates a credential that was
+// refused the assignment from one that was told there is none, because the two
+// give the listing different weight.
+type deferredWorkspace struct {
+	name   string
+	denied bool
+}
+
 // buildRouting lists metastores and the workspaces each one is reachable through.
 func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.RateLimitDescription, error) {
 	metastores, rateLimit, err := u.listMetastores(ctx)
@@ -158,7 +167,7 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 		return rateLimit, fmt.Errorf("failed to list workspaces: %w", err)
 	}
 
-	var unassigned []string
+	var unassigned []deferredWorkspace
 	asked := 0
 	for _, workspace := range workspaces {
 		if err := ctx.Err(); err != nil {
@@ -192,7 +201,12 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 				// credential is not a member of the workspace at all. None of the three
 				// says anything about the other workspaces, so the workspace is set
 				// aside rather than failing the snapshot that every securable needs.
-				unassigned = append(unassigned, workspace.DeploymentName)
+				// Which of the three it was decides how much the catalog listing can
+				// then settle, so it is carried along.
+				unassigned = append(unassigned, deferredWorkspace{
+					name:   workspace.DeploymentName,
+					denied: isForbiddenError(err) || isUnauthorizedError(err),
+				})
 
 				continue
 			}
@@ -209,11 +223,12 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 	// A catalog payload names its metastore, so the listing settles which metastore
 	// this workspace serves, if any.
 	var unusable, unreadable []string
-	for _, workspace := range unassigned {
+	for _, deferred := range unassigned {
 		if err := ctx.Err(); err != nil {
 			return rateLimit, err
 		}
 
+		workspace := deferred.name
 		metastoreIDs, listRateLimit, err := u.metastoresServedBy(ctx, workspace)
 		if listRateLimit != nil {
 			rateLimit = listRateLimit
@@ -231,6 +246,16 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 		}
 		if len(metastoreIDs) == 0 {
 			unusable = append(unusable, workspace)
+
+			// An empty catalog listing is not the same evidence in both cases. The
+			// endpoint returns only the catalogs the caller may use, so a credential
+			// that was also denied the assignment read can be looking at an empty list
+			// purely for want of USE_CATALOG. Only a 404 on the assignment plus an
+			// empty listing reads as a workspace outside Unity Catalog; a denial plus
+			// an empty listing settles nothing.
+			if deferred.denied {
+				unreadable = append(unreadable, workspace)
+			}
 
 			continue
 		}

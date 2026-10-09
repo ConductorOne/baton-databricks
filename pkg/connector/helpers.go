@@ -239,6 +239,11 @@ func isForbiddenError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
 }
 
+func isUnauthorizedError(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
+}
+
 // isUnreadableWorkspaceError reports an answer that says this credential cannot
 // read this workspace, which is a fact about that workspace and not about the
 // account. Access-path discovery treats all three alike: the workspace carries

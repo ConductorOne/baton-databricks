@@ -266,6 +266,42 @@ func TestAnUnreadableInScopeWorkspaceStopsTheMetastoreFromBeingPruned(t *testing
 	}
 }
 
+// The catalogs endpoint returns only the catalogs the caller may use, so an empty
+// listing from a credential that was also refused the assignment read is equally
+// explained by missing USE_CATALOG. That pair settles nothing, and treating it as
+// "this workspace carries nothing" would prune a metastore it does serve. Only a
+// 404 on the assignment plus an empty listing reads as outside Unity Catalog.
+func TestADeniedAssignmentWithAnEmptyCatalogListingIsNotEvidenceOfNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		assignment   any
+		wantPruned   bool
+		wantUnreadab bool
+	}{
+		"denied assignment": {assignment: http.StatusForbidden, wantPruned: false, wantUnreadab: true},
+		"no assignment":     {assignment: http.StatusNotFound, wantPruned: true, wantUnreadab: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			probed := map[string]int{}
+			client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
+				map[string]any{"1": "ms-a", "2": tc.assignment}, probed))
+
+			uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod", "dev"}))
+			snap, _, err := uc.buildRouting(context.Background())
+			if err != nil {
+				t.Fatalf("buildRouting: %v", err)
+			}
+
+			if got := slices.Contains(snap.unreadable, "wsb"); got != tc.wantUnreadab {
+				t.Errorf("unreadable names wsb = %v, want %v (unreadable = %v)", got, tc.wantUnreadab, snap.unreadable)
+			}
+			_, stillListed := snap.metastores["ms-b"]
+			if pruned := !stillListed; pruned != tc.wantPruned {
+				t.Errorf("ms-b pruned = %v, want %v", pruned, tc.wantPruned)
+			}
+		})
+	}
+}
+
 // Only codes.NotFound is a warning to the SDK; every other code fails the whole
 // sync. A credential that is not a member of one workspace answers 401 or 403
 // there, which says nothing about the rest of the account, so letting it escape
