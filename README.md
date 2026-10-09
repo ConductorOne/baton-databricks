@@ -5,7 +5,7 @@
 `baton-databricks` is a connector for Databricks built using the
 [Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
 Databricks API, to sync data about Databricks identities (users, groups and
-service principals), roles, workspaces and Unity Catalog metastores, catalogs and schemas.
+service principals), roles, workspaces and Unity Catalog securables.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
@@ -84,13 +84,15 @@ baton resources
 - Metastores
 - Catalogs
 - Schemas
+- Tables
+- Volumes
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
 workspaces to the `--workspaces` flag. Each entry can be a workspace name,
 deployment name, or numeric workspace ID, matched case-insensitively.
 
-The last three resource types are Unity Catalog securables and are opt-in: each
+The last five resource types are Unity Catalog securables and are opt-in: each
 one stays off until it is enabled for the connector in ConductorOne.
 
 ## Authentication
@@ -128,8 +130,8 @@ assigned to that workspace. Otherwise the grant fails with a
 
 ## Unity Catalog
 
-Metastores, catalogs and schemas are the top three levels of Databricks Unity
-Catalog. The resource hierarchy the connector syncs is:
+Metastores, catalogs, schemas, tables and volumes cover Databricks Unity
+Catalog. The full resource hierarchy the connector syncs is:
 
 ```
 account
@@ -141,22 +143,23 @@ account
 └── metastore
     └── catalog
         └── schema
+            ├── table
+            └── volume
 ```
 
-Tables and volumes are not synced yet.
+Views and materialized views are tables: in Unity Catalog they are the `table`
+securable, and the connector derives each table's privilege set from its
+`table_type`, so a view rejects `ALL_PRIVILEGES` and `MODIFY`.
 
-`information_schema` is skipped: its system views are owned by principals that
-do not exist in SCIM and all carry the same default `SELECT`.
-
-Every level exposes its privileges as entitlements (`USE_CATALOG`, `USE_SCHEMA`,
-`SELECT` and so on) plus a non-grantable `owner`. A
+Every level exposes its privileges as entitlements (`SELECT`, `MODIFY`,
+`USE_CATALOG`, `READ_VOLUME` and so on) plus a non-grantable `owner`. A
 privilege held by a group is expandable, so ConductorOne resolves the group's
 members as holders.
 
 `--databricks-catalogs` (`BATON_DATABRICKS_CATALOGS`) limits Unity Catalog
 syncing to the catalogs named in it; `--databricks-exclude-catalogs`
-(`BATON_DATABRICKS_EXCLUDE_CATALOGS`) excludes them instead. The schemas under a
-catalog follow it. The two flags are mutually exclusive; setting both
+(`BATON_DATABRICKS_EXCLUDE_CATALOGS`) excludes them instead. Schemas, tables and
+volumes follow their catalog. The two flags are mutually exclusive; setting both
 fails at startup.
 
 The endpoints, the permission model, principal resolution and the connector's
@@ -165,7 +168,7 @@ limitations are in [docs/docs-info.md](./docs/docs-info.md).
 ## Unity Catalog provisioning
 
 A privilege can be granted to and revoked from a user, group or service
-principal at all three levels. The `owner` entitlement is read-only: granting or
+principal at all five levels. The `owner` entitlement is read-only: granting or
 revoking it fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions

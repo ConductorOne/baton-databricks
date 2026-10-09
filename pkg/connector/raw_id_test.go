@@ -101,8 +101,20 @@ func TestResourcesHaveRawId(t *testing.T) {
 		{
 			"schema",
 			build(buildSecurable(t, schemaResourceType, securableTypeSchema, catalogResourceType.Id,
-				nil, "ms1", []string{"cat"}, securable{name: "sch"})),
+				[]*v2.ResourceType{tableResourceType, volumeResourceType}, "ms1", []string{"cat"}, securable{name: "sch"})),
 			"ms1::cat.sch",
+		},
+		{
+			"table",
+			build(buildSecurable(t, tableResourceType, securableTypeTable, schemaResourceType.Id,
+				nil, "ms1", []string{"cat", "sch"}, securable{name: "tbl"})),
+			"ms1::cat.sch.tbl",
+		},
+		{
+			"volume",
+			build(buildSecurable(t, volumeResourceType, securableTypeVolume, schemaResourceType.Id,
+				nil, "ms1", []string{"cat", "sch"}, securable{name: "vol"})),
+			"ms1::cat.sch.vol",
 		},
 	}
 

@@ -24,6 +24,12 @@ const (
 	// https://docs.databricks.com/api/workspace/schemas/list
 	unityCatalogSchemasEndpoint = "/api/2.1/unity-catalog/schemas"
 
+	// https://docs.databricks.com/api/workspace/tables/list
+	unityCatalogTablesEndpoint = "/api/2.1/unity-catalog/tables"
+
+	// https://docs.databricks.com/api/workspace/volumes/list
+	unityCatalogVolumesEndpoint = "/api/2.1/unity-catalog/volumes"
+
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
@@ -34,10 +40,15 @@ const (
 	SecurableMetastore = "metastore"
 	SecurableCatalog   = "catalog"
 	SecurableSchema    = "schema"
+	SecurableTable     = "table"
+	SecurableVolume    = "volume"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
 	permissionsMaxResults uint = 0
+
+	// The tables endpoint rejects a max_results above this ceiling.
+	unityCatalogTablesMaxResults uint = 50
 )
 
 // ListMetastores (GET /api/2.0/accounts/{account_id}/metastores). Not paginated.
@@ -183,6 +194,65 @@ func (c *Client) ListSchemas(
 	}
 
 	return schemas, next, ratelimitData, nil
+}
+
+// ListTables (GET /api/2.1/unity-catalog/tables?catalog_name=&schema_name=) pages
+// the tables, views and materialized views in a schema. schema_name is mandatory,
+// and a max_results above the endpoint's ceiling of 50 is clamped rather than sent.
+func (c *Client) ListTables(
+	ctx context.Context,
+	workspaceId, catalogName, schemaName, pageToken string,
+	maxResults uint,
+) (
+	[]Table,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	if maxResults > unityCatalogTablesMaxResults {
+		maxResults = unityCatalogTablesMaxResults
+	}
+
+	tables, next, ratelimitData, err := listSecurables(ctx, c, workspaceId, unityCatalogTablesEndpoint,
+		func(res *tablesResponse) ([]Table, string) { return res.Tables, res.NextPageToken },
+		&unityCatalogVars{
+			catalogName:      catalogName,
+			schemaName:       schemaName,
+			maxResults:       &maxResults,
+			pageToken:        pageToken,
+			omitTablePayload: true,
+		})
+	if err != nil {
+		return nil, "", ratelimitData, fmt.Errorf("failed to list tables in schema %s.%s: %w", catalogName, schemaName, err)
+	}
+
+	return tables, next, ratelimitData, nil
+}
+
+// ListVolumes (GET /api/2.1/unity-catalog/volumes?catalog_name=&schema_name=) pages a schema's volumes.
+func (c *Client) ListVolumes(
+	ctx context.Context,
+	workspaceId, catalogName, schemaName, pageToken string,
+	maxResults uint,
+) (
+	[]Volume,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	volumes, next, ratelimitData, err := listSecurables(ctx, c, workspaceId, unityCatalogVolumesEndpoint,
+		func(res *volumesResponse) ([]Volume, string) { return res.Volumes, res.NextPageToken },
+		&unityCatalogVars{
+			catalogName: catalogName,
+			schemaName:  schemaName,
+			maxResults:  &maxResults,
+			pageToken:   pageToken,
+		})
+	if err != nil {
+		return nil, "", ratelimitData, fmt.Errorf("failed to list volumes in schema %s.%s: %w", catalogName, schemaName, err)
+	}
+
+	return volumes, next, ratelimitData, nil
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).
