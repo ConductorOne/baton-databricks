@@ -227,25 +227,23 @@ func (u *unityCatalog) indexServicePrincipals(ctx context.Context, index *princi
 	}
 }
 
-// ownPrincipalScimID lists account SCIM for this call only. A name-built filter
-// cannot tell a service principal from a user or a group that shares the field.
+// ownPrincipalScimID resolves the connector's own service principal. The index
+// cannot answer this: it is keyed by a name field the three principal namespaces
+// share, so a hit there may be somebody else's. An applicationId filter on the
+// service principal endpoint has no such ambiguity — it can only match a service
+// principal — which is why this asks for the one record instead of walking all
+// of account SCIM to find it.
 func (u *unityCatalog) ownPrincipalScimID(ctx context.Context) (string, *v2.RateLimitDescription, error) {
 	if u.ownPrincipal == "" {
 		return "", nil, nil
 	}
 
-	index, rateLimit, err := u.listPrincipals(ctx)
+	id, rateLimit, err := u.client.FindServicePrincipalID(ctx, "", u.ownPrincipal)
 	if err != nil {
-		return "", rateLimit, err
+		return "", rateLimit, fmt.Errorf("failed to resolve the connector's own service principal: %w", err)
 	}
 
-	resourceId, ok := index.lookupName(u.ownPrincipal)
-	if !ok || resourceId.GetResourceType() != servicePrincipalResourceType.Id {
-		// The three namespaces share one name field, so a hit elsewhere is somebody else's.
-		return "", rateLimit, nil
-	}
-
-	return resourceId.GetResource(), rateLimit, nil
+	return id, rateLimit, nil
 }
 
 // nextScimPage returns zero once the listing is exhausted.

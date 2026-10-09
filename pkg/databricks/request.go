@@ -105,6 +105,30 @@ func (c *Client) Get(
 		http.MethodGet,
 		nil,
 		response,
+		nil,
+		params...,
+	)
+}
+
+// GetUncached is Get with the uhttp response cache bypassed on the read side.
+// The cache holds a GET 200 for an hour and a PATCH does not invalidate it, so a
+// read that decides whether a write still has to happen must not be served from
+// it: the write would be skipped against a page that predates the last change.
+// uhttp still records the fresh response, so the entry a later reader sees is the
+// one this call just observed.
+func (c *Client) GetUncached(
+	ctx context.Context,
+	urlAddress *url.URL,
+	response any,
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequest(
+		ctx,
+		urlAddress,
+		http.MethodGet,
+		nil,
+		response,
+		[]uhttp.RequestOption{uhttp.WithNoCache()},
 		params...,
 	)
 }
@@ -122,6 +146,7 @@ func (c *Client) Put(
 		http.MethodPut,
 		body,
 		response,
+		nil,
 		params...,
 	)
 }
@@ -139,6 +164,7 @@ func (c *Client) Post(
 		http.MethodPost,
 		body,
 		response,
+		nil,
 		params...,
 	)
 }
@@ -156,6 +182,7 @@ func (c *Client) Patch(
 		http.MethodPatch,
 		body,
 		response,
+		nil,
 		params...,
 	)
 }
@@ -198,6 +225,7 @@ func (c *Client) prepareRequest(
 	urlAddress *url.URL,
 	method string,
 	body any,
+	requestOptions []uhttp.RequestOption,
 	params ...Vars,
 ) (*http.Request, error) {
 	// TODO(marcos): Refactor URLs so that we don't have to unescape.
@@ -217,6 +245,7 @@ func (c *Client) prepareRequest(
 	if body != nil {
 		options = append(options, uhttp.WithJSONBody(body))
 	}
+	options = append(options, requestOptions...)
 
 	req, err := c.httpClient.NewRequest(ctx, method, requestURL, options...)
 	if err != nil {
@@ -245,9 +274,10 @@ func (c *Client) doRequest(
 	method string,
 	body any,
 	response any,
+	requestOptions []uhttp.RequestOption,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
-	req, err := c.prepareRequest(ctx, urlAddress, method, body, params...)
+	req, err := c.prepareRequest(ctx, urlAddress, method, body, requestOptions, params...)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +324,7 @@ func (c *Client) doRequestNoResponse(
 	response any,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
-	req, err := c.prepareRequest(ctx, urlAddress, method, body, params...)
+	req, err := c.prepareRequest(ctx, urlAddress, method, body, nil, params...)
 	if err != nil {
 		return nil, err
 	}

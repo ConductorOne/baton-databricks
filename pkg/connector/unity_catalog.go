@@ -29,19 +29,27 @@ type routingSnapshot struct {
 	asked        int
 }
 
-// unityCatalog holds no state beyond the client: every call asks Databricks and
-// drops the answer when it returns.
+// unityCatalog holds no state beyond the client and the workspace filter: every
+// call asks Databricks and drops the answer when it returns.
 type unityCatalog struct {
 	client *databricks.Client
 
 	// ownPrincipal is the applicationId of the service principal the connector authenticates as.
 	ownPrincipal string
+
+	// workspaces is the configured allowlist, empty when none was given. Every
+	// Unity Catalog read is addressed to a workspace, so routing through one the
+	// operator scoped out would read the metastore through a deployment this sync
+	// does not cover. ListWorkspaces only applies the exclude list, which is why
+	// the allowlist has to be applied here as well as in the workspace builder.
+	workspaces map[string]struct{}
 }
 
-func newUnityCatalog(client *databricks.Client, ownPrincipal string) *unityCatalog {
+func newUnityCatalog(client *databricks.Client, ownPrincipal string, workspaces map[string]struct{}) *unityCatalog {
 	return &unityCatalog{
 		client:       client,
 		ownPrincipal: ownPrincipal,
+		workspaces:   workspaces,
 	}
 }
 
@@ -137,6 +145,11 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 		if workspace.Status != "" && !strings.EqualFold(workspace.Status, workspaceStatusRunning) {
 			continue
 		}
+		if len(u.workspaces) > 0 {
+			if _, ok := matchConfiguredWorkspace(u.workspaces, workspace.DeploymentName, workspace.Name, strconv.Itoa(workspace.ID)); !ok {
+				continue
+			}
+		}
 
 		asked++
 		accountID := strconv.Itoa(workspace.ID)
@@ -147,9 +160,12 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			rateLimit = assignmentRateLimit
 		}
 		if err != nil {
-			if isNotFoundError(err) {
+			if isUnreadableWorkspaceError(err) {
 				// Databricks answers 404 both for a workspace outside Unity Catalog and
-				// for an assignment the credential may not read.
+				// for an assignment the credential may not read, and 401/403 when the
+				// credential is not a member of the workspace at all. None of the three
+				// says anything about the other workspaces, so the workspace is set
+				// aside rather than failing the snapshot that every securable needs.
 				unassigned = append(unassigned, workspace.DeploymentName)
 
 				continue
@@ -177,7 +193,7 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			rateLimit = listRateLimit
 		}
 		if err != nil {
-			if isNotFoundError(err) {
+			if isUnreadableWorkspaceError(err) {
 				unusable = append(unusable, workspace)
 
 				continue

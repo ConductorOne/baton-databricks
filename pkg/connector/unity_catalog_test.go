@@ -70,7 +70,7 @@ func TestWorkspaceMetastoreLookupIsNotAnsweredByAnotherWorkspacesCachedListing(t
 		})
 	})
 
-	uc := newUnityCatalog(client, "app-1")
+	uc := newUnityCatalog(client, "app-1", nil)
 	ctx := context.Background()
 
 	for _, workspace := range []string{"wsa", "wsb"} {
@@ -115,5 +115,96 @@ func TestLookupDoesNotFallBackFromAnUnknownID(t *testing.T) {
 	})
 	if !ok || got.GetResource() != "10" {
 		t.Fatalf("known id lookup = %v %v", got, ok)
+	}
+}
+
+// routingHandler answers the three account-plane calls buildRouting makes. Each
+// workspace's metastore assignment is whatever assignments names it, and a status
+// code there stands in for a credential that cannot read that workspace.
+func routingHandler(t *testing.T, assignments map[string]any, probed map[string]int) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		switch {
+		case strings.HasSuffix(path, "/metastores"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metastores": []map[string]any{{"metastore_id": "ms-a", "name": "main"}},
+			})
+		case strings.HasSuffix(path, "/workspaces"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+				{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "RUNNING"},
+			})
+		case strings.HasSuffix(path, "/metastore"):
+			parts := strings.Split(path, "/")
+			workspaceID := parts[len(parts)-2]
+			probed[workspaceID]++
+			switch assigned := assignments[workspaceID].(type) {
+			case int:
+				http.Error(w, `{"message":"denied"}`, assigned)
+			case string:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"metastore_assignment": map[string]any{"metastore_id": assigned},
+				})
+			default:
+				http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
+			}
+		default:
+			probed[r.Header.Get("X-Test-Workspace")]++
+			_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": []map[string]any{}})
+		}
+	}
+}
+
+// The allowlist is what the operator scoped the sync to, but ListWorkspaces only
+// applies the exclude list. Unity Catalog reads are addressed to a workspace, so
+// routing has to filter too or the connector reads the account through a
+// deployment that never appears in the sync.
+func TestRoutingSkipsAWorkspaceOutsideTheConfiguredAllowlist(t *testing.T) {
+	probed := map[string]int{}
+	client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
+		map[string]any{"1": "ms-a", "2": "ms-a"}, probed))
+
+	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod"}))
+	snap, _, err := uc.buildRouting(context.Background())
+	if err != nil {
+		t.Fatalf("buildRouting: %v", err)
+	}
+
+	if probed["2"] != 0 {
+		t.Errorf("the out-of-scope workspace was asked for its metastore assignment %d time(s)", probed["2"])
+	}
+	if want := []string{"wsa"}; !slices.Equal(snap.workspaces["ms-a"], want) {
+		t.Errorf("ms-a routes through %v, want %v", snap.workspaces["ms-a"], want)
+	}
+}
+
+// Only codes.NotFound is a warning to the SDK; every other code fails the whole
+// sync. A credential that is not a member of one workspace answers 401 or 403
+// there, which says nothing about the rest of the account, so letting it escape
+// buildRouting would take down the resource types that do work.
+func TestRoutingSetsAsideAWorkspaceTheCredentialCannotRead(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			probed := map[string]int{}
+			client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
+				map[string]any{"1": "ms-a", "2": status}, probed))
+
+			uc := newUnityCatalog(client, "app-1", nil)
+			snap, _, err := uc.buildRouting(context.Background())
+			if err != nil {
+				t.Fatalf("one unreadable workspace failed the whole snapshot: %v", err)
+			}
+
+			if want := []string{"wsa"}; !slices.Equal(snap.workspaces["ms-a"], want) {
+				t.Errorf("ms-a routes through %v, want %v", snap.workspaces["ms-a"], want)
+			}
+			if !slices.Contains(snap.unusable, "wsb") {
+				t.Errorf("unusable = %v, want it to name wsb", snap.unusable)
+			}
+		})
 	}
 }

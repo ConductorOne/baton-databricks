@@ -152,6 +152,19 @@ func (c *Client) ListPermissions(
 	*v2.RateLimitDescription,
 	error,
 ) {
+	return c.listPermissions(ctx, workspaceId, securableType, fullName, principal, pageToken, false)
+}
+
+func (c *Client) listPermissions(
+	ctx context.Context,
+	workspaceId, securableType, fullName, principal, pageToken string,
+	uncached bool,
+) (
+	[]PrivilegeAssignment,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
 	u, err := c.permissionsUrl(workspaceId, securableType, fullName)
 	if err != nil {
 		return nil, "", nil, err
@@ -160,7 +173,11 @@ func (c *Client) ListPermissions(
 	var res permissionsResponse
 
 	maxResults := permissionsMaxResults
-	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
+	read := c.Get
+	if uncached {
+		read = c.GetUncached
+	}
+	ratelimitData, err := read(ctx, u, &res, &unityCatalogVars{
 		principal:  principal,
 		maxResults: &maxResults,
 		pageToken:  pageToken,
@@ -176,7 +193,10 @@ func (c *Client) ListPermissions(
 	return res.PrivilegeAssignments, res.NextPageToken, ratelimitData, nil
 }
 
-// DrainPermissions walks ListPermissions to exhaustion for every principal.
+// DrainPermissions walks ListPermissions to exhaustion for every principal,
+// bypassing the response cache. Its only caller is the pre-read that decides
+// whether a Grant still has to PATCH, and that decision is wrong when it is made
+// against a page the cache has been holding since before the last change.
 func (c *Client) DrainPermissions(
 	ctx context.Context,
 	workspaceId, securableType, fullName string,
@@ -186,11 +206,13 @@ func (c *Client) DrainPermissions(
 	error,
 ) {
 	return drainPagesFrom(ctx, "", func(pageToken string) ([]PrivilegeAssignment, string, *v2.RateLimitDescription, error) {
-		return c.ListPermissions(ctx, workspaceId, securableType, fullName, "", pageToken)
+		return c.listPermissions(ctx, workspaceId, securableType, fullName, "", pageToken, true)
 	})
 }
 
-// ForEachPermissionsPage walks ListPermissions without retaining the pages.
+// ForEachPermissionsPage walks ListPermissions without retaining the pages. The
+// grant-visibility probe reads through this, where a cached page costs nothing:
+// it reports who may administer the securable, not who holds what.
 func (c *Client) ForEachPermissionsPage(
 	ctx context.Context,
 	workspaceId, securableType, fullName, principal string,
@@ -198,6 +220,18 @@ func (c *Client) ForEachPermissionsPage(
 ) (*v2.RateLimitDescription, error) {
 	return forEachPageFrom(ctx, "", func(pageToken string) ([]PrivilegeAssignment, string, *v2.RateLimitDescription, error) {
 		return c.ListPermissions(ctx, workspaceId, securableType, fullName, principal, pageToken)
+	}, visit)
+}
+
+// ForEachUncachedPermissionsPage is ForEachPermissionsPage for the pre-read that
+// decides whether a Revoke still has to PATCH. See DrainPermissions.
+func (c *Client) ForEachUncachedPermissionsPage(
+	ctx context.Context,
+	workspaceId, securableType, fullName, principal string,
+	visit func([]PrivilegeAssignment) (bool, error),
+) (*v2.RateLimitDescription, error) {
+	return forEachPageFrom(ctx, "", func(pageToken string) ([]PrivilegeAssignment, string, *v2.RateLimitDescription, error) {
+		return c.listPermissions(ctx, workspaceId, securableType, fullName, principal, pageToken, true)
 	}, visit)
 }
 
@@ -276,10 +310,11 @@ func (c *Client) updatePermissions(
 		return ratelimitData, err
 	}
 
-	// The PATCH body is already page one.
+	// The PATCH body is already page one. The remaining pages confirm the change
+	// landed, so they are read past the cache for the same reason the pre-read is.
 	drainRateLimit, drainErr := forEachPageFrom(ctx, res.NextPageToken,
 		func(pageToken string) ([]PrivilegeAssignment, string, *v2.RateLimitDescription, error) {
-			return c.ListPermissions(ctx, workspaceId, securableType, fullName, "", pageToken)
+			return c.listPermissions(ctx, workspaceId, securableType, fullName, "", pageToken, true)
 		}, visit)
 	if drainRateLimit != nil {
 		ratelimitData = drainRateLimit

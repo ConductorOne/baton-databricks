@@ -115,13 +115,22 @@ func (m *metastoreBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOp
 	return nil, nil, nil
 }
 
-func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	resourceID := resource.GetId().GetResource()
+// parseMetastoreID reads a metastore reference out of a resource id. A metastore
+// is addressed by a bare id; the separator only appears in the composite ids of
+// the securables below it, so finding one here means the wrong resource arrived.
+func parseMetastoreID(resourceID string) (securableRef, error) {
 	if resourceID == "" || strings.Contains(resourceID, securableKeySeparator) {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to parse metastore resource id: %w",
-			fmt.Errorf("invalid metastore resource id %q", resourceID))
+		return securableRef{}, fmt.Errorf("databricks-connector: invalid metastore resource id %q", resourceID)
 	}
-	ref := securableRef{metastoreID: resourceID}
+
+	return securableRef{metastoreID: resourceID}, nil
+}
+
+func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	ref, err := parseMetastoreID(resource.GetId().GetResource())
+	if err != nil {
+		return nil, nil, err
+	}
 
 	annos := annotations.Annotations{}
 	snap, rateLimit, err := m.uc.buildRouting(ctx)
@@ -267,12 +276,10 @@ func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 			principalID.GetResourceType())
 	}
 
-	resourceID := entitlement.GetResource().GetId().GetResource()
-	if resourceID == "" || strings.Contains(resourceID, securableKeySeparator) {
-		return annos, fmt.Errorf("databricks-connector: failed to parse metastore resource id: %w",
-			fmt.Errorf("invalid metastore resource id %q", resourceID))
+	ref, err := parseMetastoreID(entitlement.GetResource().GetId().GetResource())
+	if err != nil {
+		return annos, err
 	}
-	ref := securableRef{metastoreID: resourceID}
 
 	entitlementID := entitlement.GetId()
 	separator := strings.LastIndex(entitlementID, ":")
@@ -403,7 +410,9 @@ func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 		if isForbiddenError(err) {
 			return annos, uhttp.WrapErrors(
 				codes.PermissionDenied,
-				fmt.Sprintf("databricks-connector: cannot grant %s on %s %s: the connector principal needs MANAGE on it",
+				// MANAGE is not assignable on a metastore, so naming it here would send the
+				// operator after a privilege Databricks rejects. The authority is ownership.
+				fmt.Sprintf("databricks-connector: cannot grant %s on %s %s: the connector principal needs to be a metastore admin (its owner) or an account admin",
 					privilege, databricks.SecurableMetastore, ref.permissionsName()),
 				err,
 			)
@@ -434,12 +443,10 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 			principalID.GetResourceType())
 	}
 
-	resourceID := entitlement.GetResource().GetId().GetResource()
-	if resourceID == "" || strings.Contains(resourceID, securableKeySeparator) {
-		return annos, fmt.Errorf("databricks-connector: failed to parse metastore resource id: %w",
-			fmt.Errorf("invalid metastore resource id %q", resourceID))
+	ref, err := parseMetastoreID(entitlement.GetResource().GetId().GetResource())
+	if err != nil {
+		return annos, err
 	}
-	ref := securableRef{metastoreID: resourceID}
 
 	entitlementID := entitlement.GetId()
 	separator := strings.LastIndex(entitlementID, ":")
@@ -480,8 +487,12 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
 	}
 	if !exists {
-		return annos, status.Errorf(codes.NotFound,
-			"databricks-connector: metastore %s is no longer listed on the account, so it cannot be changed", ref.metastoreID)
+		// The metastore is gone from the account, so the privilege is gone with it and
+		// the end state the revoke asked for already holds. Reporting NotFound instead
+		// would fail the task on every retry against a securable that can never return.
+		annos.Update(&v2.GrantAlreadyRevoked{})
+
+		return annos, nil
 	}
 
 	trustworthy, rateLimit, err := m.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
@@ -502,6 +513,9 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 			principalID.GetResource(), err)
 	}
 
+	// Grant rejects an empty name because it has to send one to add a privilege.
+	// Revoke does not: a principal deleted after the grant was synced keeps its
+	// numeric id in the assignment, and removing by id is what clears the row.
 	principalName, _, err := unityPrincipalName(ctx, m.client, principalID)
 	if err != nil {
 		return annos, fmt.Errorf("databricks-connector: failed to resolve the Unity Catalog name of principal %s: %w",
@@ -539,7 +553,7 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 	}
 
 	var seen []databricks.PrivilegeAssignment
-	rateLimit, err = m.client.ForEachPermissionsPage(ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "",
+	rateLimit, err = m.client.ForEachUncachedPermissionsPage(ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "",
 		func(page []databricks.PrivilegeAssignment) (bool, error) {
 			seen = append(seen, page...)
 			matched, ok := matchHeld(seen)
@@ -578,7 +592,7 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 		if isForbiddenError(err) {
 			return annos, uhttp.WrapErrors(
 				codes.PermissionDenied,
-				fmt.Sprintf("databricks-connector: cannot revoke %s on %s %s: the connector principal needs MANAGE on it",
+				fmt.Sprintf("databricks-connector: cannot revoke %s on %s %s: the connector principal needs to be a metastore admin (its owner) or an account admin",
 					privilege, databricks.SecurableMetastore, ref.permissionsName()),
 				err,
 			)

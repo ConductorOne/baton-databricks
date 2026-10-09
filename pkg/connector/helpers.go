@@ -239,6 +239,26 @@ func isForbiddenError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
 }
 
+// isUnreadableWorkspaceError reports an answer that says this credential cannot
+// read this workspace, which is a fact about that workspace and not about the
+// account. Access-path discovery treats all three alike: the workspace carries
+// nothing this sync can read. The distinction matters because only codes.NotFound
+// is a warning to the SDK — every other code fails the whole sync, so letting one
+// unreadable workspace escape here would take down the resource types that work.
+func isUnreadableWorkspaceError(err error) bool {
+	var apiErr *databricks.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+
+	switch apiErr.StatusCode {
+	case http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
+}
+
 // A privilege assignment carries the numeric SCIM id in principal_id, which is the
 // only handle left on a principal that no longer resolves to a name.
 func unityPrincipalScimID(principal *v2.ResourceId) (string, error) {

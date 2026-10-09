@@ -155,7 +155,7 @@ func New(
 	return &Databricks{
 		client:       client,
 		workspaces:   workspaces,
-		unityCatalog: newUnityCatalog(client, clientID),
+		unityCatalog: newUnityCatalog(client, clientID, configuredWorkspaceSet(workspaces)),
 		opts:         opts,
 	}, nil
 }
