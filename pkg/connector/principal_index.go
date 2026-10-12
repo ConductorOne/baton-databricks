@@ -82,6 +82,82 @@ func (u *unityCatalog) ownsPrincipal(name string) bool {
 	return u.ownPrincipal != "" && strings.EqualFold(name, u.ownPrincipal)
 }
 
+// principalsForGrants builds the index Grants uses for assignments and owner.
+// Privilege assignments carry a principal_id with no type discriminator, so they
+// still require a full account SCIM walk. An owner-only page — the common
+// table/schema case — is one to three targeted filters. A workspace-admins
+// owner matches none of them and must not pay for listing every account principal.
+func (u *unityCatalog) principalsForGrants(
+	ctx context.Context,
+	assignments []databricks.PrivilegeAssignment,
+	owner string,
+) (*principalIndex, *v2.RateLimitDescription, error) {
+	if len(assignments) > 0 {
+		return u.listPrincipals(ctx)
+	}
+	if owner == "" {
+		return newPrincipalIndex(), nil, nil
+	}
+
+	return u.indexOwner(ctx, owner)
+}
+
+// indexOwner asks each principal namespace for that one name. The first hit
+// wins, in the same order listPrincipals writes the index (users, groups,
+// service principals).
+func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principalIndex, *v2.RateLimitDescription, error) {
+	index := newPrincipalIndex()
+
+	userID, rateLimit, err := u.client.FindUserID(ctx, "", owner)
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("failed to resolve owner %q as a user: %w", owner, err)
+	}
+	if userID != "" {
+		index.add(ctx, userID, []string{owner}, &v2.ResourceId{ResourceType: userResourceType.Id, Resource: userID})
+
+		return index, rateLimit, nil
+	}
+
+	groupID, groupRateLimit, err := u.client.FindGroupID(ctx, "", owner)
+	if groupRateLimit != nil {
+		rateLimit = groupRateLimit
+	}
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("failed to resolve owner %q as a group: %w", owner, err)
+	}
+	if groupID != "" {
+		accountResourceId, err := rs.NewResourceID(accountResourceType, u.client.GetAccountId())
+		if err != nil {
+			return nil, rateLimit, err
+		}
+		resourceId, err := rs.NewResourceID(groupResourceType, groupResourceId(ctx, groupID, accountResourceId))
+		if err != nil {
+			return nil, rateLimit, err
+		}
+		index.add(ctx, groupID, []string{owner}, resourceId)
+
+		return index, rateLimit, nil
+	}
+
+	servicePrincipalID, servicePrincipalRateLimit, err := u.client.FindServicePrincipalID(ctx, "", owner)
+	if servicePrincipalRateLimit != nil {
+		rateLimit = servicePrincipalRateLimit
+	}
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("failed to resolve owner %q as a service principal: %w", owner, err)
+	}
+	if servicePrincipalID != "" {
+		index.add(ctx, servicePrincipalID, []string{owner}, &v2.ResourceId{
+			ResourceType: servicePrincipalResourceType.Id,
+			Resource:     servicePrincipalID,
+		})
+
+		return index, rateLimit, nil
+	}
+
+	return index, rateLimit, nil
+}
+
 func (u *unityCatalog) listPrincipals(ctx context.Context) (*principalIndex, *v2.RateLimitDescription, error) {
 	accountResourceId, err := rs.NewResourceID(accountResourceType, u.client.GetAccountId())
 	if err != nil {
