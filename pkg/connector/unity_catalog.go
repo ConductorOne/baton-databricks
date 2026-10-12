@@ -55,7 +55,8 @@ type unityCatalog struct {
 	// ownPrincipal is the applicationId of the service principal the connector authenticates as.
 	ownPrincipal string
 
-	// scope is applied when catalogs are collected, so a filtered catalog is absent exactly as a deleted one is.
+	// scope is applied when catalogs are collected. A filtered catalog is
+	// absent from the snapshot; Revoke must not treat that absence as deleted.
 	scope catalogFilter
 
 	// workspaces is the configured allowlist, empty when none was given. Every
@@ -106,7 +107,8 @@ func catalogsFromSnapshot(snap routingSnapshot, metastoreID string) (map[string]
 
 // accessCatalog resolves the workspace a catalog-scoped securable is read through.
 // A catalog recorded with an empty workspace errors, because emitting it as absent
-// would delete it. A catalog the snapshot does not hold is gone (or out of scope).
+// would delete it. A catalog the snapshot does not hold is not listed here — it
+// may be deleted, isolated to a workspace this sync does not cover, or filtered.
 func accessCatalog(
 	snap routingSnapshot,
 	ref securableRef,
@@ -130,6 +132,37 @@ func accessCatalog(
 	}
 
 	return facts.workspace, true, rateLimit, nil
+}
+
+// confirmCatalogGone reports whether a catalog missing from the snapshot is
+// actually gone. GET still succeeding means it is isolated or otherwise out
+// of this sync's listing, so Revoke must not claim the privilege is gone.
+func (u *unityCatalog) confirmCatalogGone(
+	ctx context.Context,
+	snap routingSnapshot,
+	ref securableRef,
+	rateLimit *v2.RateLimitDescription,
+) (bool, *v2.RateLimitDescription, error) {
+	workspace, exists, rateLimit, err := workspaceFromSnapshot(snap, ref.metastoreID, rateLimit)
+	if err != nil {
+		return false, rateLimit, err
+	}
+	if !exists {
+		return true, rateLimit, nil
+	}
+
+	_, getRateLimit, err := u.client.GetCatalog(ctx, workspace, ref.catalog())
+	if getRateLimit != nil {
+		rateLimit = getRateLimit
+	}
+	if err == nil {
+		return false, rateLimit, nil
+	}
+	if isSecurableGone(err, databricks.ErrorCodeCatalogDoesNotExist) {
+		return true, rateLimit, nil
+	}
+
+	return false, rateLimit, err
 }
 
 func workspaceFromSnapshot(snap routingSnapshot, metastoreID string, rateLimit *v2.RateLimitDescription) (string, bool, *v2.RateLimitDescription, error) {
@@ -459,23 +492,56 @@ func (u *unityCatalog) collectCatalogs(ctx context.Context, metastoreID string, 
 				isolationMode: catalog.IsolationMode,
 				workspace:     workspace,
 			}
-
-			// An absent accessible_in_current_workspace and a false one are different
-			// answers, so the catalog is still recorded: only "not listed" means gone.
-			if catalog.AccessibleInCurrentWorkspace != nil && !*catalog.AccessibleInCurrentWorkspace {
-				entry.workspace = ""
-				if _, ok := facts[name]; !ok {
-					facts[name] = entry
-				}
-
-				continue
-			}
 			if existing, ok := facts[name]; ok && existing.workspace != "" {
 				// Another workspace already derived the same resource key.
 				continue
 			}
 
 			facts[name] = entry
+		}
+	}
+
+	// include_unbound lists catalogs bound only to workspaces this sync does
+	// not cover. Record them with an empty workspace so List fails closed
+	// instead of omitting them (which C1 would read as a delete). The API
+	// honours the flag only when the caller can update bindings; a 401/403
+	// is that permission missing, not a listing failure.
+	if len(workspaces) > 0 {
+		unbound, unboundRateLimit, unboundErr := u.client.DrainUnboundCatalogs(ctx, workspaces[0], ResourcesPageSize)
+		if unboundRateLimit != nil {
+			rateLimit = unboundRateLimit
+		}
+		if unboundErr != nil {
+			if !isUnreadableWorkspaceError(unboundErr) {
+				return nil, rateLimit, fmt.Errorf("failed to list unbound catalogs through workspace %s: %w", workspaces[0], unboundErr)
+			}
+			ctxzap.Extract(ctx).Debug("databricks-connector: include_unbound was denied, so catalogs bound only to other workspaces stay invisible",
+				zap.String("workspace", workspaces[0]),
+				zap.Error(unboundErr),
+			)
+		} else {
+			for _, catalog := range unbound {
+				name := catalog.Name
+				if name == "" {
+					continue
+				}
+				if catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID {
+					continue
+				}
+				seen = append(seen, name)
+				if !u.scope.covers(name) {
+					continue
+				}
+				if _, ok := facts[name]; ok {
+					continue
+				}
+				facts[name] = catalogFacts{
+					name:          name,
+					owner:         catalog.Owner,
+					catalogType:   catalog.CatalogType,
+					isolationMode: catalog.IsolationMode,
+				}
+			}
 		}
 	}
 

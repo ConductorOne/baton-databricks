@@ -172,8 +172,12 @@ revoke build different request bodies.
 - **Isolated catalogs need a reachable workspace.** A catalog whose isolation
   mode is `ISOLATED` is only visible from the workspaces it is bound to, so the
   connector enumerates catalogs through every workspace it can reach and
-  de-duplicates the result. A catalog bound only to a workspace the connector
-  cannot reach fails the sync rather than being silently omitted.
+  de-duplicates the result. Catalogs bound only elsewhere are discovered with
+  `include_unbound` when the connector principal can update catalog-workspace
+  bindings; those fail the sync rather than being omitted (an omit would look
+  like a delete). Without that permission they stay invisible to the listing
+  API. Revoke of a grant on a catalog that is not listed confirms deletion
+  with `GET /catalogs/{name}` and errors if the catalog still exists.
 - **The first sync attempts both types.** Because the types are opt-in,
   ConductorOne does not know they exist until the first sync reports them, so
   that sync covers both. On a large metastore that can be very long. Scope it with `--databricks-catalogs`, or restrict the run with

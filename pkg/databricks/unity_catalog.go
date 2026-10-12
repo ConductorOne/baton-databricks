@@ -109,6 +109,7 @@ func (c *Client) listCatalogs(
 	ctx context.Context,
 	workspaceId, pageToken string,
 	maxResults uint,
+	includeUnbound bool,
 ) (
 	[]Catalog,
 	string,
@@ -118,8 +119,9 @@ func (c *Client) listCatalogs(
 	catalogs, next, ratelimitData, err := listSecurables(ctx, c, workspaceId, unityCatalogCatalogsEndpoint,
 		func(res *catalogsResponse) ([]Catalog, string) { return res.Catalogs, res.NextPageToken },
 		&unityCatalogVars{
-			maxResults: &maxResults,
-			pageToken:  pageToken,
+			maxResults:     &maxResults,
+			pageToken:      pageToken,
+			includeUnbound: includeUnbound,
 		})
 	if err != nil {
 		return nil, "", ratelimitData, fmt.Errorf("failed to list catalogs: %w", err)
@@ -140,8 +142,47 @@ func (c *Client) DrainCatalogs(
 	error,
 ) {
 	return drainPagesFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
-		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults)
+		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults, false)
 	})
+}
+
+// DrainUnboundCatalogs is DrainCatalogs with include_unbound=true, so catalogs
+// not bound to workspaceId are included when the caller can update bindings.
+func (c *Client) DrainUnboundCatalogs(
+	ctx context.Context,
+	workspaceId string,
+	maxResults uint,
+) (
+	[]Catalog,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return drainPagesFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
+		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults, true)
+	})
+}
+
+// GetCatalog (GET /api/2.1/unity-catalog/catalogs/{name}).
+func (c *Client) GetCatalog(
+	ctx context.Context,
+	workspaceId, name string,
+) (
+	Catalog,
+	*v2.RateLimitDescription,
+	error,
+) {
+	if name == "" {
+		return Catalog{}, nil, invalidArgument("catalog name is required")
+	}
+
+	var res Catalog
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogCatalogsEndpoint, name)
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return Catalog{}, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to get catalog %s: %w", name, err))
+	}
+
+	return res, ratelimitData, nil
 }
 
 // ForEachCatalogPage walks listCatalogs without retaining the pages.
@@ -152,7 +193,7 @@ func (c *Client) ForEachCatalogPage(
 	visit func([]Catalog) (bool, error),
 ) (*v2.RateLimitDescription, error) {
 	return forEachPageFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
-		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults)
+		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults, false)
 	}, visit)
 }
 
