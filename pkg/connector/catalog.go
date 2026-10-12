@@ -51,10 +51,6 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 	var rv []*v2.Resource
 	for _, item := range items {
 		childRef := parent.child(item.name)
-		if isUnderInformationSchema(childRef) {
-			continue
-		}
-
 		built, err := newSecurableResource(catalogResourceType, securableTypeCatalog, []*v2.ResourceType{schemaResourceType}, item, childRef, parentResourceID)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(

@@ -147,9 +147,13 @@ account
             └── volume
 ```
 
-Views and materialized views are tables: in Unity Catalog they are the `table`
-securable, and the connector derives each table's privilege set from its
-`table_type`, so a view rejects `ALL_PRIVILEGES` and `MODIFY`.
+Views, materialized views, metric views and streaming tables are tables: in
+Unity Catalog they are the `table` securable, and the connector derives each
+table's privilege set from its `table_type`. A view is not offered the DML
+privileges (`DELETE`, `INSERT`, `UPDATE`, `MODIFY`). `ALL_PRIVILEGES` on a
+view is reported when it already exists; the grants API still rejects granting
+it. A streaming table is offered `REFRESH` and `MODIFY`, not the table DML
+trio.
 
 Every level exposes its privileges as entitlements (`SELECT`, `MODIFY`,
 `USE_CATALOG`, `READ_VOLUME` and so on) plus a non-grantable `owner`. A

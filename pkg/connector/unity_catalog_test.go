@@ -427,10 +427,10 @@ func TestHoldsManageIgnoresAllPrivileges(t *testing.T) {
 	}
 }
 
-// Databricks documents ALL_PRIVILEGES on a view but answers 400 for it, and a
-// materialized view accepts it and adds REFRESH. table_type is the only field that
-// says which of the three a row is. The offered entitlements must also equal the
-// set Grant validates, or C1 shows an entitlement that fails on every request.
+// table_type is the only field that says which privilege set a table row uses.
+// A view is offered ALL_PRIVILEGES (Databricks documents it; Grant still rejects
+// the REST write). The offered entitlements must also equal the set Grant
+// validates, or C1 shows an entitlement that fails on every request.
 func TestTablePrivilegesFollowTableType(t *testing.T) {
 	t.Parallel()
 
@@ -441,10 +441,13 @@ func TestTablePrivilegesFollowTableType(t *testing.T) {
 		wantAll     bool
 		wantRefresh bool
 	}{
-		{name: "view", tableType: "VIEW", setType: true, wantAll: false, wantRefresh: false},
+		{name: "view", tableType: "VIEW", setType: true, wantAll: true, wantRefresh: false},
+		{name: "metric view", tableType: "METRIC_VIEW", setType: true, wantAll: true, wantRefresh: false},
 		{name: "managed", tableType: "MANAGED", setType: true, wantAll: true, wantRefresh: false},
 		{name: "materialized view", tableType: "MATERIALIZED_VIEW", setType: true, wantAll: true, wantRefresh: true},
+		{name: "streaming table", tableType: "STREAMING_TABLE", setType: true, wantAll: true, wantRefresh: true},
 		{name: "missing type", setType: false, wantAll: true, wantRefresh: true},
+		{name: "empty type", tableType: "", setType: true, wantAll: true, wantRefresh: true},
 	}
 
 	for _, tc := range cases {

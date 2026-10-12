@@ -16,6 +16,8 @@ const (
 	// is the only field that says which privileges apply.
 	tableTypeView             = "VIEW"
 	tableTypeMaterializedView = "MATERIALIZED_VIEW"
+	tableTypeStreamingTable   = "STREAMING_TABLE"
+	tableTypeMetricView       = "METRIC_VIEW"
 
 	// ownerEntitlement names the securable's owner. Ownership is single-valued and
 	// Databricks has no notion of removing an owner, so it is never grantable.
@@ -96,18 +98,31 @@ var (
 		"UPDATE",
 	}
 
-	// viewPrivileges drops the DML trio and ALL_PRIVILEGES. The documentation lists
-	// ALL_PRIVILEGES on a view, but the API answers 400 for it.
+	// viewPrivileges matches the privileges reference, including ALL_PRIVILEGES.
+	// The REST grants API still 400s when adding ALL_PRIVILEGES on a VIEW; Grant
+	// rejects that write. Grants() must still emit it when SQL already granted it.
 	viewPrivileges = []string{
+		privilegeAllPrivileges,
 		"APPLY_TAG",
 		privilegeManage,
 		"READ_METADATA",
 		"SELECT",
 	}
 
-	// A materialized view accepts ALL_PRIVILEGES where a view does not, and a
-	// permissions read returns only it, not the implied SELECT and REFRESH.
-	materializedViewPrivileges = append(slices.Clone(viewPrivileges), privilegeRefresh, privilegeAllPrivileges)
+	// A materialized view accepts ALL_PRIVILEGES, and a permissions read returns
+	// only it, not the implied SELECT and REFRESH.
+	materializedViewPrivileges = append(slices.Clone(viewPrivileges), privilegeRefresh)
+
+	// Streaming tables take REFRESH and MODIFY, not the table DML trio.
+	streamingTablePrivileges = []string{
+		privilegeAllPrivileges,
+		"APPLY_TAG",
+		privilegeManage,
+		"MODIFY",
+		"READ_METADATA",
+		privilegeRefresh,
+		"SELECT",
+	}
 
 	// For a grant whose table variant is not knowable.
 	anyTablePrivileges = append(slices.Clone(tablePrivileges), privilegeRefresh)
@@ -137,14 +152,16 @@ func withoutPrivileges(privileges []string, drop ...string) []string {
 	})
 }
 
-// privilegesForTableType falls back to the full table set for an absent or
-// unrecognised table_type.
+// privilegesForTableType falls back to the union of every variant for an
+// absent or unrecognised table_type.
 func privilegesForTableType(tableType string) []string {
 	switch strings.ToUpper(strings.TrimSpace(tableType)) {
-	case tableTypeView:
+	case tableTypeView, tableTypeMetricView:
 		return viewPrivileges
 	case tableTypeMaterializedView:
 		return materializedViewPrivileges
+	case tableTypeStreamingTable:
+		return streamingTablePrivileges
 	default:
 		return tablePrivileges
 	}
