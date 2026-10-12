@@ -32,7 +32,7 @@ func TestPrincipalsForGrantsOwnerOnlyDoesNotListAccount(t *testing.T) {
 		}
 	})
 
-	uc := newUnityCatalog(client, "app-1", nil)
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 	index, _, err := uc.principalsForGrants(context.Background(), nil, "alice@example.com")
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
@@ -88,7 +88,7 @@ func TestPrincipalsForGrantsOwnerOnlyResolvesGroupAndServicePrincipal(t *testing
 				}
 			})
 
-			uc := newUnityCatalog(client, "app-1", nil)
+			uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 			index, _, err := uc.principalsForGrants(context.Background(), nil, test.owner)
 			if err != nil {
 				t.Fatalf("principalsForGrants: %v", err)
@@ -125,7 +125,7 @@ func TestPrincipalsForGrantsWorkspaceAdminsOwnerDoesNotListAccount(t *testing.T)
 		_ = json.NewEncoder(w).Encode(map[string]any{"Resources": []any{}, "totalResults": 0})
 	})
 
-	uc := newUnityCatalog(client, "app-1", nil)
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 	index, _, err := uc.principalsForGrants(context.Background(), nil, "_workspace_admins_workspace-1")
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
@@ -153,7 +153,7 @@ func TestPrincipalsForGrantsAssignmentsStillListAccount(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"Resources": []any{}, "totalResults": 0})
 	})
 
-	uc := newUnityCatalog(client, "app-1", nil)
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 	_, _, err := uc.principalsForGrants(context.Background(), []databricks.PrivilegeAssignment{{
 		Principal:   "alice@example.com",
 		PrincipalID: json.Number("1"),
@@ -176,7 +176,7 @@ func TestPrincipalsForGrantsEmptyPageMakesNoSCIMCalls(t *testing.T) {
 		http.Error(w, "no SCIM call expected", http.StatusInternalServerError)
 	})
 
-	uc := newUnityCatalog(client, "app-1", nil)
+	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
 	index, _, err := uc.principalsForGrants(context.Background(), nil, "")
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
