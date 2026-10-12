@@ -184,22 +184,18 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableSchema, ref.permissionsName(), err)
 	}
 
-	needPrincipals := len(assignments) > 0
+	owner := ""
 	if pageToken == "" {
-		if owner, ok := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyOwner); ok && owner != "" {
-			needPrincipals = true
+		if v, ok := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyOwner); ok {
+			owner = v
 		}
 	}
 
-	principals := newPrincipalIndex()
-	if needPrincipals {
-		var principalRateLimit *v2.RateLimitDescription
-		principals, principalRateLimit, err = b.uc.listPrincipals(ctx)
-		noteRateLimit(&annos, principalRateLimit)
-		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to list account principals: %w", err)
-		}
+	principals, principalRateLimit, err := b.uc.principalsForGrants(ctx, assignments, owner)
+	noteRateLimit(&annos, principalRateLimit)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+			"databricks-connector: failed to resolve account principals: %w", err)
 	}
 
 	var rv []*v2.Grant
