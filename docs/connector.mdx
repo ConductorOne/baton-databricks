@@ -136,9 +136,9 @@ This is the broadest option. It covers every catalog in the metastore.
   </Step>
 </Steps>
 
-#### Option 2: Grant MANAGE on a single catalog
+#### Option 2: Grant MANAGE, USE CATALOG and USE SCHEMA on a single catalog
 
-This is the narrowest option. It covers one catalog, so repeat it for each catalog you want synced.
+This is the narrowest option. It covers one catalog, so repeat it for each catalog you want synced. `MANAGE` alone is not enough to list every schema: Databricks returns only the schemas the caller owns or holds `USE SCHEMA` on unless the caller is the metastore admin or the catalog owner.
 
 <Steps>
   <Step>
@@ -148,7 +148,7 @@ This is the narrowest option. It covers one catalog, so repeat it for each catal
   Select **Permissions**, then click **Grant**.
   </Step>
   <Step>
-  Select the service principal, check **MANAGE**, and confirm.
+  Select the service principal, check **MANAGE**, **USE CATALOG** and **USE SCHEMA**, and confirm.
   </Step>
 </Steps>
 

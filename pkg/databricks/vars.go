@@ -182,6 +182,10 @@ type unityCatalogVars struct {
 	// omit_username is deliberately not sent alongside these: it also removes
 	// owner, which every securable's profile and its owner grant depend on.
 	omitTablePayload bool
+
+	// include_unbound lists catalogs not bound to the calling workspace. The
+	// API honours it only when the caller can update catalog-workspace bindings.
+	includeUnbound bool
 }
 
 func (v *unityCatalogVars) Apply(params *url.Values) {
@@ -208,5 +212,9 @@ func (v *unityCatalogVars) Apply(params *url.Values) {
 	if v.omitTablePayload {
 		params.Add("omit_columns", "true")
 		params.Add("omit_properties", "true")
+	}
+
+	if v.includeUnbound {
+		params.Add("include_unbound", "true")
 	}
 }

@@ -82,6 +82,9 @@ Behaviours that shape the implementation:
   can both still carry one.
 - **The tables endpoint caps `max_results` at 50 and requires `schema_name`.**
   Listing tables therefore costs one call per catalog-schema pair.
+- **HTTP cache keys include the request Host.** Two workspaces share paths such
+  as `/unity-catalog/catalogs`, and without the host in the key one workspace's
+  listing would be served for another.
 - **A metastore is addressed by its UUID.** Its name is rejected with HTTP 400.
 - **Table listings are requested with `omit_columns` and `omit_properties`**,
   which carry most of a table response's weight, but deliberately not
@@ -177,8 +180,12 @@ revoke build different request bodies.
 - **Isolated catalogs need a reachable workspace.** A catalog whose isolation
   mode is `ISOLATED` is only visible from the workspaces it is bound to, so the
   connector enumerates catalogs through every workspace it can reach and
-  de-duplicates the result. A catalog bound only to a workspace the connector
-  cannot reach fails the sync rather than being silently omitted.
+  de-duplicates the result. Catalogs bound only elsewhere are discovered with
+  `include_unbound` when the connector principal can update catalog-workspace
+  bindings; those fail the sync rather than being omitted (an omit would look
+  like a delete). Without that permission they stay invisible to the listing
+  API. Revoke of a grant on a catalog that is not listed confirms deletion
+  with `GET /catalogs/{name}` and errors if the catalog still exists.
 - **The first sync attempts all five types.** Because the types are opt-in,
   ConductorOne does not know they exist until the first sync reports them, so
   that sync covers every one of them. On a large metastore that can be very
