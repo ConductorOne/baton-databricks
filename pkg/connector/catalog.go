@@ -463,12 +463,22 @@ func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotat
 				ref.catalog(), databricks.SecurableCatalog, ref.permissionsName(), b.uc.scope.describe())
 		}
 
-		// The catalog is gone, so the privilege is gone with it and the end state the
-		// revoke asked for already holds. Reporting NotFound instead would fail the
-		// task on every retry against a securable that can never return.
-		annos.Update(&v2.GrantAlreadyRevoked{})
+		gone, rateLimit, err := b.uc.confirmCatalogGone(ctx, snap, ref, rateLimit)
+		noteRateLimit(&annos, rateLimit)
+		if err != nil {
+			return annos, fmt.Errorf("databricks-connector: failed to confirm whether catalog %s still exists: %w",
+				ref.catalog(), err)
+		}
+		if gone {
+			annos.Update(&v2.GrantAlreadyRevoked{})
 
-		return annos, nil
+			return annos, nil
+		}
+
+		return annos, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: catalog %s exists but is not listed on any workspace this sync covers, "+
+				"so %s %s cannot be revoked; bind it to a workspace this sync covers or include that workspace",
+			ref.catalog(), databricks.SecurableCatalog, ref.permissionsName())
 	}
 
 	trustworthy, rateLimit, err := b.uc.grantsAreTrustworthy(ctx, snap, ref, workspace)

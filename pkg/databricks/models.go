@@ -152,12 +152,11 @@ type Metastore struct {
 }
 
 type Catalog struct {
-	Name                         string `json:"name"`
-	MetastoreID                  string `json:"metastore_id"`
-	Owner                        string `json:"owner"`
-	CatalogType                  string `json:"catalog_type"`
-	IsolationMode                string `json:"isolation_mode"`
-	AccessibleInCurrentWorkspace *bool  `json:"accessible_in_current_workspace"`
+	Name          string `json:"name"`
+	MetastoreID   string `json:"metastore_id"`
+	Owner         string `json:"owner"`
+	CatalogType   string `json:"catalog_type"`
+	IsolationMode string `json:"isolation_mode"`
 }
 
 type Schema struct {

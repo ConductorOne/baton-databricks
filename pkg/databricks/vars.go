@@ -177,6 +177,10 @@ type unityCatalogVars struct {
 	principal   string
 	maxResults  *uint
 	pageToken   string
+
+	// include_unbound lists catalogs not bound to the calling workspace. The
+	// API honours it only when the caller can update catalog-workspace bindings.
+	includeUnbound bool
 }
 
 func (v *unityCatalogVars) Apply(params *url.Values) {
@@ -194,5 +198,9 @@ func (v *unityCatalogVars) Apply(params *url.Values) {
 
 	if v.pageToken != "" {
 		params.Add("page_token", v.pageToken)
+	}
+
+	if v.includeUnbound {
+		params.Add("include_unbound", "true")
 	}
 }

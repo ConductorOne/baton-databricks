@@ -234,6 +234,10 @@ func isNotFoundError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
+func isSecurableGone(err error, errorCodes ...string) bool {
+	return databricks.IsSecurableGone(err, errorCodes...)
+}
+
 func isForbiddenError(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
