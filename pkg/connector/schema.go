@@ -44,10 +44,6 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse schema parent %q: %w", parentResourceID.GetResource(), err)
 	}
 
-	if isUnderInformationSchema(parent) {
-		return nil, nil, nil
-	}
-
 	l := ctxzap.Extract(ctx)
 	annos := annotations.Annotations{}
 	snap, rateLimit, err := b.uc.buildRouting(ctx)
@@ -93,17 +89,8 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 	}
 
 	if err != nil {
-		if !isNotFoundError(err) {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to list %ss under %s: %w", schemaResourceType.Id, parent.resourceKey(), err)
-		}
-
-		l.Debug("databricks-connector: securable parent no longer exists",
-			zap.String("resource_type", schemaResourceType.Id),
-			zap.String("parent", parent.resourceKey()),
-		)
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+			"databricks-connector: failed to list %ss under %s: %w", schemaResourceType.Id, parent.resourceKey(), err)
 	}
 
 	var rv []*v2.Resource
@@ -167,8 +154,9 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
 	}
 	if !exists {
-		ctxzap.Extract(ctx).Debug("databricks-connector: schema is no longer listed",
+		ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed",
 			zap.String("schema", ref.resourceKey()),
+			zap.String("catalog", ref.catalog()),
 		)
 
 		return nil, &rs.SyncOpResults{Annotations: annos}, nil
@@ -191,9 +179,6 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 	assignments, nextPageToken, rateLimit, err := b.client.ListPermissions(
 		ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "", pageToken)
 	noteRateLimit(&annos, rateLimit)
-	// The permissions endpoint answers 404 for a securable that is gone, for a principal
-	// it does not know, and for a workspace that does not serve this metastore, and the
-	// three are separable only by message text.
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableSchema, ref.permissionsName(), err)
@@ -521,12 +506,22 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 				ref.catalog(), databricks.SecurableSchema, ref.permissionsName(), b.uc.scope.describe())
 		}
 
-		// The catalog is gone, so the schema's privilege is gone with it and the end
-		// state the revoke asked for already holds. Reporting NotFound instead would
-		// fail the task on every retry against a securable that can never return.
-		annos.Update(&v2.GrantAlreadyRevoked{})
+		gone, rateLimit, err := b.uc.confirmCatalogGone(ctx, snap, ref, rateLimit)
+		noteRateLimit(&annos, rateLimit)
+		if err != nil {
+			return annos, fmt.Errorf("databricks-connector: failed to confirm whether catalog %s still exists: %w",
+				ref.catalog(), err)
+		}
+		if gone {
+			annos.Update(&v2.GrantAlreadyRevoked{})
 
-		return annos, nil
+			return annos, nil
+		}
+
+		return annos, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: catalog %s exists but is not listed on any workspace this sync covers, "+
+				"so %s %s cannot be revoked; bind it to a workspace this sync covers or include that workspace",
+			ref.catalog(), databricks.SecurableSchema, ref.permissionsName())
 	}
 
 	trustworthy, rateLimit, err := b.uc.grantsAreTrustworthy(ctx, snap, ref, workspace)
@@ -596,6 +591,12 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 		})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if isSecurableGone(err, databricks.ErrorCodeSchemaDoesNotExist) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
+
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w",
 			databricks.SecurableSchema, ref.permissionsName(), err)
 	}
@@ -620,6 +621,11 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 		[]databricks.PermissionsChange{removal})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if isSecurableGone(err, databricks.ErrorCodeSchemaDoesNotExist) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
 		if isForbiddenError(err) {
 			return annos, uhttp.WrapErrors(
 				codes.PermissionDenied,
