@@ -11,6 +11,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -35,6 +36,20 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	}
 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
+}
+
+// groupSecurableGrantOptions annotates a group-held Unity Catalog grant so C1
+// expands it through the group's member entitlement. Shallow stays unset:
+// setting it would suppress propagation through a nested group.
+func groupSecurableGrantOptions(principalId *v2.ResourceId) []grant.GrantOption {
+	if principalId.GetResourceType() != groupResourceType.Id {
+		return nil
+	}
+
+	return []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
+		EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
+		ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
+	})}
 }
 
 func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {

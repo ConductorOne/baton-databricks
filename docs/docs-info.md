@@ -24,7 +24,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **OAuth**: a service principal OAuth client ID and client secret. Syncs the account and every workspace the service principal can access. This is the connector's only authentication method.
    >
-   > Google Cloud Platform and Azure Databricks customers also provide the account hostname and hostname.
+   > Google Cloud Platform and Azure Databricks customers also provide the workspace hostname. Account Hostname is optional: the connector derives it from Hostname when unset.
 
 2. For each item in the list above:
 
@@ -36,11 +36,11 @@ While developing the connector, please fill out this form. This information is n
 
    * Does the credential need any specific scopes or permissions? If so, list them here.
 
-     > The credential must have admin access to each resource it reads or writes: account-admin on the Databricks account (for account-level sync and provisioning) and workspace-admin on each workspace being synced.
+     > The credential must have admin access to each resource it reads or writes: account-admin on the Databricks account (for account-level sync and provisioning) and workspace-admin assigned directly to the service principal on each workspace being synced (Admin inherited only through a group is not enough).
      >
      > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing). The scope-by-scope breakdown is in `## Permission model` below.
      >
-     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be an admin of a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. `## Permission model` explains why neither is optional.
+     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. `## Permission model` explains why neither is optional.
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
@@ -116,7 +116,8 @@ A privilege read is only trustworthy when the service principal satisfies at
 least one of these per metastore:
 
 - it is the owner of the metastore, or
-- it is an admin of a workspace the metastore is assigned to.
+- it is assigned Admin directly on a workspace the metastore is assigned to
+  (Admin inherited only through a group is not enough).
 
 Holding a privilege is not an option at this level: Databricks rejects `MANAGE`
 and `ALL_PRIVILEGES` on a metastore, so there is no privilege whose presence
@@ -157,6 +158,10 @@ revoke build different request bodies.
   but the connector reports the privilege assignments recorded on the object
   itself. The endpoint that exposes inheritance does not return principal IDs,
   which are what the connector needs to resolve a principal unambiguously.
+- **Workspace Admin must be assigned directly.** The connector matches the
+  service principal's application ID or its own SCIM id against the workspace's
+  ADMIN assignments. Admin inherited only through a group is not treated as
+  enough.
 - **Ownership is read-only.** The owner of a metastore is shown but cannot be
   provisioned. An owner that is not an account identity — `System user`, or a
   workspace admins group such as `_workspace_admins_<workspace_id>` — does not

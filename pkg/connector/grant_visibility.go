@@ -22,28 +22,11 @@ func (u *unityCatalog) metastoreGrantsAreTrustworthy(
 	snap routingSnapshot,
 	metastoreID, workspace string,
 ) (bool, *v2.RateLimitDescription, error) {
-	return u.metastoreProbe(ctx, snap, metastoreID, workspace, nil)
-}
-
-func (u *unityCatalog) metastoreProbe(
-	ctx context.Context,
-	snap routingSnapshot,
-	metastoreID, workspace string,
-	rateLimit *v2.RateLimitDescription,
-) (bool, *v2.RateLimitDescription, error) {
 	if metastore, ok := snap.metastores[metastoreID]; ok && u.ownsPrincipal(metastore.Owner) {
-		return true, rateLimit, nil
+		return true, nil, nil
 	}
 
-	admin, adminRateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
-	if adminRateLimit != nil {
-		rateLimit = adminRateLimit
-	}
-	if err != nil {
-		return false, rateLimit, err
-	}
-
-	return admin, rateLimit, nil
+	return u.isWorkspaceAdmin(ctx, snap, workspace)
 }
 
 // isWorkspaceAdmin lists the workspace's permission assignments on every call.
@@ -71,6 +54,9 @@ func (u *unityCatalog) isWorkspaceAdmin(
 
 // holdsWorkspaceAdmin matches the connector's own principal against a workspace's
 // ADMIN assignments. A service principal is named by its applicationId.
+// Admin inherited only through a group is ignored: the connector principal must
+// hold ADMIN itself. Walking every admin group's membership on every Grants call
+// is the cost that would close this gap.
 func (u *unityCatalog) holdsWorkspaceAdmin(
 	ctx context.Context,
 	assignments []databricks.WorkspaceAssignment,

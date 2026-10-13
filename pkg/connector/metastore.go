@@ -164,7 +164,7 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	}
 	if !trustworthy {
 		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant on metastore %s: the connector principal needs to be a metastore admin",
+			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
 			ref.metastoreID)
 	}
 
@@ -212,14 +212,7 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 			continue
 		}
 
-		var options []grant.GrantOption
-		if principalId.GetResourceType() == groupResourceType.Id {
-			// Shallow stays unset: setting it would suppress propagation through a nested group.
-			options = []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
-				EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
-				ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
-			})}
-		}
+		options := groupSecurableGrantOptions(principalId)
 
 		for _, assigned := range assignment.Privileges {
 			if assigned == "" {
@@ -248,14 +241,7 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 					zap.String("owner", owner),
 				)
 			} else if principalId.GetResourceType() == userResourceType.Id || m.willSync(principalId.GetResourceType()) {
-				var options []grant.GrantOption
-				if principalId.GetResourceType() == groupResourceType.Id {
-					// Shallow stays unset: setting it would suppress propagation through a nested group.
-					options = []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
-						EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
-						ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
-					})}
-				}
+				options := groupSecurableGrantOptions(principalId)
 				options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
 				rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
 			}
@@ -331,7 +317,7 @@ func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 	if !trustworthy {
 		return annos, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant on metastore %s: the connector principal needs to be a metastore admin",
+			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
 			ref.metastoreID)
 	}
 
@@ -411,7 +397,7 @@ func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 				codes.PermissionDenied,
 				// MANAGE is not assignable on a metastore, so naming it here would send the
 				// operator after a privilege Databricks rejects. The authority is ownership.
-				fmt.Sprintf("databricks-connector: cannot grant %s on %s %s: the connector principal needs to be a metastore admin (its owner) or an account admin",
+				fmt.Sprintf("databricks-connector: cannot grant %s on %s %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
 					privilege, databricks.SecurableMetastore, ref.permissionsName()),
 				err,
 			)
@@ -502,7 +488,7 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 	}
 	if !trustworthy {
 		return annos, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant on metastore %s: the connector principal needs to be a metastore admin",
+			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
 			ref.metastoreID)
 	}
 
@@ -578,10 +564,8 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 	var removal databricks.PermissionsChange
 	if heldID := held.PrincipalID.String(); heldID != "" && heldID != "0" {
 		removal = databricks.PermissionsChange{PrincipalID: held.PrincipalID, Remove: []string{privilege}}
-	} else if principalName != "" {
-		removal = databricks.PermissionsChange{Principal: principalName, Remove: []string{privilege}}
 	} else {
-		removal = databricks.PermissionsChange{PrincipalID: held.PrincipalID, Remove: []string{privilege}}
+		removal = databricks.PermissionsChange{Principal: principalName, Remove: []string{privilege}}
 	}
 
 	result, rateLimit, err := m.client.UpdatePermissions(ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(),
@@ -591,7 +575,7 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 		if isForbiddenError(err) {
 			return annos, uhttp.WrapErrors(
 				codes.PermissionDenied,
-				fmt.Sprintf("databricks-connector: cannot revoke %s on %s %s: the connector principal needs to be a metastore admin (its owner) or an account admin",
+				fmt.Sprintf("databricks-connector: cannot revoke %s on %s %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
 					privilege, databricks.SecurableMetastore, ref.permissionsName()),
 				err,
 			)

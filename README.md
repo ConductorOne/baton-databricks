@@ -158,16 +158,11 @@ fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions
 
-Unity Catalog uses the same OAuth service principal as the rest of the
-connector. It must be an account admin, and it must be assigned to a running
-workspace the metastore is attached to, because the privilege endpoints are not
-served on the account plane. To read a metastore's grants it must additionally
-own the metastore or be an admin of that workspace — a privilege read cannot
-settle it, since `MANAGE` is rejected there. When neither holds, the connector
-fails the sync with a `PermissionDenied` error naming the metastore rather than
-reporting a partial read. The scopes, roles and privileges behind each read, and
-the reason the connector fails closed, are in
-[docs/docs-info.md](./docs/docs-info.md).
+The same OAuth service principal must own the metastore or be assigned
+**Admin** directly on a workspace attached to it (Admin inherited only through
+a group is not enough). When neither holds, the sync fails with a
+`PermissionDenied` error naming the metastore rather than reporting a partial
+read. Details are in [docs/docs-info.md](./docs/docs-info.md).
 
 ## Accounts with many workspaces
 
