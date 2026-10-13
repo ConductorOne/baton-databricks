@@ -300,6 +300,14 @@ func (c *Client) updatePermissions(
 		return ratelimitData, fmt.Errorf("failed to update permissions on %s %s: %w", securableType, fullName, err)
 	}
 
+	// The provisioning pre-read stored page one under the key the sync reads,
+	// and a PATCH does not invalidate it. Re-reading past the cache overwrites
+	// that entry with the post-change state. The write already landed, so a
+	// failed refresh must not fail it.
+	if _, _, refreshRateLimit, refreshErr := c.listPermissions(ctx, workspaceId, securableType, fullName, "", "", true); refreshErr == nil && refreshRateLimit != nil {
+		ratelimitData = refreshRateLimit
+	}
+
 	stop, err := visit(res.PrivilegeAssignments)
 	if err != nil || stop || res.NextPageToken == "" {
 		return ratelimitData, err

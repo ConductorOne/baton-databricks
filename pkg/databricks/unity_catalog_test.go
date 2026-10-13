@@ -84,8 +84,9 @@ func TestUpdatePermissionsDrainsFromPatchToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdatePermissions: %v", err)
 	}
-	if len(gets) != 1 || gets[0] != "page-2" {
-		t.Fatalf("GET page tokens %v, want [page-2] and not a re-fetch of the PATCH page", gets)
+	// Page one is re-read only to refresh the cache; confirmation comes from the PATCH body.
+	if len(gets) != 2 || gets[0] != "" || gets[1] != "page-2" {
+		t.Fatalf("GET page tokens %v, want the cache refresh then page-2", gets)
 	}
 	if len(got) != 2 || got[0].Principal != "alice" || got[1].Principal != "bob" {
 		t.Fatalf("assignments = %+v, want alice then bob", got)

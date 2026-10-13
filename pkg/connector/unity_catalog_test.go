@@ -449,9 +449,9 @@ func TestGrantsRoutesThroughTheFirstWorkspaceWhereTheProbePasses(t *testing.T) {
 	}
 }
 
-// The metastore was listed a moment before its workspaces were asked for, so a
-// 404 there means it was deleted in between, which is an absence.
-func TestAMetastoreDeletedBetweenListingsIsAbsent(t *testing.T) {
+// Databricks does not document a 404 on the assignment list, so it must not be
+// read as a deletion: pruning on it would make C1 delete the metastore's grants.
+func TestA404OnTheAssignmentListIsUnknownRatherThanDeleted(t *testing.T) {
 	probed := map[string]int{}
 	client, _ := newWorkspaceRoutedClient(t, routingHandler(t,
 		map[string]any{"1": "ms-a", "ms-b": http.StatusNotFound}, probed))
@@ -461,11 +461,11 @@ func TestAMetastoreDeletedBetweenListingsIsAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRouting: %v", err)
 	}
-	if _, ok := snap.metastores["ms-b"]; ok {
-		t.Error("ms-b is still in the snapshot after its assignment list answered 404")
+	if _, ok := snap.metastores["ms-b"]; !ok {
+		t.Error("ms-b was dropped after its assignment list answered 404, so C1 would delete it and its grants")
 	}
-	if slices.Contains(snap.unreadable, "ms-b") {
-		t.Error("ms-b is counted unreadable; a 404 means it is gone")
+	if !slices.Contains(snap.unreadable, "ms-b") {
+		t.Errorf("unreadable = %v, want it to name ms-b", snap.unreadable)
 	}
 }
 

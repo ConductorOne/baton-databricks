@@ -29,7 +29,7 @@ type routingSnapshot struct {
 	asked          int
 
 	// unreadable names the metastores whose workspace assignment list answered
-	// 401 or 403, so which workspaces serve them is unknown rather than none.
+	// 401, 403 or 404, so which workspaces serve them is unknown rather than none.
 	unreadable []string
 
 	// pending maps a metastore to its in-scope assigned workspaces that are not
@@ -221,16 +221,11 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			rateLimit = assignmentRateLimit
 		}
 		if err != nil {
-			// The metastore was listed a moment ago, so a 404 here means it has
-			// since been deleted.
-			if isNotFoundError(err) {
-				ctxzap.Extract(ctx).Debug("databricks-connector: metastore disappeared while its workspaces were being listed",
-					zap.String("metastore", metastoreID),
-				)
-				delete(snap.metastores, metastoreID)
-				continue
-			}
-			if isUnreadableWorkspaceError(err) {
+			// Databricks does not document what a 404 here means, so it is read as
+			// unknown rather than as a deletion: pruning on it would make C1 delete
+			// the metastore and its grants. A metastore that really is gone stops
+			// appearing in ListMetastores on the next sync.
+			if isUnreadableWorkspaceError(err) || isNotFoundError(err) {
 				unreadable = append(unreadable, metastoreID)
 				continue
 			}

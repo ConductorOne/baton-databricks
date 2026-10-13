@@ -78,7 +78,51 @@ func TestProvisioningPreReadsAreNotServedFromTheCache(t *testing.T) {
 		t.Fatalf("Revoke pre-read saw %d assignment(s), want the privilege the Grant just added: "+
 			"a cached page here reports GrantAlreadyRevoked and skips the PATCH", len(seen))
 	}
-	if gets != 2 {
-		t.Errorf("%d GET(s) reached the API, want 2: both pre-reads must bypass the cache", gets)
+	if gets != 3 {
+		t.Errorf("%d GET(s) reached the API, want 3: both pre-reads and the post-PATCH refresh must bypass the cache", gets)
+	}
+}
+
+// The pre-read stores page one under the key the sync's cached ListPermissions
+// uses. Without a refresh after the PATCH, a sync in the same process within the
+// cache TTL reads the state from before the grant.
+func TestASyncReadAfterAGrantSeesThePostChangeState(t *testing.T) {
+	granted := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPatch {
+			granted = true
+		}
+		var assignments []PrivilegeAssignment
+		if granted {
+			assignments = []PrivilegeAssignment{{Principal: "alice", Privileges: []string{"SELECT"}}}
+		}
+		_ = json.NewEncoder(w).Encode(permissionsResponse{PrivilegeAssignments: assignments})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	if _, _, err := c.DrainPermissions(ctx, "ws", SecurableMetastore, "ms-1"); err != nil {
+		t.Fatalf("Grant pre-read: %v", err)
+	}
+	if _, _, err := c.UpdatePermissions(ctx, "ws", SecurableMetastore, "ms-1",
+		[]PermissionsChange{{Principal: "alice", Add: []string{"SELECT"}}}); err != nil {
+		t.Fatalf("UpdatePermissions: %v", err)
+	}
+
+	assignments, _, _, err := c.ListPermissions(ctx, "ws", SecurableMetastore, "ms-1", "", "")
+	if err != nil {
+		t.Fatalf("ListPermissions: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("the cached sync read saw %d assignment(s), want the privilege the Grant just added", len(assignments))
 	}
 }

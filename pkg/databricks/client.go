@@ -197,6 +197,8 @@ func (c *Client) ListUsers(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
+// GetUser reads one SCIM user by id. A 404 means no user has that id
+// (RFC 7644 §3.4.1), which is how a group or service principal id answers here.
 func (c *Client) GetUser(
 	ctx context.Context,
 	workspaceId string,
@@ -313,6 +315,8 @@ func (c *Client) ListGroups(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
+// GetGroup reads one SCIM group by id. A 404 means no group has that id
+// (RFC 7644 §3.4.1), which is how a user or service principal id answers here.
 func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,
@@ -425,6 +429,8 @@ func (c *Client) ListServicePrincipals(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
+// GetServicePrincipal reads one SCIM service principal by id. A 404 means no
+// service principal has that id (RFC 7644 §3.4.1).
 func (c *Client) GetServicePrincipal(
 	ctx context.Context,
 	workspaceId string,
