@@ -88,6 +88,11 @@ service principal can access. To limit the scope, pass a comma-separated list of
 workspaces to the `--workspaces` flag. Each entry can be a workspace name,
 deployment name, or numeric workspace ID, matched case-insensitively.
 
+`--workspaces` also scopes which metastores sync: only a metastore attached to a
+listed workspace is synced, so narrowing the list removes the other metastores
+and their grants from ConductorOne. A list that matches no workspace on the
+account fails the metastore sync.
+
 Metastores are Unity Catalog securables and are opt-in: the type stays off until
 it is enabled for the connector in ConductorOne.
 
@@ -106,7 +111,9 @@ To instead exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
 `BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated
 list. Each entry can be a workspace name, deployment name, or numeric workspace
-ID. Excluded workspaces and their roles are skipped entirely.
+ID. Excluded workspaces and their roles are skipped entirely. A metastore
+attached only to excluded workspaces is not synced, and its grants are removed
+from ConductorOne.
 
 ## Group provisioning
 
@@ -163,25 +170,6 @@ The same OAuth service principal must own the metastore or be assigned
 a group is not enough). When neither holds, the sync fails with a
 `PermissionDenied` error naming the metastore rather than reporting a partial
 read. Details are in [docs/docs-info.md](./docs/docs-info.md).
-
-## Accounts with many workspaces
-
-Deciding which metastore a workspace serves needs a catalog listing from each
-workspace that reports no metastore assignment, so the connector caches those
-listings for the length of a run and keeps one per workspace. The working set
-grows with the number of workspaces in the account.
-
-The default budget is 5 MB, which covers roughly ten workspaces holding a few
-hundred catalogs each. Past that the cache evicts and the connector re-lists
-catalogs it has already read, which lengthens the sync and uses more of the
-Databricks API rate limit. Raising the budget removes the re-reads:
-
-```
-BATON_HTTP_CACHE_MAX_SIZE=32 baton-databricks
-```
-
-The value is in megabytes. It is a Baton SDK setting rather than a connector
-flag, so it does not appear in `--help`.
 
 # Contributing, Support and Issues
 

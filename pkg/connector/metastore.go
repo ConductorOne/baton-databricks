@@ -26,20 +26,29 @@ type metastoreBuilder struct {
 	securableDeps
 }
 
-func newMetastoreBuilder(client *databricks.Client, uc *unityCatalog, willSync func(string) bool) *metastoreBuilder {
-	return &metastoreBuilder{securableDeps{client: client, uc: uc, willSync: willSync}}
+func newMetastoreBuilder(client *databricks.Client, uc *unityCatalog, sync syncPrincipals) *metastoreBuilder {
+	return &metastoreBuilder{securableDeps{client: client, uc: uc, sync: sync}}
 }
 
 func (m *metastoreBuilder) ResourceType(_ context.Context) *v2.ResourceType {
 	return metastoreResourceType
 }
 
-func metastoreResource(_ context.Context, metastore *databricks.Metastore, parent *v2.ResourceId) (*v2.Resource, error) {
+var metastoreKind = securableKind{
+	name:       databricks.SecurableMetastore,
+	parse:      parseMetastoreID,
+	privileges: metastorePrivileges,
+}
+
+func metastoreResource(_ context.Context, metastore *databricks.Metastore, parent *v2.ResourceId, workspace, workspaceID, workspaceName string) (*v2.Resource, error) {
 	profile := map[string]any{
 		profileKeyMetastoreID:   metastore.MetastoreID,
 		profileKeyRegion:        metastore.Region,
 		profileKeyOwner:         metastore.Owner,
 		profileKeySecurableType: securableTypeMetastore,
+		profileKeyWorkspace:     workspace,
+		profileKeyWorkspaceID:   workspaceID,
+		profileKeyWorkspaceName: workspaceName,
 	}
 
 	name := metastore.Name
@@ -84,7 +93,11 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			continue
 		}
 
-		mr, err := metastoreResource(ctx, &metastore, parentResourceID)
+		workspace := ""
+		if routed := snap.workspaces[metastore.MetastoreID]; len(routed) > 0 {
+			workspace = routed[0]
+		}
+		mr, err := metastoreResource(ctx, &metastore, parentResourceID, workspace, snap.workspaceIDs[workspace], snap.workspaceNames[workspace])
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 				"databricks-connector: failed to build the resource for metastore %s: %w", metastore.MetastoreID, err)
@@ -123,7 +136,7 @@ func (m *metastoreBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOp
 // the securables below it, so finding one here means the wrong resource arrived.
 func parseMetastoreID(resourceID string) (securableRef, error) {
 	if resourceID == "" || strings.Contains(resourceID, securableKeySeparator) {
-		return securableRef{}, fmt.Errorf("databricks-connector: invalid metastore resource id %q", resourceID)
+		return securableRef{}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid metastore resource id %q", resourceID)
 	}
 
 	return securableRef{metastoreID: resourceID}, nil
@@ -136,36 +149,30 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	}
 
 	annos := annotations.Annotations{}
-	snap, rateLimit, err := m.uc.buildRouting(ctx)
+	workspace, state, rateLimit, err := m.accessPath(ctx, resource, ref, false)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if status.Code(err) == codes.PermissionDenied {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
 	}
-	workspace, exists, rateLimit, err := workspaceFromSnapshot(snap, ref.metastoreID, rateLimit)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if !exists {
+	switch state {
+	case metastoreGone:
 		ctxzap.Extract(ctx).Debug("databricks-connector: metastore is no longer listed",
 			zap.String("metastore", ref.metastoreID),
 		)
 
 		return nil, &rs.SyncOpResults{Annotations: annos}, nil
-	}
+	case metastoreOutOfScope:
+		ctxzap.Extract(ctx).Debug("databricks-connector: no workspace this sync can use is attached to the metastore; skipping its grants",
+			zap.String("metastore", ref.metastoreID),
+		)
 
-	trustworthy, rateLimit, err := m.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to probe grant visibility on metastore %s: %w", ref.permissionsName(), err)
-	}
-	if !trustworthy {
-		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
-			ref.metastoreID)
+		return nil, &rs.SyncOpResults{Annotations: annos}, nil
+	case metastoreInScope:
 	}
 
 	l := ctxzap.Extract(ctx)
@@ -173,9 +180,9 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	assignments, nextPageToken, rateLimit, err := m.client.ListPermissions(
 		ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "", pageToken)
 	noteRateLimit(&annos, rateLimit)
-	// The permissions endpoint answers 404 for a securable that is gone, for a principal
-	// it does not know, and for a workspace that does not serve this metastore, and the
-	// three are separable only by message text.
+	// A 404 is returned, not read as an absence: the permissions endpoint also answers
+	// 404 for a workspace that does not serve this metastore, and only the error_code
+	// the APIError keeps tells that apart from a securable that is gone.
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableMetastore, ref.permissionsName(), err)
@@ -208,7 +215,7 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 			continue
 		}
 
-		if principalId.GetResourceType() != userResourceType.Id && !m.willSync(principalId.GetResourceType()) {
+		if !emitPrincipal(m.sync, principalId.GetResourceType()) {
 			continue
 		}
 
@@ -240,7 +247,7 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 					zap.String("securable", ref.resourceKey()),
 					zap.String("owner", owner),
 				)
-			} else if principalId.GetResourceType() == userResourceType.Id || m.willSync(principalId.GetResourceType()) {
+			} else if emitPrincipal(m.sync, principalId.GetResourceType()) {
 				options := groupSecurableGrantOptions(principalId)
 				options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
 				rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
@@ -252,121 +259,18 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 }
 
 func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	annos := annotations.Annotations{}
-	principalID := principal.GetId()
-
-	if !isValidPrincipal(principalID) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: only users, groups and service principals can hold a Unity Catalog privilege, got %s",
-			principalID.GetResourceType())
-	}
-
-	ref, err := parseMetastoreID(entitlement.GetResource().GetId().GetResource())
-	if err != nil {
+	change, annos, done, err := m.resolveSecurableChange(ctx, principal.GetId(), entitlement, metastoreKind, changeGrant)
+	if done {
 		return annos, err
 	}
 
-	entitlementID := entitlement.GetId()
-	separator := strings.LastIndex(entitlementID, ":")
-	if separator < 0 || separator == len(entitlementID)-1 {
-		return annos, fmt.Errorf("databricks-connector: failed to read the privilege from entitlement %q: %w",
-			entitlementID, fmt.Errorf("invalid entitlement id %q", entitlementID))
-	}
-	privilege := entitlementID[separator+1:]
-
-	if privilege == ownerEntitlement {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: ownership of metastore %s is single-valued and has no revoke, so it cannot be provisioned; change the owner in Databricks",
-			ref.permissionsName())
-	}
-
-	if isLegacyPrivilege(privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is a Hive-era alias that Databricks rewrites server-side — CREATE on a schema becomes "+
-				"CREATE_TABLE plus CREATE_FUNCTION — so it would grant more than was asked for and would never be read back "+
-				"under that name; ask for the explicit privilege instead",
-			privilege)
-	}
-
-	if !slices.Contains(metastorePrivileges, privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is not a grantable privilege on metastore %s",
-			privilege, ref.permissionsName())
-	}
-
-	snap, rateLimit, err := m.uc.buildRouting(ctx)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	workspace, exists, rateLimit, err := workspaceFromSnapshot(snap, ref.metastoreID, rateLimit)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if !exists {
-		return annos, status.Errorf(codes.NotFound,
-			"databricks-connector: metastore %s is no longer listed on the account, so it cannot be changed", ref.metastoreID)
-	}
-
-	trustworthy, rateLimit, err := m.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to probe grant visibility on metastore %s: %w",
-			ref.permissionsName(), err)
-	}
-	if !trustworthy {
-		return annos, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
-			ref.metastoreID)
-	}
-
-	scimID, err := unityPrincipalScimID(principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to read the SCIM id of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	principalName, _, err := unityPrincipalName(ctx, m.client, principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the Unity Catalog name of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	if principalName == "" {
-		return annos, status.Errorf(codes.NotFound,
-			"databricks-connector: principal %s no longer exists in Databricks, so it cannot be granted %s on %s %s",
-			scimID, privilege, databricks.SecurableMetastore, ref.permissionsName())
-	}
-
+	ref := change.ref
+	privilege := change.privilege
+	workspace := change.workspace
+	scimID := change.scimID
+	principalName := change.principalName
 	matchHeld := func(assignments []databricks.PrivilegeAssignment) (databricks.PrivilegeAssignment, bool) {
-		var nameOnly databricks.PrivilegeAssignment
-		var sawNameOnly bool
-		for _, assignment := range assignments {
-			if !slices.Contains(assignment.Privileges, privilege) {
-				continue
-			}
-
-			assignmentID := assignment.PrincipalID.String()
-			if scimID != "" && assignmentID == scimID && assignmentID != "0" {
-				return assignment, true
-			}
-			if principalName == "" || assignment.Principal != principalName {
-				continue
-			}
-			if scimID != "" && assignmentID != "" && assignmentID != "0" && assignmentID != scimID {
-				continue
-			}
-			if !sawNameOnly {
-				nameOnly = assignment
-				sawNameOnly = true
-			}
-		}
-		if sawNameOnly {
-			return nameOnly, true
-		}
-
-		return databricks.PrivilegeAssignment{}, false
+		return matchHeldPrivilege(assignments, scimID, principalName, privilege)
 	}
 
 	assignments, rateLimit, err := m.client.DrainPermissions(ctx, workspace, databricks.SecurableMetastore, ref.permissionsName())
@@ -418,127 +322,22 @@ func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 }
 
 func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	annos := annotations.Annotations{}
-	principalID := revoked.GetPrincipal().GetId()
-	entitlement := revoked.GetEntitlement()
-
-	if !isValidPrincipal(principalID) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: only users, groups and service principals can hold a Unity Catalog privilege, got %s",
-			principalID.GetResourceType())
-	}
-
-	ref, err := parseMetastoreID(entitlement.GetResource().GetId().GetResource())
-	if err != nil {
+	change, annos, done, err := m.resolveSecurableChange(ctx, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), metastoreKind, changeRevoke)
+	if done {
 		return annos, err
 	}
 
-	entitlementID := entitlement.GetId()
-	separator := strings.LastIndex(entitlementID, ":")
-	if separator < 0 || separator == len(entitlementID)-1 {
-		return annos, fmt.Errorf("databricks-connector: failed to read the privilege from entitlement %q: %w",
-			entitlementID, fmt.Errorf("invalid entitlement id %q", entitlementID))
-	}
-	privilege := entitlementID[separator+1:]
-
-	if privilege == ownerEntitlement {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: ownership of metastore %s is single-valued and has no revoke, so it cannot be provisioned; change the owner in Databricks",
-			ref.permissionsName())
-	}
-
-	if isLegacyPrivilege(privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is a Hive-era alias that Databricks rewrites server-side — CREATE on a schema becomes "+
-				"CREATE_TABLE plus CREATE_FUNCTION — so it would grant more than was asked for and would never be read back "+
-				"under that name; ask for the explicit privilege instead",
-			privilege)
-	}
-
-	if !slices.Contains(metastorePrivileges, privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is not a grantable privilege on metastore %s",
-			privilege, ref.permissionsName())
-	}
-
-	snap, rateLimit, err := m.uc.buildRouting(ctx)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	workspace, exists, rateLimit, err := workspaceFromSnapshot(snap, ref.metastoreID, rateLimit)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if !exists {
-		// The metastore is gone from the account, so the privilege is gone with it and
-		// the end state the revoke asked for already holds. Reporting NotFound instead
-		// would fail the task on every retry against a securable that can never return.
-		annos.Update(&v2.GrantAlreadyRevoked{})
-
-		return annos, nil
-	}
-
-	trustworthy, rateLimit, err := m.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to probe grant visibility on metastore %s: %w",
-			ref.permissionsName(), err)
-	}
-	if !trustworthy {
-		return annos, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
-			ref.metastoreID)
-	}
-
-	scimID, err := unityPrincipalScimID(principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to read the SCIM id of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	// Grant rejects an empty name because it has to send one to add a privilege.
-	// Revoke does not: a principal deleted after the grant was synced keeps its
-	// numeric id in the assignment, and removing by id is what clears the row.
-	principalName, _, err := unityPrincipalName(ctx, m.client, principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the Unity Catalog name of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
+	ref := change.ref
+	privilege := change.privilege
+	workspace := change.workspace
+	scimID := change.scimID
+	principalName := change.principalName
 	matchHeld := func(assignments []databricks.PrivilegeAssignment) (databricks.PrivilegeAssignment, bool) {
-		var nameOnly databricks.PrivilegeAssignment
-		var sawNameOnly bool
-		for _, assignment := range assignments {
-			if !slices.Contains(assignment.Privileges, privilege) {
-				continue
-			}
-
-			assignmentID := assignment.PrincipalID.String()
-			if scimID != "" && assignmentID == scimID && assignmentID != "0" {
-				return assignment, true
-			}
-			if principalName == "" || assignment.Principal != principalName {
-				continue
-			}
-			if scimID != "" && assignmentID != "" && assignmentID != "0" && assignmentID != scimID {
-				continue
-			}
-			if !sawNameOnly {
-				nameOnly = assignment
-				sawNameOnly = true
-			}
-		}
-		if sawNameOnly {
-			return nameOnly, true
-		}
-
-		return databricks.PrivilegeAssignment{}, false
+		return matchHeldPrivilege(assignments, scimID, principalName, privilege)
 	}
 
 	var seen []databricks.PrivilegeAssignment
-	rateLimit, err = m.client.ForEachUncachedPermissionsPage(ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "",
+	rateLimit, err := m.client.ForEachUncachedPermissionsPage(ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "",
 		func(page []databricks.PrivilegeAssignment) (bool, error) {
 			seen = append(seen, page...)
 			matched, ok := matchHeld(seen)

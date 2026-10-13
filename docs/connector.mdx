@@ -169,8 +169,8 @@ To complete this task, you'll need:
   <Step>
   Optionally, narrow what the connector syncs:
 
-    - **Workspaces**: limit the sync to these workspaces, by workspace name, deployment name, or numeric workspace ID.
-    - **Exclude Workspaces**: workspaces to leave out of the sync, by workspace name, deployment name, or numeric workspace ID.
+    - **Workspaces**: limit the sync to these workspaces, by workspace name, deployment name, or numeric workspace ID. This also scopes which metastores sync: only a metastore attached to one of these workspaces is synced, so narrowing the list removes the other metastores and their grants from C1.
+    - **Exclude Workspaces**: workspaces to leave out of the sync, by workspace name, deployment name, or numeric workspace ID. A metastore attached only to excluded workspaces is not synced either, and C1 removes it and its grants.
 
   Fill in **Workspaces** or **Exclude Workspaces**, not both.
   </Step>
@@ -263,6 +263,7 @@ stringData:
 
   # Optional: limit the sync to specific workspaces
   # (workspace name, deployment name, or numeric ID).
+  # Also scopes which metastores sync: narrowing it removes metastores that no listed workspace is attached to.
   # Mutually exclusive with BATON_DATABRICKS_EXCLUDE_WORKSPACES — set one or the other, never both.
   # BATON_WORKSPACES: <workspace-a,workspace-b>
 
@@ -281,10 +282,6 @@ stringData:
 
 <Note>
 OAuth requires a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
-</Note>
-
-<Note>
-**Accounts with many workspaces:** to decide which metastore each workspace serves, the connector may list a workspace's catalogs, and it holds one such listing per workspace while it runs — so a wider account needs a larger buffer. The 5 MB default suits about ten workspaces with a few hundred catalogs each. Above that the connector re-reads listings it has already fetched, which lengthens the sync and uses more of your Databricks API rate limit. Set `BATON_HTTP_CACHE_MAX_SIZE` to a larger number of megabytes in the Secret above.
 </Note>
 
 See the connector's README or run `--help` to see all available configuration flags and environment variables.

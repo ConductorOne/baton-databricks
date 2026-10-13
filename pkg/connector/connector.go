@@ -22,22 +22,27 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
-	willSync := func(string) bool { return true }
-	if d.opts != nil {
-		willSync = d.opts.WillSyncResourceType
-	}
-
-	syncers := []connectorbuilder.ResourceSyncerV2{
+	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.unityCatalog, willSync),
+		newMetastoreBuilder(d.client, d.unityCatalog, syncPrincipals{
+			groups:            d.willSyncResourceType(groupResourceType.Id),
+			servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
+		}),
 	}
+}
 
-	return syncers
+// willSyncResourceType is true when the type is in this sync. Nil opts (the
+// capabilities prototype) means no filter, so every advertised type is in scope.
+func (d *Databricks) willSyncResourceType(resourceTypeID string) bool {
+	if d.opts == nil {
+		return true
+	}
+	return d.opts.WillSyncResourceType(resourceTypeID)
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client

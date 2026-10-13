@@ -15,8 +15,8 @@ const (
 	// https://docs.databricks.com/api/account/accountmetastores/list
 	accountMetastoresEndpoint = "/api/2.0/accounts/%s/metastores"
 
-	// https://docs.databricks.com/api/account/accountmetastoreassignments/get
-	accountWorkspaceMetastoreEndpoint = "/api/2.0/accounts/%s/workspaces/%s/metastore"
+	// https://docs.databricks.com/api/account/accountmetastoreassignments/list
+	accountMetastoreWorkspacesEndpoint = "/api/2.0/accounts/%s/metastores/%s/workspaces"
 
 	// https://docs.databricks.com/api/workspace/catalogs/list
 	unityCatalogCatalogsEndpoint = "/api/2.1/unity-catalog/catalogs"
@@ -54,26 +54,33 @@ func (c *Client) ListMetastores(
 	return res.Metastores, ratelimitData, nil
 }
 
-// GetWorkspaceMetastore (GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore),
-// empty when the workspace has none. workspaceID is the numeric account-level id,
-// not the deployment name the securable endpoints are addressed by.
-func (c *Client) GetWorkspaceMetastore(
+// ListMetastoreWorkspaces (GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces)
+// returns the numeric workspace ids assigned to that metastore.
+func (c *Client) ListMetastoreWorkspaces(
 	ctx context.Context,
-	workspaceID string,
+	metastoreID string,
 ) (
-	string,
+	[]string,
 	*v2.RateLimitDescription,
 	error,
 ) {
-	var res workspaceMetastoreResponse
+	var res metastoreWorkspacesResponse
 
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceMetastoreEndpoint, c.accountId, workspaceID))
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountMetastoreWorkspacesEndpoint, c.accountId, metastoreID))
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
-		return "", ratelimitData, fmt.Errorf("failed to get metastore assignment for workspace %s: %w", workspaceID, err)
+		return nil, ratelimitData, fmt.Errorf("failed to list workspaces for metastore %s: %w", metastoreID, err)
 	}
 
-	return res.MetastoreAssignment.MetastoreID, ratelimitData, nil
+	ids := make([]string, 0, len(res.WorkspaceIDs))
+	for _, id := range res.WorkspaceIDs {
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id.String())
+	}
+
+	return ids, ratelimitData, nil
 }
 
 // listSecurables reads one page off a workspace-scoped securable endpoint.
@@ -210,21 +217,9 @@ func (c *Client) DrainPermissions(
 	})
 }
 
-// ForEachPermissionsPage walks ListPermissions without retaining the pages. The
-// grant-visibility probe reads through this, where a cached page costs nothing:
-// it reports who may administer the securable, not who holds what.
-func (c *Client) ForEachPermissionsPage(
-	ctx context.Context,
-	workspaceId, securableType, fullName, principal string,
-	visit func([]PrivilegeAssignment) (bool, error),
-) (*v2.RateLimitDescription, error) {
-	return forEachPageFrom(ctx, "", func(pageToken string) ([]PrivilegeAssignment, string, *v2.RateLimitDescription, error) {
-		return c.ListPermissions(ctx, workspaceId, securableType, fullName, principal, pageToken)
-	}, visit)
-}
-
-// ForEachUncachedPermissionsPage is ForEachPermissionsPage for the pre-read that
-// decides whether a Revoke still has to PATCH. See DrainPermissions.
+// ForEachUncachedPermissionsPage walks ListPermissions past the cache, without
+// retaining the pages, for the pre-read that decides whether a Revoke still has
+// to PATCH. See DrainPermissions.
 func (c *Client) ForEachUncachedPermissionsPage(
 	ctx context.Context,
 	workspaceId, securableType, fullName, principal string,

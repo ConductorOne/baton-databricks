@@ -67,7 +67,7 @@ func TestResourcesHaveRawId(t *testing.T) {
 		},
 		{
 			"metastore",
-			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account)),
+			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account, "", "", "")),
 			"ms1",
 		},
 	}
