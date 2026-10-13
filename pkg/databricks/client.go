@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -619,6 +620,24 @@ func (c *Client) ListWorkspaceMembers(
 	return res.Assignments, ratelimitData, nil
 }
 
+// CreateOrUpdateWorkspaceMember grants the "USER" workspace permission to a
+// principal.
+//
+// The account-level permission-assignments endpoint
+// (PUT .../permissionassignments/principals/{principal_id}) fully replaces the
+// principal's permissions array - Databricks' docs for this endpoint state
+// that omitting (or sending an unsupported) "permissions" value has "the same
+// effect as providing an empty list, which will result in the deletion of all
+// permissions for the principal." There is no PATCH for this specific
+// account-level endpoint (a PATCH exists only for the distinct
+// workspace-scoped /api/2.0/identity/workspace-assignments/{principal_id}
+// identity API, which is a different endpoint/auth scope). So granting
+// "member" naively by PUTting {"permissions":["USER"]} silently destroys an
+// existing ADMIN assignment.
+//
+// To stay safe against that full-replacement semantics, read the principal's
+// current permissions first and union "USER" into them before writing the
+// full set back, so an existing ADMIN is preserved.
 func (c *Client) CreateOrUpdateWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
@@ -627,23 +646,115 @@ func (c *Client) CreateOrUpdateWorkspaceMember(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	payload := struct {
-		Permission []string `json:"permissions"`
-	}{
-		Permission: []string{"USER"},
+	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	if err != nil {
+		return ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
 	}
 
-	return c.Put(ctx, u, payload, nil)
+	permissionSet := map[string]struct{}{WorkspaceUserPermission: {}}
+	for _, permission := range current {
+		permissionSet[permission] = struct{}{}
+	}
+
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
+	payload := struct {
+		Permissions []string `json:"permissions"`
+	}{
+		Permissions: sortedPermissions(permissionSet),
+	}
+
+	putRatelimitData, err := c.Put(ctx, u, payload, nil)
+	if putRatelimitData != nil {
+		ratelimitData = putRatelimitData
+	}
+
+	return ratelimitData, err
 }
 
+// RemoveWorkspaceMember revokes the "USER" workspace permission from a
+// principal.
+//
+// This endpoint is the same full-replacement PUT described in
+// CreateOrUpdateWorkspaceMember, so unconditionally PUTting an empty/nil body
+// would strip every permission the principal holds - including ADMIN - when
+// only the "member" (USER) grant should be revoked. Read the principal's
+// current permissions first, drop "USER", and write back whatever remains
+// (ADMIN, if the principal independently holds it).
 func (c *Client) RemoveWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
 ) (*v2.RateLimitDescription, error) {
+	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	if err != nil {
+		return ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
+	}
+
+	permissionSet := make(map[string]struct{}, len(current))
+	for _, permission := range current {
+		if permission == WorkspaceUserPermission {
+			continue
+		}
+		permissionSet[permission] = struct{}{}
+	}
+
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	return c.Put(ctx, u, nil, nil)
+	payload := struct {
+		Permissions []string `json:"permissions"`
+	}{
+		Permissions: sortedPermissions(permissionSet),
+	}
+
+	putRatelimitData, err := c.Put(ctx, u, payload, nil)
+	if putRatelimitData != nil {
+		ratelimitData = putRatelimitData
+	}
+
+	return ratelimitData, err
+}
+
+// currentWorkspacePermissions returns the permissions the given principal
+// currently holds on the workspace. There is no API to fetch a single
+// principal's assignment directly, so this lists every assignment on the
+// workspace and matches by principal ID.
+func (c *Client) currentWorkspacePermissions(
+	ctx context.Context,
+	workspaceId string,
+	principalId string,
+) (
+	[]string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	assignments, ratelimitData, err := c.ListWorkspaceMembers(ctx, workspaceId)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	for _, assignment := range assignments {
+		if assignment.Principal == nil {
+			continue
+		}
+		if strconv.Itoa(assignment.Principal.ID) != principalId {
+			continue
+		}
+
+		return assignment.Permissions, ratelimitData, nil
+	}
+
+	return nil, ratelimitData, nil
+}
+
+// sortedPermissions returns the set's members in a deterministic (sorted)
+// order so requests and tests are stable.
+func sortedPermissions(permissionSet map[string]struct{}) []string {
+	permissions := make([]string, 0, len(permissionSet))
+	for permission := range permissionSet {
+		permissions = append(permissions, permission)
+	}
+	sort.Strings(permissions)
+
+	return permissions
 }
 
 func (c *Client) ListRuleSets(

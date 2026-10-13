@@ -223,6 +223,18 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource ID: %w", err)
 		}
 
+		// Workspace ADMIN status isn't modeled as its own entitlement/grant
+		// (see CXH-2346 report for the design question on how it should be
+		// surfaced in C1); log it so it's at least visible to operators
+		// inspecting a sync, rather than silently discarded.
+		if assignment.HasAdmin() {
+			l.Debug("grants: workspace assignment includes ADMIN permission",
+				zap.String("workspace_id", workspace),
+				zap.Int("principal_id", assignment.Principal.ID),
+				zap.Strings("permissions", assignment.Permissions),
+			)
+		}
+
 		var annotations []protoreflect.ProtoMessage
 		if resourceType == groupResourceType {
 			rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceID.Resource, resource.ParentResourceId)
