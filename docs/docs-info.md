@@ -40,7 +40,7 @@ While developing the connector, please fill out this form. This information is n
      >
      > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing). The scope-by-scope breakdown is in `## Permission model` below.
      >
-     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. For each catalog being synced, it must also own the metastore, own the catalog, or hold `MANAGE` on the catalog — workspace Admin is not enough there. `## Permission model` explains why none of this is optional.
+     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. A catalog is synced only when the service principal owns the metastore, owns the catalog, holds `MANAGE` on the catalog, or is a direct Admin of the workspace whose admins group owns it. A catalog that does not meet that is left out of the sync. `## Permission model` explains why.
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
@@ -84,16 +84,20 @@ and `ALL_PRIVILEGES` on a metastore, so there is no privilege whose presence
 would prove the read is complete.
 
 For a catalog, the read is trustworthy when the service principal owns the
-metastore, owns the catalog, or holds `MANAGE` on it. Databricks shows anyone
-else only their own grants on a catalog, and workspace Admin is not on that
-list. `ALL_PRIVILEGES` does not count either: it excludes `MANAGE`.
+metastore, owns the catalog, or holds `MANAGE` on it. It is also trustworthy
+when the catalog owner is that workspace's admins group
+(`_workspace_admins_<workspace>_<workspace id>`) and the service principal is
+assigned Admin directly on the workspace. Workspace Admin does not open a
+catalog owned by anyone else. `ALL_PRIVILEGES` does not count either: it
+excludes `MANAGE`.
 
-When neither holds, the connector fails the sync rather than reporting what
-it can see. Databricks answers an under-permissioned privilege read with HTTP
-200 and a partial list of privilege assignments, which is byte-indistinguishable
-from an object that genuinely has no grants on it. Reporting that partial list
-would make ConductorOne read every privilege the principal cannot see as revoked
-access.
+A catalog that meets none of these is not synced. Databricks answers an
+under-permissioned privilege read with HTTP 200 and a partial list of privilege
+assignments, which is byte-indistinguishable from an object that genuinely has
+no grants on it. Reporting that partial list would make ConductorOne read every
+privilege the principal cannot see as revoked access. A metastore that fails
+the same check still fails the sync: leaving it out would delete it in
+ConductorOne, and there is no narrower object to skip.
 
 ## Limitations
 

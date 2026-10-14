@@ -270,11 +270,30 @@ func pageCatalogs(
 		return nil, "", rateLimit, catalogListingError(parent.metastoreID, current.Workspace, err)
 	}
 
+	snap := routingSnapshot{workspaceIDs: map[string]string{current.Workspace: current.WorkspaceID}}
 	items := make([]securable, 0, len(catalogs))
 	for _, catalog := range catalogs {
 		if catalog.Name == "" || (catalog.MetastoreID != "" && catalog.MetastoreID != parent.metastoreID) {
 			continue
 		}
+
+		ref := parent.child(catalog.Name)
+		trusted, trustRateLimit, err := uc.catalogGrantsAreTrustworthy(ctx, snap, current.MetastoreOwner, catalog.Owner, ref, current.Workspace)
+		if trustRateLimit != nil {
+			rateLimit = trustRateLimit
+		}
+		if err != nil {
+			return nil, "", rateLimit, fmt.Errorf("failed to confirm grant visibility for catalog %s: %w", catalog.Name, err)
+		}
+		if !trusted {
+			ctxzap.Extract(ctx).Debug(
+				"databricks-connector: catalog grants are not fully visible; skipping the catalog",
+				zap.String("catalog", catalog.Name),
+				zap.String("workspace", current.Workspace),
+			)
+			continue
+		}
+
 		items = append(items, securable{
 			name:  catalog.Name,
 			owner: catalog.Owner,

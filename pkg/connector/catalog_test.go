@@ -38,6 +38,8 @@ type fakeCatalogAccount struct {
 	unbound []map[string]any
 	// manage names the catalogs the connector principal holds MANAGE on.
 	manage map[string]bool
+	// workspaceAdmins names workspace ids where the connector principal is a direct Admin.
+	workspaceAdmins map[string]bool
 
 	routing          int
 	catalogPages     int
@@ -168,6 +170,22 @@ func (f *fakeCatalogAccount) handler(t *testing.T) http.HandlerFunc {
 			}
 			f.permissionsHosts = append(f.permissionsHosts, workspace)
 			_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": f.assignments[name]})
+		case strings.Contains(path, "/permissionassignments"):
+			id := ""
+			parts := strings.Split(path, "/")
+			for i, part := range parts {
+				if part == "workspaces" && i+1 < len(parts) {
+					id = parts[i+1]
+				}
+			}
+			var assignments []map[string]any
+			if f.workspaceAdmins[id] {
+				assignments = []map[string]any{{
+					"principal":   map[string]any{"service_principal_name": "app-1"},
+					"permissions": []string{"ADMIN"},
+				}}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"permission_assignments": assignments})
 		default:
 			http.Error(w, `{"message":"unexpected"}`, http.StatusInternalServerError)
 		}
@@ -436,7 +454,8 @@ func manyCatalogs(prefix string, n int) []map[string]any {
 func TestCatalogListReadsEachWorkspacePageOnce(t *testing.T) {
 	shared := manyCatalogs("shared", 120)
 	f := &fakeCatalogAccount{
-		attached: []int{1, 2},
+		metastoreOwner: "app-1",
+		attached:       []int{1, 2},
 		listed: map[string][]map[string]any{
 			"wsa": shared,
 			"wsb": append(slices.Clone(shared), manyCatalogs("only_b", 30)...),
@@ -498,7 +517,8 @@ func TestCatalogsAreUnionedAcrossTheWorkspacesThatListThem(t *testing.T) {
 // A catalog only that workspace lists is not synced, the same rule as a metastore.
 func TestACatalogOnlyAnOutOfScopeWorkspaceListsIsNotSynced(t *testing.T) {
 	f := &fakeCatalogAccount{
-		attached: []int{1, 2},
+		metastoreOwner: "app-1",
+		attached:       []int{1, 2},
 		listed: map[string][]map[string]any{
 			"wsa": {catalogEntry("main", "someone")},
 			"wsb": {catalogEntry("isolated_dev", "someone")},
@@ -572,6 +592,55 @@ func TestCatalogGrantsNeedOwnershipOrManage(t *testing.T) {
 				t.Errorf("error %q does not name the alternatives", err)
 			}
 		})
+	}
+}
+
+// A catalog the connector cannot fully read is left out of the sync. Emitting it
+// with the partial grant list would read as revoking every grant it cannot see.
+func TestACatalogWithoutFullGrantVisibilityIsNotSynced(t *testing.T) {
+	f := &fakeCatalogAccount{
+		metastoreOwner: "someone",
+		attached:       []int{1},
+		listed:         map[string][]map[string]any{"wsa": {catalogEntry("hidden", "someone")}},
+	}
+	b := newFakeCatalogBuilder(t, f, nil)
+
+	resources, err := listAllCatalogs(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 0 {
+		t.Fatalf("listed %d catalogs, want none", len(resources))
+	}
+}
+
+// A direct Admin of a workspace sees every grant on a catalog that workspace's
+// admins group owns. Admin of a different workspace does not.
+func TestWorkspaceAdminsGroupOwnershipTrustsADirectAdmin(t *testing.T) {
+	f := &fakeCatalogAccount{
+		metastoreOwner:  "someone",
+		attached:        []int{1},
+		listed:          map[string][]map[string]any{"wsa": {catalogEntry("main", "_workspace_admins_prod_1")}},
+		workspaceAdmins: map[string]bool{"1": true},
+	}
+	b := newFakeCatalogBuilder(t, f, nil)
+
+	resources, err := listAllCatalogs(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 || resources[0].GetDisplayName() != "main" {
+		t.Fatalf("listed %v, want main", resources)
+	}
+
+	f.workspaceAdmins = nil
+	b = newFakeCatalogBuilder(t, f, nil)
+	resources, err = listAllCatalogs(t, b)
+	if err != nil {
+		t.Fatalf("List without admin: %v", err)
+	}
+	if len(resources) != 0 {
+		t.Fatalf("listed %d catalogs without workspace Admin, want none", len(resources))
 	}
 }
 

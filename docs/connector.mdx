@@ -115,7 +115,7 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
 
 ### Let the service principal read catalog privileges
 
-Skip this section if you are not syncing catalogs, or if the service principal is already the **Metastore Admin**. Workspace **Admin** is not enough for catalogs: Databricks shows a catalog's full privilege list only to the metastore admin, the catalog owner, or a holder of **MANAGE** on it.
+Skip this section if you are not syncing catalogs, or if the service principal is already the **Metastore Admin**. Databricks shows a catalog's full privilege list only to the metastore admin, the catalog owner, or a holder of **MANAGE** on it. Workspace **Admin** is enough only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`).
 
 Otherwise, grant **MANAGE** on each catalog you want synced:
 
@@ -132,7 +132,7 @@ Otherwise, grant **MANAGE** on each catalog you want synced:
 </Steps>
 
 <Warning>
-Without this, the sync fails with a permission error naming the metastore or catalog. Databricks returns a partial privilege list rather than an error, and C1 would treat the missing grants as revoked.
+A catalog the service principal cannot fully read is left out of the sync. Databricks returns a partial privilege list rather than an error, and syncing that list would make C1 treat the missing grants as revoked. Granting or revoking a privilege on a catalog that is not fully visible fails with a permission error and changes nothing in Databricks.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:

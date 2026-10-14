@@ -95,7 +95,9 @@ func (d *securableDeps) catalogAccess(
 	if !confirm {
 		route := readProfileRoute(resource)
 		workspace, ok, rateLimit, err := d.profileWorkspace(ctx, ref, route, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
-			return d.uc.catalogGrantsAreTrustworthy(ctx, route.metastoreOwner, route.owner, ref, workspace)
+			return d.uc.catalogGrantsAreTrustworthy(ctx, routingSnapshot{
+				workspaceIDs: map[string]string{workspace: route.workspaceID},
+			}, route.metastoreOwner, route.owner, ref, workspace)
 		})
 		if err != nil {
 			return "", securableInScope, rateLimit, err
@@ -132,7 +134,7 @@ func (d *securableDeps) catalogAccess(
 
 	metastoreOwner := snap.metastores[ref.metastoreID].Owner
 	workspace, probeRateLimit, err := firstTrustedWorkspace(ctx, ref, facts.workspaces, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
-		return d.uc.catalogGrantsAreTrustworthy(ctx, metastoreOwner, facts.owner, ref, workspace)
+		return d.uc.catalogGrantsAreTrustworthy(ctx, snap, metastoreOwner, facts.owner, ref, workspace)
 	})
 	if probeRateLimit != nil {
 		rateLimit = probeRateLimit

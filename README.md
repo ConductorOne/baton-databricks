@@ -173,11 +173,12 @@ revoking it fails with an `InvalidArgument` error.
 
 The same OAuth service principal must own the metastore or be assigned
 **Admin** directly on a workspace attached to it (Admin inherited only through
-a group is not enough). For each catalog it must also own the metastore, own
-the catalog, or hold `MANAGE` on the catalog; workspace Admin is not enough
-there. When a requirement does not hold, the sync fails with a
-`PermissionDenied` error naming the metastore or catalog rather than reporting a
-partial read. Details are in [docs/docs-info.md](./docs/docs-info.md).
+a group is not enough). A catalog is synced when the service principal owns
+the metastore, owns the catalog, holds `MANAGE` on the catalog, or is a direct
+Admin of the workspace whose admins group owns it. A catalog that meets none
+of these is left out of the sync. A metastore that fails its check fails the
+sync with `PermissionDenied` rather than reporting a partial read. Details are
+in [docs/docs-info.md](./docs/docs-info.md).
 
 # Contributing, Support and Issues
 

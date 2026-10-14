@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -15,7 +16,7 @@ const (
 )
 
 // catalogTrustRemedy is what PermissionDenied on a catalog tells the operator.
-const catalogTrustRemedy = "the connector principal must own the metastore or the catalog, or hold MANAGE on the catalog"
+const catalogTrustRemedy = "the connector principal must own the metastore or the catalog, hold MANAGE on the catalog, or be a direct Admin of the workspace whose admins group owns it"
 
 // metastoreGrantsAreTrustworthy reports whether every direct grant on a metastore
 // is visible. MANAGE and ALL_PRIVILEGES are rejected at the metastore level, so the
@@ -34,10 +35,12 @@ func (u *unityCatalog) metastoreGrantsAreTrustworthy(
 
 // catalogGrantsAreTrustworthy reports whether the connector sees every direct grant
 // in a catalog's subtree. Databricks shows the full list only to a metastore admin,
-// the owner, or a holder of MANAGE; anyone else reads just their own grants with a
-// 200. Workspace admin is not on that list, so it does not count here.
+// the owner, or a holder of MANAGE. A direct workspace Admin also sees it when the
+// catalog is owned by that workspace's admins group. Anyone else reads just their
+// own grants with a 200.
 func (u *unityCatalog) catalogGrantsAreTrustworthy(
 	ctx context.Context,
+	snap routingSnapshot,
 	metastoreOwner, catalogOwner string,
 	ref securableRef,
 	workspace string,
@@ -45,6 +48,14 @@ func (u *unityCatalog) catalogGrantsAreTrustworthy(
 	// An owner holds every privilege implicitly, which is not reported as a grant.
 	if u.ownsPrincipal(metastoreOwner) || u.ownsPrincipal(catalogOwner) {
 		return true, nil, nil
+	}
+
+	// The workspace admins group acts as the owner for a direct Admin of that workspace.
+	if workspaceAdminsGroupOwns(catalogOwner, snap.workspaceIDs[workspace]) {
+		admin, rateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
+		if err != nil || admin {
+			return admin, rateLimit, err
+		}
 	}
 
 	// The principal filter is effective, not literal: a row may be the group's MANAGE
@@ -64,6 +75,16 @@ func (u *unityCatalog) catalogGrantsAreTrustworthy(
 	}
 
 	return manageable, rateLimit, nil
+}
+
+// workspaceAdminsGroupOwns reports whether owner is the system group Databricks
+// creates for a workspace, named _workspace_admins_<workspace>_<workspace id>.
+func workspaceAdminsGroupOwns(owner, workspaceID string) bool {
+	if owner == "" || workspaceID == "" {
+		return false
+	}
+
+	return strings.HasPrefix(owner, "_workspace_admins_") && strings.HasSuffix(owner, "_"+workspaceID)
 }
 
 // isWorkspaceAdmin lists the workspace's permission assignments on every call.
