@@ -14,6 +14,8 @@ const (
 
 	// A view and a materialized view are both securable_type "table", so table_type
 	// is the only field that says which privileges apply.
+	tableTypeManaged          = "MANAGED"
+	tableTypeExternal         = "EXTERNAL"
 	tableTypeView             = "VIEW"
 	tableTypeMaterializedView = "MATERIALIZED_VIEW"
 	tableTypeStreamingTable   = "STREAMING_TABLE"
@@ -26,6 +28,9 @@ const (
 
 var (
 	// catalogPrivileges is the widest set; BROWSE, CREATE_SCHEMA and USE_CATALOG stop here.
+	// Source: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges.
+	// The PATCH accepts and echoes every entry, including ones missing from the
+	// databricks-sdk-go Privilege enum.
 	catalogPrivileges = []string{
 		privilegeAllPrivileges,
 		"APPLY_TAG",
@@ -152,18 +157,34 @@ func withoutPrivileges(privileges []string, drop ...string) []string {
 	})
 }
 
-// privilegesForTableType falls back to the union of every variant for an
-// absent or unrecognised table_type.
-func privilegesForTableType(tableType string) []string {
+// isViewLike reports a view or metric view. Both reject the table DML set, and
+// the grants API rejects adding ALL_PRIVILEGES on either.
+func isViewLike(tableType string) bool {
 	switch strings.ToUpper(strings.TrimSpace(tableType)) {
 	case tableTypeView, tableTypeMetricView:
+		return true
+	default:
+		return false
+	}
+}
+
+// privilegesForTableType returns the set for a known table_type. MANAGED and
+// EXTERNAL are named so they stay on the table set. Anything else, including a
+// type Databricks adds later, gets the union so a held REFRESH is not dropped.
+func privilegesForTableType(tableType string) []string {
+	if isViewLike(tableType) {
 		return viewPrivileges
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(tableType)) {
 	case tableTypeMaterializedView:
 		return materializedViewPrivileges
 	case tableTypeStreamingTable:
 		return streamingTablePrivileges
-	default:
+	case tableTypeManaged, tableTypeExternal:
 		return tablePrivileges
+	default:
+		return anyTablePrivileges
 	}
 }
 

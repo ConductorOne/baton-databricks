@@ -11,6 +11,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -35,6 +36,20 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	}
 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
+}
+
+// groupSecurableGrantOptions annotates a group-held Unity Catalog grant so C1
+// expands it through the group's member entitlement. Shallow stays unset:
+// setting it would suppress propagation through a nested group.
+func groupSecurableGrantOptions(principalId *v2.ResourceId) []grant.GrantOption {
+	if principalId.GetResourceType() != groupResourceType.Id {
+		return nil
+	}
+
+	return []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
+		EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
+		ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
+	})}
 }
 
 func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {
@@ -234,8 +249,12 @@ func isNotFoundError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
-func isSecurableGone(err error, errorCodes ...string) bool {
-	return databricks.IsSecurableGone(err, errorCodes...)
+// isRejectedFilter reports a SCIM filter Databricks refused. A quoted value
+// should not hit this; when it does, the owner stays unresolved instead of
+// failing the sync.
+func isRejectedFilter(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest
 }
 
 func isForbiddenError(err error) bool {
@@ -243,17 +262,14 @@ func isForbiddenError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
 }
 
-func isUnauthorizedError(err error) bool {
+func isRateLimitError(err error) bool {
 	var apiErr *databricks.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests
 }
 
 // isUnreadableWorkspaceError reports an answer that says this credential cannot
-// read this workspace, which is a fact about that workspace and not about the
-// account. Access-path discovery treats all three alike: the workspace carries
-// nothing this sync can read. The distinction matters because only codes.NotFound
-// is a warning to the SDK — every other code fails the whole sync, so letting one
-// unreadable workspace escape here would take down the resource types that work.
+// read this workspace, not a fact about the account. Only codes.NotFound is a
+// warning to the SDK; any other code fails the whole sync.
 func isUnreadableWorkspaceError(err error) bool {
 	var apiErr *databricks.APIError
 	if !errors.As(err, &apiErr) {
@@ -261,7 +277,7 @@ func isUnreadableWorkspaceError(err error) bool {
 	}
 
 	switch apiErr.StatusCode {
-	case http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized, http.StatusForbidden:
 		return true
 	default:
 		return false

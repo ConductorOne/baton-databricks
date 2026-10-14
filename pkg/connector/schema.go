@@ -2,14 +2,15 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -26,12 +27,33 @@ type schemaBuilder struct {
 	securableDeps
 }
 
-func newSchemaBuilder(client *databricks.Client, uc *unityCatalog, willSync func(string) bool) *schemaBuilder {
-	return &schemaBuilder{securableDeps{client: client, uc: uc, willSync: willSync}}
+func newSchemaBuilder(client *databricks.Client, uc *unityCatalog, sync syncPrincipals) *schemaBuilder {
+	return &schemaBuilder{securableDeps{client: client, uc: uc, sync: sync}}
 }
 
 func (b *schemaBuilder) ResourceType(_ context.Context) *v2.ResourceType {
 	return schemaResourceType
+}
+
+var schemaKind = securableKind{
+	name:        databricks.SecurableSchema,
+	parse:       parseSecurableRef,
+	privileges:  schemaPrivileges,
+	writeRemedy: catalogTrustRemedy,
+	goneCodes:   []string{databricks.ErrorCodeSchemaDoesNotExist},
+	access: func(ctx context.Context, d *securableDeps, resource *v2.Resource, ref securableRef) (string, accessState, *v2.RateLimitDescription, error) {
+		return d.catalogAccess(ctx, resource, ref, true)
+	},
+}
+
+// schemaPageState is the workspace a catalog's schemas are read through, carried
+// in the page token so later pages do not rebuild the routing.
+type schemaPageState struct {
+	Workspace      string `json:"w"`
+	WorkspaceID    string `json:"i"`
+	WorkspaceName  string `json:"n"`
+	MetastoreOwner string `json:"o"`
+	CatalogOwner   string `json:"c"`
 }
 
 func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
@@ -44,72 +66,254 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse schema parent %q: %w", parentResourceID.GetResource(), err)
 	}
 
-	l := ctxzap.Extract(ctx)
 	annos := annotations.Annotations{}
-	snap, rateLimit, err := b.uc.buildRouting(ctx)
-	if err != nil {
+	bag := &pagination.Bag{}
+	if err := bag.Unmarshal(attr.PageToken.Token); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema page token: %v", err)
+	}
+
+	var rateLimit *v2.RateLimitDescription
+	if bag.Current() == nil {
+		current, openRateLimit, err := b.openSchemaListing(ctx, parent)
+		rateLimit = openRateLimit
 		noteRateLimit(&annos, rateLimit)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		if current == nil {
+			ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed; skipping its schemas",
+				zap.String("catalog", parent.catalog()),
+			)
 
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve the workspace that lists %ss under %s: %w",
-			schemaResourceType.Id, parent.resourceKey(), err)
+			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		}
+
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
 	}
-	workspace, exists, rateLimit, err := accessCatalog(snap, parent, databricks.SecurableSchema, rateLimit)
+
+	var current schemaPageState
+	if err := json.Unmarshal([]byte(bag.ResourceID()), &current); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema page token: %v", err)
+	}
+
+	schemas, next, listRateLimit, err := b.client.ListSchemas(ctx, current.Workspace, parent.catalog(), bag.PageToken(), ResourcesPageSize)
+	if listRateLimit != nil {
+		rateLimit = listRateLimit
+	}
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		// access already confirmed the catalog. A NotFound here is not "this
+		// catalog has no schemas": the SDK would skip it as a warning and C1
+		// would drop the schemas it already has.
+		if isNotFoundError(err) {
+			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.Unavailable,
+				fmt.Sprintf("databricks-connector: catalog %s is listed, but its schemas could not be read through workspace %s",
+					parent.catalog(), current.Workspace),
+				err)
+		}
+
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve the workspace that lists %ss under %s: %w",
-			schemaResourceType.Id, parent.resourceKey(), err)
-	}
-	if !exists {
-		l.Debug("databricks-connector: securable parent is no longer listed",
-			zap.String("resource_type", schemaResourceType.Id),
-			zap.String("parent", parent.resourceKey()),
-		)
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, nil
+			"databricks-connector: failed to list schemas under %s: %w", parent.resourceKey(), err)
 	}
 
-	schemas, next, rateLimit, err := b.client.ListSchemas(ctx, workspace, parent.catalog(), attr.PageToken.Token, ResourcesPageSize)
-	noteRateLimit(&annos, rateLimit)
-	items := make([]securable, 0, len(schemas))
+	var rv []*v2.Resource
 	for _, schema := range schemas {
 		if schema.Name == "" {
 			continue
 		}
-
-		items = append(items, securable{
-			name:  schema.Name,
-			owner: schema.Owner,
-			profile: map[string]any{
-				profileKeyCatalogName: parent.catalog(),
-				profileKeySchemaName:  schema.Name,
-			},
-		})
-	}
-
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list %ss under %s: %w", schemaResourceType.Id, parent.resourceKey(), err)
-	}
-
-	var rv []*v2.Resource
-	for _, item := range items {
-		childRef := parent.child(item.name)
+		childRef := parent.child(schema.Name)
 		if isUnderInformationSchema(childRef) {
 			continue
 		}
 
-		built, err := newSecurableResource(schemaResourceType, securableTypeSchema, []*v2.ResourceType{tableResourceType, volumeResourceType}, item, childRef, parentResourceID)
+		built, err := newSecurableResource(schemaResourceType, securableTypeSchema, []*v2.ResourceType{tableResourceType, volumeResourceType}, securable{
+			name:  schema.Name,
+			owner: schema.Owner,
+			profile: map[string]any{
+				profileKeyCatalogName:    parent.catalog(),
+				profileKeySchemaName:     schema.Name,
+				profileKeyMetastoreOwner: current.MetastoreOwner,
+				profileKeyWorkspace:      current.Workspace,
+				profileKeyWorkspaceID:    current.WorkspaceID,
+				profileKeyWorkspaceName:  current.WorkspaceName,
+			},
+		}, childRef, parentResourceID)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 				"databricks-connector: failed to build %s resource %s: %w", schemaResourceType.Id, childRef.resourceKey(), err)
 		}
-
 		rv = append(rv, built)
 	}
 
-	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: next}, nil
+	nextToken, err := bag.NextToken(next)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
+	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
+}
+
+// openSchemaListing picks a workspace whose schema listing is complete. nil
+// means the parent catalog is not listed by this sync.
+func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableRef) (*schemaPageState, *v2.RateLimitDescription, error) {
+	return b.openListedCatalog(ctx, parent, "schema")
+}
+
+// openListedCatalog picks a workspace whose schema listing is complete. Tables
+// and volumes are listed through that same workspace: a short schema listing is
+// already a failed sync, and a later page must not rebuild the routing.
+// nil means the parent catalog is not listed by this sync.
+func (d *securableDeps) openListedCatalog(ctx context.Context, parent securableRef, noun string) (*schemaPageState, *v2.RateLimitDescription, error) {
+	snap, rateLimit, err := d.uc.buildRouting(ctx)
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists %ss under %s: %w", noun, parent.resourceKey(), err)
+	}
+
+	catalogs, state, catalogRateLimit, err := d.uc.catalogsOf(ctx, snap, parent.metastoreID)
+	if catalogRateLimit != nil {
+		rateLimit = catalogRateLimit
+	}
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists %ss under %s: %w", noun, parent.resourceKey(), err)
+	}
+	if state != securableInScope {
+		return nil, rateLimit, nil
+	}
+
+	facts, ok := catalogs[parent.catalog()]
+	if !ok {
+		return nil, rateLimit, nil
+	}
+
+	metastoreOwner := snap.metastores[parent.metastoreID].Owner
+	for _, workspace := range facts.workspaces {
+		complete, probeRateLimit, err := d.uc.schemaListingIsComplete(ctx, snap, metastoreOwner, facts.owner, parent.catalog(), workspace)
+		if probeRateLimit != nil {
+			rateLimit = probeRateLimit
+		}
+		if err != nil {
+			return nil, rateLimit, fmt.Errorf("databricks-connector: failed to confirm schema listing visibility for catalog %s: %w", parent.catalog(), err)
+		}
+		if !complete {
+			continue
+		}
+
+		return &schemaPageState{
+			Workspace:      workspace,
+			WorkspaceID:    snap.workspaceIDs[workspace],
+			WorkspaceName:  snap.workspaceNames[workspace],
+			MetastoreOwner: metastoreOwner,
+			CatalogOwner:   facts.owner,
+		}, rateLimit, nil
+	}
+
+	return nil, rateLimit, status.Errorf(codes.PermissionDenied,
+		"databricks-connector: cannot list every %s in catalog %s: %s", noun, parent.catalog(), schemaListRemedy)
+}
+
+// listSchemaChildren pages one kind of securable under a schema. The workspace
+// is chosen once and stored on the page token.
+func (d *securableDeps) listSchemaChildren(
+	ctx context.Context,
+	parentResourceID *v2.ResourceId,
+	attr rs.SyncOpAttrs,
+	resourceType *v2.ResourceType,
+	securableType, noun string,
+	fetch func(ctx context.Context, workspace, pageToken string) ([]securable, string, *v2.RateLimitDescription, error),
+) ([]*v2.Resource, *rs.SyncOpResults, error) {
+	if parentResourceID.GetResourceType() != schemaResourceType.Id {
+		return nil, nil, nil
+	}
+
+	parent, err := parseSecurableRef(parentResourceID.GetResource())
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse %s parent %q: %w", noun, parentResourceID.GetResource(), err)
+	}
+	if isUnderInformationSchema(parent) {
+		return nil, nil, nil
+	}
+
+	annos := annotations.Annotations{}
+	bag := &pagination.Bag{}
+	if err := bag.Unmarshal(attr.PageToken.Token); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid %s page token: %v", noun, err)
+	}
+
+	var rateLimit *v2.RateLimitDescription
+	if bag.Current() == nil {
+		current, openRateLimit, err := d.openListedCatalog(ctx, parent, noun)
+		rateLimit = openRateLimit
+		noteRateLimit(&annos, rateLimit)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		if current == nil {
+			ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed",
+				zap.String("resource_type", resourceType.Id),
+				zap.String("parent", parent.resourceKey()),
+			)
+
+			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		}
+
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		bag.Push(pagination.PageState{ResourceTypeID: resourceType.Id, ResourceID: string(encoded)})
+	}
+
+	var current schemaPageState
+	if err := json.Unmarshal([]byte(bag.ResourceID()), &current); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid %s page token: %v", noun, err)
+	}
+
+	items, next, listRateLimit, err := fetch(ctx, current.Workspace, bag.PageToken())
+	if listRateLimit != nil {
+		rateLimit = listRateLimit
+	}
+	noteRateLimit(&annos, rateLimit)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.Unavailable,
+				fmt.Sprintf("databricks-connector: schema %s is listed, but its %ss could not be read through workspace %s",
+					parent.fullName(), noun, current.Workspace),
+				err)
+		}
+
+		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+			"databricks-connector: failed to list %ss under %s: %w", noun, parent.resourceKey(), err)
+	}
+
+	var rv []*v2.Resource
+	for _, item := range items {
+		if item.profile == nil {
+			item.profile = map[string]any{}
+		}
+		item.profile[profileKeyMetastoreOwner] = current.MetastoreOwner
+		item.profile[profileKeyWorkspace] = current.Workspace
+		item.profile[profileKeyWorkspaceID] = current.WorkspaceID
+		item.profile[profileKeyWorkspaceName] = current.WorkspaceName
+
+		childRef := parent.child(item.name)
+		built, err := newSecurableResource(resourceType, securableType, nil, item, childRef, parentResourceID)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+				"databricks-connector: failed to build %s resource %s: %w", resourceType.Id, childRef.resourceKey(), err)
+		}
+		rv = append(rv, built)
+	}
+
+	nextToken, err := bag.NextToken(next)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
+	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
 func (b *schemaBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -122,7 +326,6 @@ func (b *schemaBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) 
 		))
 	}
 
-	// Owner is not grantable. Ownership is single-valued and has no revoke.
 	rv = append(rv, ent.NewOwnershipEntitlement(nil, ownerEntitlement,
 		ent.WithDescription("Owns a schema in Databricks"),
 	))
@@ -135,63 +338,59 @@ func (b *schemaBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 }
 
 func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	return b.grantsOn(ctx, resource, attr, databricks.SecurableSchema, schemaPrivileges)
+}
+
+// grantsOn reads one page of direct grants. offered is the set this resource
+// reports; a privilege outside it is not a grant ConductorOne can represent.
+func (d *securableDeps) grantsOn(
+	ctx context.Context,
+	resource *v2.Resource,
+	attr rs.SyncOpAttrs,
+	securableType string,
+	offered []string,
+) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	ref, err := parseSecurableRef(resource.GetId().GetResource())
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to parse schema resource id: %w", err)
+		return nil, nil, err
 	}
 
 	annos := annotations.Annotations{}
-	snap, rateLimit, err := b.uc.buildRouting(ctx)
+	workspace, state, rateLimit, err := d.catalogAccess(ctx, resource, ref, false)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if code := status.Code(err); code == codes.PermissionDenied || code == codes.FailedPrecondition {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
 	}
-	workspace, exists, rateLimit, err := accessCatalog(snap, ref, databricks.SecurableSchema, rateLimit)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if !exists {
-		ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed",
-			zap.String("schema", ref.resourceKey()),
+	if state != securableInScope {
+		ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed; skipping its grants",
+			zap.String("securable", ref.resourceKey()),
 			zap.String("catalog", ref.catalog()),
 		)
 
 		return nil, &rs.SyncOpResults{Annotations: annos}, nil
 	}
 
-	trustworthy, rateLimit, err := b.uc.grantsAreTrustworthy(ctx, snap, ref, workspace)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to probe grant visibility on schema %s: %w", ref.permissionsName(), err)
-	}
-	if !trustworthy {
-		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant under catalog %s: the connector principal needs MANAGE on it",
-			ref.catalog())
-	}
-
 	l := ctxzap.Extract(ctx)
 	pageToken := attr.PageToken.Token
-	assignments, nextPageToken, rateLimit, err := b.client.ListPermissions(
-		ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "", pageToken)
+	assignments, nextPageToken, rateLimit, err := d.client.ListPermissions(
+		ctx, workspace, securableType, ref.permissionsName(), "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableSchema, ref.permissionsName(), err)
+			"databricks-connector: failed to list permissions on %s %s: %w", securableType, ref.permissionsName(), err)
 	}
 
 	owner := ""
 	if pageToken == "" {
-		if v, ok := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyOwner); ok {
-			owner = v
-		}
+		owner = profileString(resource, profileKeyOwner)
 	}
 
-	principals, principalRateLimit, err := b.uc.principalsForGrants(ctx, assignments, owner)
+	principals, principalRateLimit, err := d.uc.principalsForGrants(ctx, assignments, owner)
 	noteRateLimit(&annos, principalRateLimit)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
@@ -210,58 +409,25 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 
 			continue
 		}
-
-		if principalId.GetResourceType() != userResourceType.Id && !b.willSync(principalId.GetResourceType()) {
+		if !emitPrincipal(d.sync, principalId.GetResourceType()) {
 			continue
 		}
 
-		var options []grant.GrantOption
-		if principalId.GetResourceType() == groupResourceType.Id {
-			// Shallow stays unset: setting it would suppress propagation through a nested group.
-			options = []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
-				EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
-				ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
-			})}
-		}
-
+		options := groupSecurableGrantOptions(principalId)
 		for _, assigned := range assignment.Privileges {
-			if assigned == "" {
+			if assigned == "" || !slices.Contains(offered, assigned) {
 				continue
 			}
-			if !slices.Contains(schemaPrivileges, assigned) {
-				l.Debug("databricks-connector: skipping a privilege the resource does not offer",
-					zap.String("securable", ref.resourceKey()),
-					zap.String("privilege", assigned),
-				)
-
-				continue
-			}
-
 			rv = append(rv, grant.NewGrant(resource, assigned, principalId, options...))
 		}
 	}
 
-	if pageToken == "" {
-		owner, ok := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyOwner)
-		if ok && owner != "" {
-			principalId, found := principals.lookupName(owner)
-			if !found {
-				l.Debug("databricks-connector: securable owner does not resolve to a synced principal",
-					zap.String("securable", ref.resourceKey()),
-					zap.String("owner", owner),
-				)
-			} else if principalId.GetResourceType() == userResourceType.Id || b.willSync(principalId.GetResourceType()) {
-				var options []grant.GrantOption
-				if principalId.GetResourceType() == groupResourceType.Id {
-					// Shallow stays unset: setting it would suppress propagation through a nested group.
-					options = []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
-						EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
-						ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
-					})}
-				}
-				options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
-				rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
-			}
+	if owner != "" {
+		principalId, found := principals.lookupName(owner)
+		if found && emitPrincipal(d.sync, principalId.GetResourceType()) {
+			options := groupSecurableGrantOptions(principalId)
+			options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
+			rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
 		}
 	}
 
@@ -269,383 +435,9 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 }
 
 func (b *schemaBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	annos := annotations.Annotations{}
-	principalID := principal.GetId()
-
-	if !isValidPrincipal(principalID) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: only users, groups and service principals can hold a Unity Catalog privilege, got %s",
-			principalID.GetResourceType())
-	}
-
-	ref, err := parseSecurableRef(entitlement.GetResource().GetId().GetResource())
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to parse %s resource id: %w", databricks.SecurableSchema, err)
-	}
-
-	entitlementID := entitlement.GetId()
-	separator := strings.LastIndex(entitlementID, ":")
-	if separator < 0 || separator == len(entitlementID)-1 {
-		return annos, fmt.Errorf("databricks-connector: failed to read the privilege from entitlement %q: %w",
-			entitlementID, fmt.Errorf("invalid entitlement id %q", entitlementID))
-	}
-	privilege := entitlementID[separator+1:]
-
-	if privilege == ownerEntitlement {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: ownership of %s %s is single-valued and has no revoke, so it cannot be provisioned; change the owner in Databricks",
-			databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	if isLegacyPrivilege(privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is a Hive-era alias that Databricks rewrites server-side — CREATE on a schema becomes "+
-				"CREATE_TABLE plus CREATE_FUNCTION — so it would grant more than was asked for and would never be read back "+
-				"under that name; ask for the explicit privilege instead",
-			privilege)
-	}
-
-	if !slices.Contains(schemaPrivileges, privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is not a grantable privilege on %s %s",
-			privilege, databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	snap, rateLimit, err := b.uc.buildRouting(ctx)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	workspace, exists, rateLimit, err := accessCatalog(snap, ref, databricks.SecurableSchema, rateLimit)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if !exists {
-		if !b.uc.scope.covers(ref.catalog()) {
-			return annos, status.Errorf(codes.InvalidArgument,
-				"databricks-connector: catalog %s is out of scope for this sync, so %s %s cannot be changed; "+
-					"change %s to bring the catalog into scope",
-				ref.catalog(), databricks.SecurableSchema, ref.permissionsName(), b.uc.scope.describe())
-		}
-
-		return annos, status.Errorf(codes.NotFound,
-			"databricks-connector: catalog %s is no longer listed in metastore %s, so %s %s cannot be changed",
-			ref.catalog(), ref.metastoreID, databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	trustworthy, rateLimit, err := b.uc.grantsAreTrustworthy(ctx, snap, ref, workspace)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to probe grant visibility on %s %s: %w",
-			databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-	if !trustworthy {
-		return annos, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant under catalog %s: the connector principal needs MANAGE on it",
-			ref.catalog())
-	}
-
-	scimID, err := unityPrincipalScimID(principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to read the SCIM id of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	principalName, _, err := unityPrincipalName(ctx, b.client, principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the Unity Catalog name of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	if principalName == "" {
-		return annos, status.Errorf(codes.NotFound,
-			"databricks-connector: principal %s no longer exists in Databricks, so it cannot be granted %s on %s %s",
-			scimID, privilege, databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	matchHeld := func(assignments []databricks.PrivilegeAssignment) (databricks.PrivilegeAssignment, bool) {
-		var nameOnly databricks.PrivilegeAssignment
-		var sawNameOnly bool
-		for _, assignment := range assignments {
-			if !slices.Contains(assignment.Privileges, privilege) {
-				continue
-			}
-
-			assignmentID := assignment.PrincipalID.String()
-			if scimID != "" && assignmentID == scimID && assignmentID != "0" {
-				return assignment, true
-			}
-			if principalName == "" || assignment.Principal != principalName {
-				continue
-			}
-			if scimID != "" && assignmentID != "" && assignmentID != "0" && assignmentID != scimID {
-				continue
-			}
-			if !sawNameOnly {
-				nameOnly = assignment
-				sawNameOnly = true
-			}
-		}
-		if sawNameOnly {
-			return nameOnly, true
-		}
-
-		return databricks.PrivilegeAssignment{}, false
-	}
-
-	assignments, rateLimit, err := b.client.DrainPermissions(ctx, workspace, databricks.SecurableSchema, ref.permissionsName())
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w",
-			databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-
-	if _, held := matchHeld(assignments); held {
-		annos.Update(&v2.GrantAlreadyExists{})
-
-		return annos, nil
-	}
-
-	var echoed []databricks.PrivilegeAssignment
-	rateLimit, err = b.client.UpdatePermissionsUntil(ctx, workspace, databricks.SecurableSchema, ref.permissionsName(),
-		[]databricks.PermissionsChange{{Principal: principalName, Add: []string{privilege}}},
-		func(page []databricks.PrivilegeAssignment) (bool, error) {
-			echoed = append(echoed, page...)
-			_, held := matchHeld(echoed)
-			return held, nil
-		})
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		if isForbiddenError(err) {
-			return annos, uhttp.WrapErrors(
-				codes.PermissionDenied,
-				fmt.Sprintf("databricks-connector: cannot grant %s on %s %s: the connector principal needs MANAGE on it",
-					privilege, databricks.SecurableSchema, ref.permissionsName()),
-				err,
-			)
-		}
-
-		return annos, fmt.Errorf("databricks-connector: failed to grant %s on %s %s: %w",
-			privilege, databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-
-	if _, held := matchHeld(echoed); !held {
-		return annos, status.Errorf(codes.Internal,
-			"databricks-connector: Databricks accepted granting %s to %s on %s %s but did not report the privilege on the securable afterwards, "+
-				"so the grant was not applied",
-			privilege, principalName, databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	return annos, nil
+	return b.grantSecurable(ctx, principal, entitlement, schemaKind)
 }
 
 func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	annos := annotations.Annotations{}
-	principalID := revoked.GetPrincipal().GetId()
-	entitlement := revoked.GetEntitlement()
-
-	if !isValidPrincipal(principalID) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: only users, groups and service principals can hold a Unity Catalog privilege, got %s",
-			principalID.GetResourceType())
-	}
-
-	ref, err := parseSecurableRef(entitlement.GetResource().GetId().GetResource())
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to parse %s resource id: %w", databricks.SecurableSchema, err)
-	}
-
-	entitlementID := entitlement.GetId()
-	separator := strings.LastIndex(entitlementID, ":")
-	if separator < 0 || separator == len(entitlementID)-1 {
-		return annos, fmt.Errorf("databricks-connector: failed to read the privilege from entitlement %q: %w",
-			entitlementID, fmt.Errorf("invalid entitlement id %q", entitlementID))
-	}
-	privilege := entitlementID[separator+1:]
-
-	if privilege == ownerEntitlement {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: ownership of %s %s is single-valued and has no revoke, so it cannot be provisioned; change the owner in Databricks",
-			databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	if isLegacyPrivilege(privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is a Hive-era alias that Databricks rewrites server-side — CREATE on a schema becomes "+
-				"CREATE_TABLE plus CREATE_FUNCTION — so it would grant more than was asked for and would never be read back "+
-				"under that name; ask for the explicit privilege instead",
-			privilege)
-	}
-
-	if !slices.Contains(schemaPrivileges, privilege) {
-		return annos, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: %s is not a grantable privilege on %s %s",
-			privilege, databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	snap, rateLimit, err := b.uc.buildRouting(ctx)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	workspace, exists, rateLimit, err := accessCatalog(snap, ref, databricks.SecurableSchema, rateLimit)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if !exists {
-		if !b.uc.scope.covers(ref.catalog()) {
-			return annos, status.Errorf(codes.InvalidArgument,
-				"databricks-connector: catalog %s is out of scope for this sync, so %s %s cannot be changed; "+
-					"change %s to bring the catalog into scope",
-				ref.catalog(), databricks.SecurableSchema, ref.permissionsName(), b.uc.scope.describe())
-		}
-
-		gone, rateLimit, err := b.uc.confirmCatalogGone(ctx, snap, ref, rateLimit)
-		noteRateLimit(&annos, rateLimit)
-		if err != nil {
-			return annos, fmt.Errorf("databricks-connector: failed to confirm whether catalog %s still exists: %w",
-				ref.catalog(), err)
-		}
-		if gone {
-			annos.Update(&v2.GrantAlreadyRevoked{})
-
-			return annos, nil
-		}
-
-		return annos, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: catalog %s exists but is not listed on any workspace this sync covers, "+
-				"so %s %s cannot be revoked; bind it to a workspace this sync covers or include that workspace",
-			ref.catalog(), databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	trustworthy, rateLimit, err := b.uc.grantsAreTrustworthy(ctx, snap, ref, workspace)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to probe grant visibility on %s %s: %w",
-			databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-	if !trustworthy {
-		return annos, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every grant under catalog %s: the connector principal needs MANAGE on it",
-			ref.catalog())
-	}
-
-	scimID, err := unityPrincipalScimID(principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to read the SCIM id of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	principalName, _, err := unityPrincipalName(ctx, b.client, principalID)
-	if err != nil {
-		return annos, fmt.Errorf("databricks-connector: failed to resolve the Unity Catalog name of principal %s: %w",
-			principalID.GetResource(), err)
-	}
-
-	matchHeld := func(assignments []databricks.PrivilegeAssignment) (databricks.PrivilegeAssignment, bool) {
-		var nameOnly databricks.PrivilegeAssignment
-		var sawNameOnly bool
-		for _, assignment := range assignments {
-			if !slices.Contains(assignment.Privileges, privilege) {
-				continue
-			}
-
-			assignmentID := assignment.PrincipalID.String()
-			if scimID != "" && assignmentID == scimID && assignmentID != "0" {
-				return assignment, true
-			}
-			if principalName == "" || assignment.Principal != principalName {
-				continue
-			}
-			if scimID != "" && assignmentID != "" && assignmentID != "0" && assignmentID != scimID {
-				continue
-			}
-			if !sawNameOnly {
-				nameOnly = assignment
-				sawNameOnly = true
-			}
-		}
-		if sawNameOnly {
-			return nameOnly, true
-		}
-
-		return databricks.PrivilegeAssignment{}, false
-	}
-
-	var seen []databricks.PrivilegeAssignment
-	rateLimit, err = b.client.ForEachUncachedPermissionsPage(ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "",
-		func(page []databricks.PrivilegeAssignment) (bool, error) {
-			seen = append(seen, page...)
-			matched, ok := matchHeld(seen)
-			if !ok {
-				return false, nil
-			}
-			matchedID := matched.PrincipalID.String()
-			return scimID != "" && matchedID == scimID && matchedID != "0", nil
-		})
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		if isSecurableGone(err, databricks.ErrorCodeSchemaDoesNotExist) {
-			annos.Update(&v2.GrantAlreadyRevoked{})
-
-			return annos, nil
-		}
-
-		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w",
-			databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-
-	held, ok := matchHeld(seen)
-	if !ok {
-		annos.Update(&v2.GrantAlreadyRevoked{})
-
-		return annos, nil
-	}
-
-	var removal databricks.PermissionsChange
-	if heldID := held.PrincipalID.String(); heldID != "" && heldID != "0" {
-		removal = databricks.PermissionsChange{PrincipalID: held.PrincipalID, Remove: []string{privilege}}
-	} else if principalName != "" {
-		removal = databricks.PermissionsChange{Principal: principalName, Remove: []string{privilege}}
-	} else {
-		removal = databricks.PermissionsChange{PrincipalID: held.PrincipalID, Remove: []string{privilege}}
-	}
-
-	result, rateLimit, err := b.client.UpdatePermissions(ctx, workspace, databricks.SecurableSchema, ref.permissionsName(),
-		[]databricks.PermissionsChange{removal})
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		if isSecurableGone(err, databricks.ErrorCodeSchemaDoesNotExist) {
-			annos.Update(&v2.GrantAlreadyRevoked{})
-
-			return annos, nil
-		}
-		if isForbiddenError(err) {
-			return annos, uhttp.WrapErrors(
-				codes.PermissionDenied,
-				fmt.Sprintf("databricks-connector: cannot revoke %s on %s %s: the connector principal needs MANAGE on it",
-					privilege, databricks.SecurableSchema, ref.permissionsName()),
-				err,
-			)
-		}
-
-		return annos, fmt.Errorf("databricks-connector: failed to revoke %s on %s %s: %w",
-			privilege, databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-
-	if _, stillHeld := matchHeld(result); stillHeld {
-		label := principalName
-		if label == "" {
-			label = scimID
-		}
-
-		return annos, status.Errorf(codes.Internal,
-			"databricks-connector: Databricks accepted revoking %s from %s on %s %s but still reports the privilege on the securable, "+
-				"so the revoke was not applied",
-			privilege, label, databricks.SecurableSchema, ref.permissionsName())
-	}
-
-	return annos, nil
+	return b.revokeSecurable(ctx, revoked, schemaKind)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -14,73 +15,53 @@ const (
 	workspacePermissionAdmin = "ADMIN"
 )
 
-// grantsAreTrustworthy reports whether the connector can see every direct grant in
-// a catalog's subtree. The verdict is not kept.
-func (u *unityCatalog) grantsAreTrustworthy(
-	ctx context.Context,
-	snap routingSnapshot,
-	ref securableRef,
-	workspace string,
-) (bool, *v2.RateLimitDescription, error) {
-	return u.probeCatalog(ctx, snap, ref, workspace, nil)
-}
+// catalogTrustRemedy is what PermissionDenied on a catalog tells the operator.
+const catalogTrustRemedy = "the connector principal must own the metastore or the catalog, hold MANAGE on the catalog, or be a direct Admin of the workspace whose admins group owns it"
 
-// metastoreGrantsAreTrustworthy is the same partial-read guard one level up.
-// MANAGE and ALL_PRIVILEGES are rejected at the metastore level, so the authority
-// is owning the metastore or administering a workspace it is assigned to.
+// metastoreGrantsAreTrustworthy reports whether every direct grant on a metastore
+// is visible. MANAGE and ALL_PRIVILEGES are rejected at the metastore level, so the
+// authority is owning it or administering a workspace it is assigned to.
 func (u *unityCatalog) metastoreGrantsAreTrustworthy(
 	ctx context.Context,
 	snap routingSnapshot,
 	metastoreID, workspace string,
 ) (bool, *v2.RateLimitDescription, error) {
-	return u.metastoreProbe(ctx, snap, metastoreID, workspace, nil)
-}
-
-func (u *unityCatalog) metastoreProbe(
-	ctx context.Context,
-	snap routingSnapshot,
-	metastoreID, workspace string,
-	rateLimit *v2.RateLimitDescription,
-) (bool, *v2.RateLimitDescription, error) {
 	if metastore, ok := snap.metastores[metastoreID]; ok && u.ownsPrincipal(metastore.Owner) {
-		return true, rateLimit, nil
+		return true, nil, nil
 	}
 
-	admin, adminRateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
-	if adminRateLimit != nil {
-		rateLimit = adminRateLimit
-	}
-	if err != nil {
-		return false, rateLimit, err
-	}
-
-	return admin, rateLimit, nil
+	return u.isWorkspaceAdmin(ctx, snap, workspace)
 }
 
-func (u *unityCatalog) probeCatalog(
+// catalogGrantsAreTrustworthy reports whether the connector sees every direct grant
+// in a catalog's subtree. Databricks shows the full list only to a metastore admin,
+// the owner, or a holder of MANAGE. A direct workspace Admin also sees it when the
+// catalog is owned by that workspace's admins group. Anyone else reads just their
+// own grants with a 200.
+func (u *unityCatalog) catalogGrantsAreTrustworthy(
 	ctx context.Context,
 	snap routingSnapshot,
+	metastoreOwner, catalogOwner string,
 	ref securableRef,
 	workspace string,
-	rateLimit *v2.RateLimitDescription,
 ) (bool, *v2.RateLimitDescription, error) {
-	// A metastore owner reads across the metastore.
-	if metastore, ok := snap.metastores[ref.metastoreID]; ok && u.ownsPrincipal(metastore.Owner) {
-		return true, rateLimit, nil
+	// An owner holds every privilege implicitly, which is not reported as a grant.
+	if u.ownsPrincipal(metastoreOwner) || u.ownsPrincipal(catalogOwner) {
+		return true, nil, nil
 	}
 
-	// A securable's owner holds every privilege implicitly, which is not reported as
-	// a grant, so ownership has to be checked separately.
-	if catalogs := snap.catalogs[ref.metastoreID]; catalogs != nil {
-		if facts, ok := catalogs[ref.catalog()]; ok && u.ownsPrincipal(facts.owner) {
-			return true, rateLimit, nil
+	// The workspace admins group acts as the owner for a direct Admin of that workspace.
+	if workspaceAdminsGroupOwns(catalogOwner, snap.workspaceIDs[workspace]) {
+		admin, rateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
+		if err != nil || admin {
+			return admin, rateLimit, err
 		}
 	}
 
 	// The principal filter is effective, not literal: a row may be the group's MANAGE
 	// this principal inherits, so nothing here may match on identity.
 	var manageable bool
-	permissionsRateLimit, err := u.client.ForEachPermissionsPage(
+	rateLimit, err := u.client.ForEachUncachedPermissionsPage(
 		ctx, workspace, databricks.SecurableCatalog, ref.catalog(), u.ownPrincipal,
 		func(page []databricks.PrivilegeAssignment) (bool, error) {
 			if !holdsManage(page) {
@@ -89,29 +70,74 @@ func (u *unityCatalog) probeCatalog(
 			manageable = true
 			return true, nil
 		})
-	if permissionsRateLimit != nil {
-		rateLimit = permissionsRateLimit
-	}
-	if err != nil {
-		// No not-found exemption: this call answers 404 both for a catalog that is gone
-		// and for a principal it does not know, separable only by message text.
-		return false, rateLimit, err
-	}
-	if manageable {
-		return true, rateLimit, nil
-	}
-
-	// A workspace admin holds the metastore-level privileges of the metastore its
-	// workspace is assigned to, so it reads every grant under the catalog.
-	admin, adminRateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
-	if adminRateLimit != nil {
-		rateLimit = adminRateLimit
-	}
 	if err != nil {
 		return false, rateLimit, err
 	}
 
-	return admin, rateLimit, nil
+	return manageable, rateLimit, nil
+}
+
+// schemaListRemedy is what PermissionDenied on a schema listing tells the operator.
+const schemaListRemedy = "the connector principal must own the metastore or the catalog, or hold MANAGE, USE_SCHEMA, or ALL_PRIVILEGES on the catalog"
+
+// schemaListingIsComplete reports whether ListSchemas will return every schema
+// in the catalog. Measured on a workspace Admin that does not own the metastore:
+// the system catalog came back with 2 schemas instead of 15, and a catalog grant
+// of MANAGE alone (with no USE_SCHEMA) did list a schema owned by someone else.
+// Workspace Admin is not on this list.
+func (u *unityCatalog) schemaListingIsComplete(
+	ctx context.Context,
+	snap routingSnapshot,
+	metastoreOwner, catalogOwner, catalogName, workspace string,
+) (bool, *v2.RateLimitDescription, error) {
+	if u.ownsPrincipal(metastoreOwner) || u.ownsPrincipal(catalogOwner) {
+		return true, nil, nil
+	}
+	if workspaceAdminsGroupOwns(catalogOwner, snap.workspaceIDs[workspace]) {
+		admin, rateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
+		if err != nil || admin {
+			return admin, rateLimit, err
+		}
+	}
+
+	var complete bool
+	rateLimit, err := u.client.ForEachUncachedPermissionsPage(
+		ctx, workspace, databricks.SecurableCatalog, catalogName, u.ownPrincipal,
+		func(page []databricks.PrivilegeAssignment) (bool, error) {
+			if !holdsSchemaListingPrivilege(page) {
+				return false, nil
+			}
+			complete = true
+			return true, nil
+		})
+	if err != nil {
+		return false, rateLimit, err
+	}
+
+	return complete, rateLimit, nil
+}
+
+func holdsSchemaListingPrivilege(assignments []databricks.PrivilegeAssignment) bool {
+	for _, assignment := range assignments {
+		for _, privilege := range assignment.Privileges {
+			switch privilege {
+			case privilegeManage, "USE_SCHEMA", privilegeAllPrivileges:
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// workspaceAdminsGroupOwns reports whether owner is the system group Databricks
+// creates for a workspace, named _workspace_admins_<workspace>_<workspace id>.
+func workspaceAdminsGroupOwns(owner, workspaceID string) bool {
+	if owner == "" || workspaceID == "" {
+		return false
+	}
+
+	return strings.HasPrefix(owner, "_workspace_admins_") && strings.HasSuffix(owner, "_"+workspaceID)
 }
 
 // isWorkspaceAdmin lists the workspace's permission assignments on every call.
@@ -139,6 +165,9 @@ func (u *unityCatalog) isWorkspaceAdmin(
 
 // holdsWorkspaceAdmin matches the connector's own principal against a workspace's
 // ADMIN assignments. A service principal is named by its applicationId.
+// Admin inherited only through a group is ignored: the connector principal must
+// hold ADMIN itself. Walking every admin group's membership on every Grants call
+// is the cost that would close this gap.
 func (u *unityCatalog) holdsWorkspaceAdmin(
 	ctx context.Context,
 	assignments []databricks.WorkspaceAssignment,

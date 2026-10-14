@@ -83,32 +83,54 @@ func (u *unityCatalog) ownsPrincipal(name string) bool {
 }
 
 // principalsForGrants builds the index Grants uses for assignments and owner.
-// Privilege assignments carry a principal_id with no type discriminator, so they
-// still require a full account SCIM walk. An owner-only page — the common
-// table/schema case — is one to three targeted filters. A workspace-admins
-// owner matches none of them and must not pay for listing every account principal.
+// Each distinct principal is resolved on demand: Get* by principal_id, then
+// Find* by name.
 func (u *unityCatalog) principalsForGrants(
 	ctx context.Context,
 	assignments []databricks.PrivilegeAssignment,
 	owner string,
 ) (*principalIndex, *v2.RateLimitDescription, error) {
-	if len(assignments) > 0 {
-		return u.listPrincipals(ctx)
-	}
-	if owner == "" {
-		return newPrincipalIndex(), nil, nil
+	if len(assignments) == 0 {
+		if owner == "" {
+			return newPrincipalIndex(), nil, nil
+		}
+
+		return u.indexOwner(ctx, owner)
 	}
 
-	return u.indexOwner(ctx, owner)
+	return u.indexAssignments(ctx, assignments, owner)
+}
+
+// lookupOwner treats a rejected SCIM filter as a miss. The value is quoted, so
+// an apostrophe should not reach this; a 400 still must not fail Grants.
+func (u *unityCatalog) lookupOwner(
+	ctx context.Context,
+	owner, kind string,
+	find func() (string, *v2.RateLimitDescription, error),
+) (string, *v2.RateLimitDescription, error) {
+	id, rateLimit, err := find()
+	if err == nil || !isRejectedFilter(err) {
+		return id, rateLimit, err
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: owner lookup was rejected; leaving that principal unresolved",
+		zap.String("owner", owner),
+		zap.String("kind", kind),
+		zap.Error(err),
+	)
+
+	return "", rateLimit, nil
 }
 
 // indexOwner asks each principal namespace for that one name. The first hit
-// wins, in the same order listPrincipals writes the index (users, groups,
+// wins, in the same order lookupPrincipalByID tries (users, groups,
 // service principals).
 func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principalIndex, *v2.RateLimitDescription, error) {
 	index := newPrincipalIndex()
 
-	userID, rateLimit, err := u.client.FindUserID(ctx, "", owner)
+	userID, rateLimit, err := u.lookupOwner(ctx, owner, "user", func() (string, *v2.RateLimitDescription, error) {
+		return u.client.FindUserID(ctx, "", owner)
+	})
 	if err != nil {
 		return nil, rateLimit, fmt.Errorf("failed to resolve owner %q as a user: %w", owner, err)
 	}
@@ -118,7 +140,9 @@ func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principal
 		return index, rateLimit, nil
 	}
 
-	groupID, groupRateLimit, err := u.client.FindGroupID(ctx, "", owner)
+	groupID, groupRateLimit, err := u.lookupOwner(ctx, owner, "group", func() (string, *v2.RateLimitDescription, error) {
+		return u.client.FindGroupID(ctx, "", owner)
+	})
 	if groupRateLimit != nil {
 		rateLimit = groupRateLimit
 	}
@@ -139,7 +163,9 @@ func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principal
 		return index, rateLimit, nil
 	}
 
-	servicePrincipalID, servicePrincipalRateLimit, err := u.client.FindServicePrincipalID(ctx, "", owner)
+	servicePrincipalID, servicePrincipalRateLimit, err := u.lookupOwner(ctx, owner, "service principal", func() (string, *v2.RateLimitDescription, error) {
+		return u.client.FindServicePrincipalID(ctx, "", owner)
+	})
 	if servicePrincipalRateLimit != nil {
 		rateLimit = servicePrincipalRateLimit
 	}
@@ -158,149 +184,117 @@ func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principal
 	return index, rateLimit, nil
 }
 
-func (u *unityCatalog) listPrincipals(ctx context.Context) (*principalIndex, *v2.RateLimitDescription, error) {
-	accountResourceId, err := rs.NewResourceID(accountResourceType, u.client.GetAccountId())
-	if err != nil {
-		return nil, nil, err
-	}
-
+func (u *unityCatalog) indexAssignments(
+	ctx context.Context,
+	assignments []databricks.PrivilegeAssignment,
+	owner string,
+) (*principalIndex, *v2.RateLimitDescription, error) {
 	index := newPrincipalIndex()
+	var rateLimit *v2.RateLimitDescription
+	seenID := map[string]struct{}{}
+	seenName := map[string]struct{}{}
 
-	rateLimit, err := u.indexUsers(ctx, index)
-	if err != nil {
-		return nil, rateLimit, err
+	resolve := func(assignment databricks.PrivilegeAssignment) error {
+		id := assignment.PrincipalID.String()
+		if id != "" && id != "0" {
+			if _, ok := seenID[id]; ok {
+				return nil
+			}
+			seenID[id] = struct{}{}
+			resourceId, pageRateLimit, err := u.lookupPrincipalByID(ctx, id)
+			if pageRateLimit != nil {
+				rateLimit = pageRateLimit
+			}
+			if err != nil {
+				return err
+			}
+			if resourceId != nil {
+				index.add(ctx, id, []string{assignment.Principal}, resourceId)
+			}
+
+			return nil
+		}
+
+		name := assignment.Principal
+		if name == "" {
+			return nil
+		}
+		if _, ok := seenName[name]; ok {
+			return nil
+		}
+		seenName[name] = struct{}{}
+		partial, pageRateLimit, err := u.indexOwner(ctx, name)
+		if pageRateLimit != nil {
+			rateLimit = pageRateLimit
+		}
+		if err != nil {
+			return err
+		}
+		if resourceId, ok := partial.lookupName(name); ok {
+			index.add(ctx, "", []string{name}, resourceId)
+		}
+
+		return nil
 	}
-	groupRateLimit, err := u.indexGroups(ctx, index, accountResourceId)
-	if groupRateLimit != nil {
-		rateLimit = groupRateLimit
+
+	for _, assignment := range assignments {
+		if err := resolve(assignment); err != nil {
+			return nil, rateLimit, err
+		}
 	}
-	if err != nil {
-		return nil, rateLimit, err
-	}
-	servicePrincipalRateLimit, err := u.indexServicePrincipals(ctx, index)
-	if servicePrincipalRateLimit != nil {
-		rateLimit = servicePrincipalRateLimit
-	}
-	if err != nil {
-		return nil, rateLimit, err
+	if owner != "" {
+		if err := resolve(databricks.PrivilegeAssignment{Principal: owner}); err != nil {
+			return nil, rateLimit, err
+		}
 	}
 
 	return index, rateLimit, nil
 }
 
-func (u *unityCatalog) indexUsers(ctx context.Context, index *principalIndex) (*v2.RateLimitDescription, error) {
-	var rateLimit *v2.RateLimitDescription
-
-	for page := uint(1); ; {
-		if err := ctx.Err(); err != nil {
-			return rateLimit, err
-		}
-
-		users, total, pageRateLimit, err := u.client.ListUsers(ctx, "", databricks.NewPaginationVars(page, ResourcesPageSize), databricks.NewUserAttrVars())
-		if pageRateLimit != nil {
-			rateLimit = pageRateLimit
-		}
-		if err != nil {
-			return rateLimit, fmt.Errorf("failed to list account users: %w", err)
-		}
-		if len(users) == 0 {
-			return rateLimit, nil
-		}
-
-		for _, user := range users {
-			index.add(ctx, user.ID, []string{user.UserName}, &v2.ResourceId{ResourceType: userResourceType.Id, Resource: user.ID})
-		}
-
-		next, err := nextScimPage(page, len(users), total)
-		if err != nil {
-			return rateLimit, err
-		}
-		if next == 0 {
-			return rateLimit, nil
-		}
-		page = next
+func (u *unityCatalog) lookupPrincipalByID(
+	ctx context.Context,
+	id string,
+) (*v2.ResourceId, *v2.RateLimitDescription, error) {
+	user, rateLimit, err := u.client.GetUser(ctx, "", id)
+	if err != nil && !isNotFoundError(err) {
+		return nil, rateLimit, fmt.Errorf("failed to resolve principal %s as a user: %w", id, err)
 	}
-}
-
-func (u *unityCatalog) indexGroups(ctx context.Context, index *principalIndex, parent *v2.ResourceId) (*v2.RateLimitDescription, error) {
-	var rateLimit *v2.RateLimitDescription
-
-	for page := uint(1); ; {
-		if err := ctx.Err(); err != nil {
-			return rateLimit, err
-		}
-
-		groups, total, pageRateLimit, err := u.client.ListGroups(ctx, "", databricks.NewPaginationVars(page, ResourcesPageSize), databricks.NewGroupAttrVars())
-		if pageRateLimit != nil {
-			rateLimit = pageRateLimit
-		}
-		if err != nil {
-			return rateLimit, fmt.Errorf("failed to list account groups: %w", err)
-		}
-		if len(groups) == 0 {
-			return rateLimit, nil
-		}
-
-		for _, group := range groups {
-			// Groups sync under the account with a composite resource id; the index must
-			// hold the same form or a grant points at a resource that was never synced.
-			resourceId, err := rs.NewResourceID(groupResourceType, groupResourceId(ctx, group.ID, parent))
-			if err != nil {
-				return rateLimit, err
-			}
-			index.add(ctx, group.ID, []string{group.DisplayName}, resourceId)
-		}
-
-		next, err := nextScimPage(page, len(groups), total)
-		if err != nil {
-			return rateLimit, err
-		}
-		if next == 0 {
-			return rateLimit, nil
-		}
-		page = next
+	if err == nil && user != nil && user.ID != "" {
+		return &v2.ResourceId{ResourceType: userResourceType.Id, Resource: user.ID}, rateLimit, nil
 	}
-}
 
-func (u *unityCatalog) indexServicePrincipals(ctx context.Context, index *principalIndex) (*v2.RateLimitDescription, error) {
-	var rateLimit *v2.RateLimitDescription
-
-	for page := uint(1); ; {
-		if err := ctx.Err(); err != nil {
-			return rateLimit, err
-		}
-
-		servicePrincipals, total, pageRateLimit, err := u.client.ListServicePrincipals(ctx, "", databricks.NewPaginationVars(page, ResourcesPageSize), databricks.NewServicePrincipalAttrVars())
-		if pageRateLimit != nil {
-			rateLimit = pageRateLimit
-		}
-		if err != nil {
-			return rateLimit, fmt.Errorf("failed to list account service principals: %w", err)
-		}
-		if len(servicePrincipals) == 0 {
-			return rateLimit, nil
-		}
-
-		for _, servicePrincipal := range servicePrincipals {
-			// A privilege assignment names a service principal by its applicationId,
-			// not its displayName and not its SCIM id.
-			index.add(
-				ctx,
-				servicePrincipal.ID,
-				[]string{servicePrincipal.ApplicationID},
-				&v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: servicePrincipal.ID},
-			)
-		}
-
-		next, err := nextScimPage(page, len(servicePrincipals), total)
-		if err != nil {
-			return rateLimit, err
-		}
-		if next == 0 {
-			return rateLimit, nil
-		}
-		page = next
+	group, groupRateLimit, err := u.client.GetGroup(ctx, "", id)
+	if groupRateLimit != nil {
+		rateLimit = groupRateLimit
 	}
+	if err != nil && !isNotFoundError(err) {
+		return nil, rateLimit, fmt.Errorf("failed to resolve principal %s as a group: %w", id, err)
+	}
+	if err == nil && group != nil && group.ID != "" {
+		accountResourceId, err := rs.NewResourceID(accountResourceType, u.client.GetAccountId())
+		if err != nil {
+			return nil, rateLimit, err
+		}
+		resourceId, err := rs.NewResourceID(groupResourceType, groupResourceId(ctx, group.ID, accountResourceId))
+		if err != nil {
+			return nil, rateLimit, err
+		}
+
+		return resourceId, rateLimit, nil
+	}
+
+	servicePrincipal, servicePrincipalRateLimit, err := u.client.GetServicePrincipal(ctx, "", id)
+	if servicePrincipalRateLimit != nil {
+		rateLimit = servicePrincipalRateLimit
+	}
+	if err != nil && !isNotFoundError(err) {
+		return nil, rateLimit, fmt.Errorf("failed to resolve principal %s as a service principal: %w", id, err)
+	}
+	if err == nil && servicePrincipal != nil && servicePrincipal.ID != "" {
+		return &v2.ResourceId{ResourceType: servicePrincipalResourceType.Id, Resource: servicePrincipal.ID}, rateLimit, nil
+	}
+
+	return nil, rateLimit, nil
 }
 
 // ownPrincipalScimID resolves the connector's own service principal. The index
@@ -320,19 +314,4 @@ func (u *unityCatalog) ownPrincipalScimID(ctx context.Context) (string, *v2.Rate
 	}
 
 	return id, rateLimit, nil
-}
-
-// nextScimPage returns zero once the listing is exhausted.
-func nextScimPage(page uint, pageTotal int, total uint) (uint, error) {
-	token := prepareNextToken(page, pageTotal, total)
-	if token == "" {
-		return 0, nil
-	}
-
-	next, err := convertPageToken(token)
-	if err != nil {
-		return 0, err
-	}
-
-	return next, nil
 }

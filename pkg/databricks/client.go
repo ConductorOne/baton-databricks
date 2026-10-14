@@ -197,6 +197,8 @@ func (c *Client) ListUsers(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
+// GetUser reads one SCIM user by id. A 404 means no user has that id
+// (RFC 7644 §3.4.1), which is how a group or service principal id answers here.
 func (c *Client) GetUser(
 	ctx context.Context,
 	workspaceId string,
@@ -246,7 +248,7 @@ func (c *Client) FindUserID(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("userName eq '%s'", username)),
+		NewFilterVars("userName eq "+strconv.Quote(username)),
 	)
 
 	if err != nil {
@@ -273,7 +275,7 @@ func (c *Client) FindUsername(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("id eq '%s'", userID)),
+		NewFilterVars("id eq "+strconv.Quote(userID)),
 	)
 
 	if err != nil {
@@ -313,6 +315,8 @@ func (c *Client) ListGroups(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
+// GetGroup reads one SCIM group by id. A 404 means no group has that id
+// (RFC 7644 §3.4.1), which is how a user or service principal id answers here.
 func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,
@@ -358,7 +362,7 @@ func (c *Client) FindGroupID(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName)),
+		NewFilterVars("displayName eq "+strconv.Quote(displayName)),
 	)
 
 	if err != nil {
@@ -385,7 +389,7 @@ func (c *Client) FindGroupDisplayName(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("id eq '%s'", groupID)),
+		NewFilterVars("id eq "+strconv.Quote(groupID)),
 	)
 
 	if err != nil {
@@ -425,6 +429,8 @@ func (c *Client) ListServicePrincipals(
 	return res.Resources, res.Total, ratelimitData, nil
 }
 
+// GetServicePrincipal reads one SCIM service principal by id. A 404 means no
+// service principal has that id (RFC 7644 §3.4.1).
 func (c *Client) GetServicePrincipal(
 	ctx context.Context,
 	workspaceId string,
@@ -476,7 +482,7 @@ func (c *Client) FindServicePrincipalID(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("applicationId eq '%s'", appID)),
+		NewFilterVars("applicationId eq "+strconv.Quote(appID)),
 	)
 
 	if err != nil {
@@ -503,7 +509,7 @@ func (c *Client) FindServicePrincipalAppID(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("id eq '%s'", servicePrincipalID)),
+		NewFilterVars("id eq "+strconv.Quote(servicePrincipalID)),
 	)
 
 	if err != nil {
