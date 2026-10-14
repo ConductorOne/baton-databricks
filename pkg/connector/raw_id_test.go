@@ -87,12 +87,11 @@ func TestResourcesHaveRawId(t *testing.T) {
 		},
 		{
 			"metastore",
-			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account)),
+			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account, "", "", "")),
 			"ms1",
 		},
 		{
-			// A securable is keyed by metastore, not workspace: a metastore is regional and
-			// shared, so a workspace-keyed id would duplicate the catalog per workspace.
+			// Keyed by metastore: several workspaces list the same catalog.
 			"catalog",
 			build(buildSecurable(t, catalogResourceType, securableTypeCatalog, metastoreResourceType.Id,
 				nil, "ms1", nil, securable{name: "cat"})),
