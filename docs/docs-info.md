@@ -50,6 +50,17 @@ While developing the connector, please fill out this form. This information is n
 
      > Account admin access to the Databricks account console (to create the service principal and OAuth secret), and workspace admin on each workspace being synced.
 
+## Unity Catalog API
+
+A metastore lives on the account plane, but its privileges are read through a
+workspace host assigned to it.
+
+| Level | Endpoint |
+|-------|----------|
+| Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
+| Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
+| Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
+
 ## Permission model
 
 Three independent layers have to line up, and granting one does not imply the
