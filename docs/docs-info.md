@@ -65,11 +65,11 @@ through a workspace host assigned to that metastore.
 | Volumes | `GET /api/2.1/unity-catalog/volumes` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
+- **HTTP cache keys include the request Host.** Two workspaces share paths such
+  as `/unity-catalog/permissions/...`, and without the host in the key one
+  workspace's response would be served for another.
 - **The tables endpoint caps `max_results` at 50 and requires `schema_name`.**
   Listing tables therefore costs one call per schema.
-- **HTTP cache keys include the request Host.** Two workspaces share paths such
-  as `/unity-catalog/catalogs`, and without the host in the key one workspace's
-  listing would be served for another.
 - **Table listings are requested with `omit_columns` and `omit_properties`**,
   which carry most of a table response's weight, but deliberately not
   `omit_username` — that flag also drops `owner`.
