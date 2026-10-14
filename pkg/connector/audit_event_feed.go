@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -22,6 +23,7 @@ import (
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -123,17 +125,16 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 	// {auditServiceAccounts, "deleteServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
 	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
 	{auditServiceAccounts, "changeDatabricksSqlAcl"}:       {roleNames: []string{SQLAccessRole}},
-	// setAdmin/removeAdmin are workspace admin (the reference describes setAdmin as account
-	// admin, but it sits in the workspace-level table next to removeAdmin, and account admin
-	// has its own pair below), so only the user is refreshed.
-	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId"},
+	// The reference describes setAdmin as account admin but lists it with the workspace-level
+	// events, so the account-admin role is refreshed too in case it is.
+	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
 	{auditServiceAccounts, "removeAdmin"}:        {resourceType: userResourceType, idParam: "targetUserId"},
 	{auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
 	{auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
 	// Workspace membership (permission assignments). The GCP reference only lists
 	// updatePermissionAssignment; AWS and Azure list all three.
 	{auditServiceWorkspace, "addPermissionAssignment"}:    {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
-	{auditServiceWorkspace, "updatePermissionAssignment"}: {resourceType: workspaceResourceType},
+	{auditServiceWorkspace, "updatePermissionAssignment"}: {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
 	{auditServiceWorkspace, "deletePermissionAssignment"}: {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
 }
 
@@ -230,6 +231,8 @@ type auditEventFeed struct {
 	// queryWorkspaceID caches which workspace hosts sqlWarehouseID across polls. It's a discovered value, not provided by configs.
 	queryWorkspaceMu sync.Mutex
 	queryWorkspaceID string
+
+	skippedLookupFailures atomic.Int64
 }
 
 func newAuditEventFeed(
@@ -371,10 +374,22 @@ func (f *auditEventFeed) ListEvents(
 		if rowRateLimit != nil {
 			annos.WithRateLimiting(rowRateLimit)
 		}
-		// Unmappable rows come back as no error, so this is a real lookup failure. Return
-		// it so the cursor doesn't advance past the row and the next poll retries it.
+		// Unmappable rows come back as no error, so this is a real lookup failure. Transient
+		// ones are returned so the next poll retries the row; others would block the cursor
+		// on every poll, so they're skipped and left to the next full sync.
 		if err != nil {
-			return nil, nil, annos, fmt.Errorf("databricks-connector: failed to map audit row %s (%s): %w", row.EventID, row.ActionName, err)
+			if isRetryableLookupError(err) {
+				return nil, nil, annos, fmt.Errorf("databricks-connector: failed to map audit row %s (%s): %w", row.EventID, row.ActionName, err)
+			}
+			if count := f.skippedLookupFailures.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
+				l.Warn("databricks-connector: skipping audit row, principal lookup failed",
+					zap.String("action_name", row.ActionName),
+					zap.String("event_id", row.EventID),
+					zap.Int64("total_occurrences", count),
+					zap.Error(err),
+				)
+			}
+			continue
 		}
 		if len(affected) == 0 {
 			l.Debug("databricks-connector: skipping audit row with no resource mapping",
@@ -419,6 +434,15 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
+}
+
+func isRetryableLookupError(err error) bool {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded, codes.Internal, codes.Unknown, codes.Canceled:
+		return true
+	default:
+		return false
+	}
 }
 
 // advanceEventCursor advances to the last row processed while more of the page remains, or
@@ -528,7 +552,8 @@ func mapAuditRowToResource(
 				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
 			}
 			if g == nil {
-				return nil, rateLimit, nil
+				// No resolvable principal: still refresh the group's grants.
+				return []affectedResource{{resourceId: resourceId, parentResourceId: parent}}, rateLimit, nil
 			}
 			return []affectedResource{{grant: g}}, rateLimit, nil
 		}

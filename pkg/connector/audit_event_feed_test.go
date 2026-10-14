@@ -413,7 +413,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "setAdmin (workspace admin) refreshes only the user",
+			name:                "setAdmin refreshes the user and the account-admin role",
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "setAdmin",
@@ -422,6 +422,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 			want: []wantResource{
 				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(AccountAdminRole, accountParent), accountResourceType.Id, accountId},
 			},
 		},
 		{
@@ -470,6 +471,19 @@ func TestMapAuditRowToResource(t *testing.T) {
 				ServiceName:   "workspace",
 				WorkspaceID:   0,
 				RequestParams: map[string]string{"principal_id": "u-1", "account_id": accountId, "workspace_id": "123"},
+			},
+			want: []wantResource{
+				{workspaceResourceType.Id, "my-workspace", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "account-level updatePermissionAssignment resolves the workspace from request_params",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "updatePermissionAssignment",
+				ServiceName:   "workspace",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"principal_id": "u-1", "workspace_id": "123"},
 			},
 			want: []wantResource{
 				{workspaceResourceType.Id, "my-workspace", accountResourceType.Id, accountId},
@@ -581,6 +595,16 @@ func TestMapAuditRowToResource(t *testing.T) {
 	}
 }
 
+func assertGroupRefresh(t *testing.T, got []affectedResource, wantGroupId string) {
+	t.Helper()
+	if len(got) != 1 || got[0].grant != nil {
+		t.Fatalf("got %+v, want exactly one group refresh", got)
+	}
+	if id := got[0].resourceId; id.GetResourceType() != groupResourceType.Id || id.GetResource() != wantGroupId {
+		t.Errorf("resourceId = %+v, want type=%s id=%s", id, groupResourceType.Id, wantGroupId)
+	}
+}
+
 // principalKindTestClient serves GetUser/GetGroup/GetServicePrincipal lookups for a single
 // native id, returning 200 for kind ("Users", "Groups", or "ServicePrincipals") and 404 for
 // the other two - or 500 for all three if kind is "error".
@@ -654,7 +678,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 		})
 	}
 
-	t.Run("missing principal id is skipped", func(t *testing.T) {
+	t.Run("missing principal id still refreshes the group", func(t *testing.T) {
 		row := auditLogRow{
 			ActionName:    "addPrincipalToGroup",
 			ServiceName:   auditServiceAccounts,
@@ -664,9 +688,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
-		if got != nil {
-			t.Errorf("got %+v, want nil when targetUserId is missing", got)
-		}
+		assertGroupRefresh(t, got, wantGroupId)
 	})
 
 	t.Run("principal resolves to a nested group", func(t *testing.T) {
@@ -708,7 +730,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 		}
 	})
 
-	t.Run("principal not found anywhere is skipped", func(t *testing.T) {
+	t.Run("principal not found anywhere still refreshes the group", func(t *testing.T) {
 		notFoundClient := principalKindTestClient(t, "ghost", "none")
 		row := auditLogRow{
 			ActionName:    "addPrincipalToGroup",
@@ -719,9 +741,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
-		if got != nil {
-			t.Errorf("got %+v, want nil when the principal id matches no resource type", got)
-		}
+		assertGroupRefresh(t, got, wantGroupId)
 	})
 
 	t.Run("a real lookup error propagates instead of being swallowed", func(t *testing.T) {
@@ -1042,9 +1062,10 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 	}
 }
 
-// TestListEventsReturnsErrorOnPrincipalLookupFailure verifies that a non-404 principal lookup
-// failure fails the poll instead of skipping the row.
-func TestListEventsReturnsErrorOnPrincipalLookupFailure(t *testing.T) {
+// newLookupFailureFeed returns a feed whose single grant-mapped audit row's principal lookup
+// fails with lookupStatus.
+func newLookupFailureFeed(t *testing.T, lookupStatus int) *auditEventFeed {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
 			w.Header().Set("Content-Type", "application/json")
@@ -1058,8 +1079,8 @@ func TestListEventsReturnsErrorOnPrincipalLookupFailure(t *testing.T) {
 		}
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			fmt.Fprint(w, `{"detail":"forbidden"}`)
+			w.WriteHeader(lookupStatus)
+			fmt.Fprint(w, `{"detail":"lookup failed"}`)
 			return
 		}
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
@@ -1090,7 +1111,7 @@ func TestListEventsReturnsErrorOnPrincipalLookupFailure(t *testing.T) {
 			t.Fatalf("failed to encode mock statement response: %v", err)
 		}
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	target, err := url.Parse(server.URL)
 	if err != nil {
@@ -1104,16 +1125,35 @@ func TestListEventsReturnsErrorOnPrincipalLookupFailure(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	feed := newAuditEventFeed(client, nil, "wh-1")
+	return newAuditEventFeed(client, nil, "wh-1")
+}
+
+// TestListEventsReturnsErrorOnRetryableLookupFailure verifies that a transient principal lookup
+// failure fails the poll, so the cursor isn't advanced past the row.
+func TestListEventsReturnsErrorOnRetryableLookupFailure(t *testing.T) {
+	feed := newLookupFailureFeed(t, http.StatusServiceUnavailable)
 	events, streamState, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err == nil {
 		t.Fatalf("ListEvents() error = nil, want the principal lookup failure; events=%+v", events)
 	}
-	if status.Code(err) != codes.PermissionDenied {
-		t.Errorf("status.Code(err) = %v, want %v (the lookup's code must survive wrapping): %v", status.Code(err), codes.PermissionDenied, err)
-	}
 	if events != nil || streamState != nil {
 		t.Errorf("ListEvents() = (%+v, %+v), want no events and no stream state so the cursor is not advanced", events, streamState)
+	}
+}
+
+// TestListEventsSkipsRowOnPermanentLookupFailure verifies that a non-retryable principal lookup
+// failure skips the row instead of blocking the cursor on every poll.
+func TestListEventsSkipsRowOnPermanentLookupFailure(t *testing.T) {
+	feed := newLookupFailureFeed(t, http.StatusForbidden)
+	events, streamState, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v, want the row skipped", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("len(events) = %d, want 0", len(events))
+	}
+	if streamState == nil || streamState.Cursor == "" {
+		t.Errorf("streamState = %+v, want an advanced cursor", streamState)
 	}
 }
 
