@@ -475,11 +475,8 @@ func mapAuditRowToResource(
 
 	workspaceId := row.WorkspaceID
 	if workspaceId == 0 && mapping.workspaceIdParam != "" {
-		if v, ok := row.RequestParams[mapping.workspaceIdParam]; ok {
-			parsed, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return nil, nil, nil
-			}
+		// An unparseable value leaves workspaceId at 0, so the row is skipped below.
+		if parsed, err := strconv.ParseInt(row.RequestParams[mapping.workspaceIdParam], 10, 64); err == nil {
 			workspaceId = parsed
 		}
 	}
