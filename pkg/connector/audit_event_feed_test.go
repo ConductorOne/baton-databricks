@@ -413,10 +413,22 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "setAdmin refreshes the user and the account-admin role",
+			name:                "setAdmin (workspace admin) refreshes only the user",
 			accountAPIAvailable: true,
 			row: auditLogRow{
 				ActionName:    "setAdmin",
+				ServiceName:   "accounts",
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "setAccountAdmin refreshes the user and the account-admin role",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "setAccountAdmin",
 				ServiceName:   "accounts",
 				RequestParams: map[string]string{"targetUserId": "u-1"},
 			},
@@ -426,8 +438,73 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name: "setAccountAdmin is not a real action_name, so it's skipped",
-			row:  auditLogRow{ActionName: "setAccountAdmin", ServiceName: "accounts"},
+			name:                "removeAccountAdmin refreshes the user and the account-admin role",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "removeAccountAdmin",
+				ServiceName:   "accounts",
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(AccountAdminRole, accountParent), accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "deactivateUser refreshes the user",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "deactivateUser",
+				ServiceName:   "accounts",
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "account-level addPermissionAssignment resolves the workspace from request_params",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "addPermissionAssignment",
+				ServiceName:   "workspace",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"principal_id": "u-1", "account_id": accountId, "workspace_id": "123"},
+			},
+			want: []wantResource{
+				{workspaceResourceType.Id, "my-workspace", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "updatePermissionAssignment uses the row's workspace_id",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "updatePermissionAssignment",
+				ServiceName:   "workspace",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"principal_id": "u-1"},
+			},
+			want: []wantResource{
+				{workspaceResourceType.Id, "my-workspace", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name:                "deletePermissionAssignment for a workspace outside sync scope is skipped",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "deletePermissionAssignment",
+				ServiceName:   "workspace",
+				RequestParams: map[string]string{"principal_id": "u-1", "workspace_id": "999"},
+			},
+		},
+		{
+			name:                "permission assignment with an unparseable workspace_id is skipped",
+			accountAPIAvailable: true,
+			row: auditLogRow{
+				ActionName:    "deletePermissionAssignment",
+				ServiceName:   "workspace",
+				RequestParams: map[string]string{"principal_id": "u-1", "workspace_id": "not-a-number"},
+			},
 		},
 		{
 			name:                "updateUser stays account-parented when the Account API is available, but workspace roles still refresh",

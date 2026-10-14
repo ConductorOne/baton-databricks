@@ -42,7 +42,8 @@ const (
 	// older than ~30 days, so an older cursor is treated as stale.
 	auditLogRetention = 30 * 24 * time.Hour
 
-	auditServiceAccounts = "accounts"
+	auditServiceAccounts  = "accounts"
+	auditServiceWorkspace = "workspace"
 )
 
 // auditActionMapping describes what an audit log action_name affects: an optional primary
@@ -52,9 +53,12 @@ const (
 type auditActionMapping struct {
 	resourceType *v2.ResourceType
 	idParam      string
-	accountRole  string
-	roleNames    []string
-	grant        *auditGrantMapping
+	// workspaceIdParam names a request_params key holding the workspace id, for account-level
+	// actions on a workspace, whose workspace_id column is 0.
+	workspaceIdParam string
+	accountRole      string
+	roleNames        []string
+	grant            *auditGrantMapping
 }
 
 // auditGrantMapping names the principal and direction of a grant-mapped action. The
@@ -105,7 +109,9 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		resourceType: userResourceType, idParam: "targetUserId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	{auditServiceAccounts, "delete"}: {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "delete"}:         {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "activateUser"}:   {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "deactivateUser"}: {resourceType: userResourceType, idParam: "targetUserId"},
 	// createServicePrincipal/updateServicePrincipal/deleteServicePrincipal: commented out, not
 	// real action_name values. Not found anywhere in the official audit log reference (AWS/GCP/
 	// Azure) — the only documented service-principal action is changeServicePrincipalAcls.
@@ -117,14 +123,18 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 	// {auditServiceAccounts, "deleteServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
 	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
 	{auditServiceAccounts, "changeDatabricksSqlAcl"}:       {roleNames: []string{SQLAccessRole}},
-	{auditServiceAccounts, "setAdmin"}:                     {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	// removeAdmin revokes *workspace* admin, not account admin, so only the user is refreshed.
-	{auditServiceAccounts, "removeAdmin"}: {resourceType: userResourceType, idParam: "targetUserId"},
-	// setAccountAdmin/removeAccountAdmin: commented out, not real action_name values. Confirmed
-	// absent from the official audit log reference on AWS, GCP, and Azure docs — setAdmin already
-	// covers account-admin grant (see above).
-	// {auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	// {auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	// setAdmin/removeAdmin are workspace admin (the reference describes setAdmin as account
+	// admin, but it sits in the workspace-level table next to removeAdmin, and account admin
+	// has its own pair below), so only the user is refreshed.
+	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "removeAdmin"}:        {resourceType: userResourceType, idParam: "targetUserId"},
+	{auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	{auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	// Workspace membership (permission assignments). The GCP reference only lists
+	// updatePermissionAssignment; AWS and Azure list all three.
+	{auditServiceWorkspace, "addPermissionAssignment"}:    {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
+	{auditServiceWorkspace, "updatePermissionAssignment"}: {resourceType: workspaceResourceType},
+	{auditServiceWorkspace, "deletePermissionAssignment"}: {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
 }
 
 func auditLogActionNames() []string {
@@ -463,9 +473,20 @@ func mapAuditRowToResource(
 
 	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
 
+	workspaceId := row.WorkspaceID
+	if workspaceId == 0 && mapping.workspaceIdParam != "" {
+		if v, ok := row.RequestParams[mapping.workspaceIdParam]; ok {
+			parsed, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return nil, nil, nil
+			}
+			workspaceId = parsed
+		}
+	}
+
 	var workspaceParent *v2.ResourceId
-	if row.WorkspaceID != 0 {
-		deploymentName, found := workspaceLookup[row.WorkspaceID]
+	if workspaceId != 0 {
+		deploymentName, found := workspaceLookup[workspaceId]
 		if !found {
 			return nil, nil, nil
 		}
