@@ -196,12 +196,8 @@ type metastoresResponse struct {
 	Metastores []Metastore `json:"metastores"`
 }
 
-type metastoreAssignment struct {
-	MetastoreID string `json:"metastore_id"`
-}
-
-type workspaceMetastoreResponse struct {
-	MetastoreAssignment metastoreAssignment `json:"metastore_assignment"`
+type metastoreWorkspacesResponse struct {
+	WorkspaceIDs []json.Number `json:"workspace_ids"`
 }
 
 type catalogsResponse struct {

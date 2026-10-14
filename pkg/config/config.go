@@ -54,16 +54,6 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
-	CatalogsField = field.StringSliceField(
-		"databricks-catalogs",
-		field.WithDescription("Catalogs to limit Unity Catalog syncing to, identified by catalog name. No catalog outside this list is synced, and neither is anything under it"),
-		field.WithDisplayName("Catalogs"),
-	)
-	ExcludeCatalogsField = field.StringSliceField(
-		"databricks-exclude-catalogs",
-		field.WithDescription("Catalogs to exclude from Unity Catalog syncing, identified by catalog name. The schemas, tables and volumes under an excluded catalog are excluded with it"),
-		field.WithDisplayName("Exclude Catalogs"),
-	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -73,8 +63,6 @@ var (
 		WorkspacesField,
 		BaseURLField,
 		ExcludeWorkspacesField,
-		CatalogsField,
-		ExcludeCatalogsField,
 	}
 )
 
@@ -85,7 +73,6 @@ var Config = field.NewConfiguration(
 	field.WithHelpUrl("/docs/baton/databricks"),
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
 	field.WithConstraints(
-		field.FieldsMutuallyExclusive(CatalogsField, ExcludeCatalogsField),
 		field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField),
 	),
 )

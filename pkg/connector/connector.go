@@ -22,24 +22,31 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
-	willSync := func(string) bool { return true }
-	if d.opts != nil {
-		willSync = d.opts.WillSyncResourceType
+	principals := syncPrincipals{
+		groups:            d.willSyncResourceType(groupResourceType.Id),
+		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
 	}
 
-	syncers := []connectorbuilder.ResourceSyncerV2{
+	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.unityCatalog, willSync),
-		newCatalogBuilder(d.client, d.unityCatalog, willSync),
-		newSchemaBuilder(d.client, d.unityCatalog, willSync),
+		newMetastoreBuilder(d.client, d.unityCatalog, principals),
+		newCatalogBuilder(d.client, d.unityCatalog, principals),
+		newSchemaBuilder(d.client, d.unityCatalog, principals),
 	}
+}
 
-	return syncers
+// willSyncResourceType is true when the type is in this sync. Nil opts (the
+// capabilities prototype) means no filter, so every advertised type is in scope.
+func (d *Databricks) willSyncResourceType(resourceTypeID string) bool {
+	if d.opts == nil {
+		return true
+	}
+	return d.opts.WillSyncResourceType(resourceTypeID)
 }
 
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
@@ -142,7 +149,6 @@ func New(
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
-	catalogs catalogFilter,
 	opts *cli.ConnectorOpts,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
@@ -158,7 +164,7 @@ func New(
 	return &Databricks{
 		client:       client,
 		workspaces:   workspaces,
-		unityCatalog: newUnityCatalog(client, clientID, catalogs, configuredWorkspaceSet(workspaces)),
+		unityCatalog: newUnityCatalog(client, clientID, configuredWorkspaceSet(workspaces)),
 		opts:         opts,
 	}, nil
 }
@@ -167,11 +173,6 @@ func New(
 func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 	auth := prepareClientAuth(cfg)
-
-	catalogs, err := newCatalogFilter(cfg.DatabricksCatalogs, cfg.DatabricksExcludeCatalogs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: %w", err)
-	}
 
 	cb, err := New(
 		ctx,
@@ -183,7 +184,6 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
-		catalogs,
 		opts,
 	)
 	if err != nil {

@@ -32,7 +32,7 @@ func TestPrincipalsForGrantsOwnerOnlyDoesNotListAccount(t *testing.T) {
 		}
 	})
 
-	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
+	uc := newUnityCatalog(client, "app-1", nil)
 	index, _, err := uc.principalsForGrants(context.Background(), nil, "alice@example.com")
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
@@ -88,7 +88,7 @@ func TestPrincipalsForGrantsOwnerOnlyResolvesGroupAndServicePrincipal(t *testing
 				}
 			})
 
-			uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
+			uc := newUnityCatalog(client, "app-1", nil)
 			index, _, err := uc.principalsForGrants(context.Background(), nil, test.owner)
 			if err != nil {
 				t.Fatalf("principalsForGrants: %v", err)
@@ -125,7 +125,7 @@ func TestPrincipalsForGrantsWorkspaceAdminsOwnerDoesNotListAccount(t *testing.T)
 		_ = json.NewEncoder(w).Encode(map[string]any{"Resources": []any{}, "totalResults": 0})
 	})
 
-	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
+	uc := newUnityCatalog(client, "app-1", nil)
 	index, _, err := uc.principalsForGrants(context.Background(), nil, "_workspace_admins_workspace-1")
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
@@ -141,20 +141,28 @@ func TestPrincipalsForGrantsWorkspaceAdminsOwnerDoesNotListAccount(t *testing.T)
 	}
 }
 
-func TestPrincipalsForGrantsAssignmentsStillListAccount(t *testing.T) {
+func TestPrincipalsForGrantsAssignmentsResolvePerPrincipal(t *testing.T) {
 	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
 
 	var unfiltered int
+	var gets int
 	client, _ := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if isUnfilteredAccountSCIM(r) {
 			unfiltered++
+			http.Error(w, "account listing is not allowed on the assignment path", http.StatusInternalServerError)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"Resources": []any{}, "totalResults": 0})
+		if strings.HasSuffix(r.URL.Path, "/scim/v2/Users/1") {
+			gets++
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "1", "userName": "alice@example.com"})
+			return
+		}
+		http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
 	})
 
-	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
-	_, _, err := uc.principalsForGrants(context.Background(), []databricks.PrivilegeAssignment{{
+	uc := newUnityCatalog(client, "app-1", nil)
+	index, _, err := uc.principalsForGrants(context.Background(), []databricks.PrivilegeAssignment{{
 		Principal:   "alice@example.com",
 		PrincipalID: json.Number("1"),
 		Privileges:  []string{"USE_CATALOG"},
@@ -162,8 +170,15 @@ func TestPrincipalsForGrantsAssignmentsStillListAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
 	}
-	if unfiltered == 0 {
-		t.Fatal("privilege assignments still need the account SCIM walk")
+	if unfiltered != 0 {
+		t.Fatalf("unfiltered account SCIM listings = %d, want 0", unfiltered)
+	}
+	if gets == 0 {
+		t.Fatal("expected a GetUser by principal_id")
+	}
+	got, ok := index.lookup(databricks.PrivilegeAssignment{Principal: "alice@example.com", PrincipalID: json.Number("1")})
+	if !ok || got.GetResource() != "1" {
+		t.Fatalf("assignment lookup = %v %v, want user 1", got, ok)
 	}
 }
 
@@ -176,7 +191,7 @@ func TestPrincipalsForGrantsEmptyPageMakesNoSCIMCalls(t *testing.T) {
 		http.Error(w, "no SCIM call expected", http.StatusInternalServerError)
 	})
 
-	uc := newUnityCatalog(client, "app-1", catalogFilter{}, nil)
+	uc := newUnityCatalog(client, "app-1", nil)
 	index, _, err := uc.principalsForGrants(context.Background(), nil, "")
 	if err != nil {
 		t.Fatalf("principalsForGrants: %v", err)
@@ -194,7 +209,7 @@ func isUnfilteredAccountSCIM(r *http.Request) bool {
 		return false
 	}
 
-	return strings.Contains(r.URL.Path, "/scim/v2/Users") ||
-		strings.Contains(r.URL.Path, "/scim/v2/Groups") ||
-		strings.Contains(r.URL.Path, "/scim/v2/ServicePrincipals")
+	return strings.HasSuffix(r.URL.Path, "/scim/v2/Users") ||
+		strings.HasSuffix(r.URL.Path, "/scim/v2/Groups") ||
+		strings.HasSuffix(r.URL.Path, "/scim/v2/ServicePrincipals")
 }

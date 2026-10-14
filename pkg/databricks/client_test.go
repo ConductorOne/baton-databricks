@@ -2,7 +2,9 @@ package databricks
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -65,6 +67,61 @@ func TestGetAccountHostname(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := GetAccountHostname(tt.hostname); got != tt.want {
 				t.Errorf("GetAccountHostname(%q) = %q, want %q", tt.hostname, got, tt.want)
+			}
+		})
+	}
+}
+
+// A single-quoted value is not RFC 7644 filter syntax, and an apostrophe in a
+// userName would end it early, so the value is sent as a quoted JSON string.
+func TestFindFiltersQuoteTheValue(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	tests := []struct {
+		name string
+		find func(c *Client) error
+		want string
+	}{
+		{"user by userName", func(c *Client) error {
+			_, _, err := c.FindUserID(context.Background(), "", "o'brien@example.com")
+			return err
+		}, `userName eq "o'brien@example.com"`},
+		{"group by displayName", func(c *Client) error {
+			_, _, err := c.FindGroupID(context.Background(), "", `data "eng"`)
+			return err
+		}, `displayName eq "data \"eng\""`},
+		{"service principal by applicationId", func(c *Client) error {
+			_, _, err := c.FindServicePrincipalID(context.Background(), "", "app-1")
+			return err
+		}, `applicationId eq "app-1"`},
+		{"user by id", func(c *Client) error {
+			_, _, err := c.FindUsername(context.Background(), "", "42")
+			return err
+		}, `id eq "42"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.URL.Query().Get("filter")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"Resources": []any{}, "totalResults": 0})
+			}))
+			t.Cleanup(srv.Close)
+
+			client := srv.Client()
+			client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+			c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", "", &NoAuth{}, nil)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			if err := tt.find(c); err != nil {
+				t.Fatalf("find: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("filter = %q, want %q", got, tt.want)
 			}
 		})
 	}

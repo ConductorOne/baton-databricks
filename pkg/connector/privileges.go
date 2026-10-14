@@ -19,6 +19,9 @@ const (
 
 var (
 	// catalogPrivileges is the widest set; BROWSE, CREATE_SCHEMA and USE_CATALOG stop here.
+	// Source: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges.
+	// The PATCH accepts and echoes every entry, including ones missing from the
+	// databricks-sdk-go Privilege enum.
 	catalogPrivileges = []string{
 		privilegeAllPrivileges,
 		"APPLY_TAG",
