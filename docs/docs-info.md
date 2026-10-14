@@ -52,13 +52,14 @@ While developing the connector, please fill out this form. This information is n
 
 ## Unity Catalog API
 
-A metastore lives on the account plane, but its privileges are read through a
-workspace host assigned to it.
+A metastore lives on the account plane, but every securable below it is reached
+through a workspace host assigned to that metastore.
 
 | Level | Endpoint |
 |-------|----------|
 | Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
 | Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
+| Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 ## Permission model
