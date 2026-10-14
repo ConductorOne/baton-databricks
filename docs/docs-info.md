@@ -63,6 +63,10 @@ through a workspace host assigned to that metastore.
 | Schemas | `GET /api/2.1/unity-catalog/schemas` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
+- **HTTP cache keys include the request Host.** Two workspaces share paths such
+  as `/unity-catalog/permissions/...`, and without the host in the key one
+  workspace's response would be served for another.
+
 ## Permission model
 
 Three independent layers have to line up, and granting one does not imply the
