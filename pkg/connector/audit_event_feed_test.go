@@ -965,6 +965,81 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 	}
 }
 
+// TestListEventsReturnsErrorOnPrincipalLookupFailure verifies that a non-404 principal lookup
+// failure fails the poll instead of skipping the row.
+func TestListEventsReturnsErrorOnPrincipalLookupFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"detail":"forbidden"}`)
+			return
+		}
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"statement_id": "stmt-1",
+			"status":       map[string]any{"state": "SUCCEEDED"},
+			"manifest": map[string]any{
+				"schema": map[string]any{
+					"columns": []map[string]any{
+						{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+						{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+					},
+				},
+			},
+			"result": map[string]any{
+				"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("failed to encode mock statement response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	auth := &databricks.NoAuth{}
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", auth, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	feed := newAuditEventFeed(client, nil, "wh-1")
+	events, streamState, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err == nil {
+		t.Fatalf("ListEvents() error = nil, want the principal lookup failure; events=%+v", events)
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("status.Code(err) = %v, want %v (the lookup's code must survive wrapping): %v", status.Code(err), codes.PermissionDenied, err)
+	}
+	if events != nil || streamState != nil {
+		t.Errorf("ListEvents() = (%+v, %+v), want no events and no stream state so the cursor is not advanced", events, streamState)
+	}
+}
+
 // TestListEventsFindsWarehouseOutsideWorkspacesAllowlist verifies that resolving the SQL
 // warehouse's workspace is NOT scoped by --workspaces: the warehouse can live in any
 // workspace in the account, so the allowlist must only narrow which workspaces' audit

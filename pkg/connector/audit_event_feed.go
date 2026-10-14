@@ -361,13 +361,10 @@ func (f *auditEventFeed) ListEvents(
 		if rowRateLimit != nil {
 			annos.WithRateLimiting(rowRateLimit)
 		}
+		// Unmappable rows come back as no error, so this is a real lookup failure. Return
+		// it so the cursor doesn't advance past the row and the next poll retries it.
 		if err != nil {
-			l.Debug("databricks-connector: skipping audit row, failed to map it",
-				zap.String("action_name", row.ActionName),
-				zap.String("event_id", row.EventID),
-				zap.Error(err),
-			)
-			continue
+			return nil, nil, annos, fmt.Errorf("databricks-connector: failed to map audit row %s (%s): %w", row.EventID, row.ActionName, err)
 		}
 		if len(affected) == 0 {
 			l.Debug("databricks-connector: skipping audit row with no resource mapping",
