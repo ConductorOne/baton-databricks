@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a metastore or catalog privilege for a user, group or service principal. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on a metastore, catalog or schema. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
 
 ## Connector credentials
 
@@ -50,6 +50,19 @@ While developing the connector, please fill out this form. This information is n
 
      > Account admin access to the Databricks account console (to create the service principal and OAuth secret), and workspace admin on each workspace being synced.
 
+## Unity Catalog API
+
+A metastore lives on the account plane, but every securable below it is reached
+through a workspace host assigned to that metastore.
+
+| Level | Endpoint |
+|-------|----------|
+| Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
+| Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
+| Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
+| Schemas | `GET /api/2.1/unity-catalog/schemas` |
+| Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
+
 ## Permission model
 
 Three independent layers have to line up, and granting one does not imply the
@@ -63,7 +76,7 @@ The scopes:
 
 | Scope | Covers |
 |-------|--------|
-| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, and the permissions endpoint |
+| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, schemas, and the permissions endpoint |
 | `scim` | Account users, groups and service principals |
 | `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
 | `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |

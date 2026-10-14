@@ -84,6 +84,7 @@ baton resources
 - Roles
 - Metastores
 - Catalogs
+- Schemas
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
@@ -95,8 +96,8 @@ listed workspace reaches are synced, so narrowing the list removes the others
 and their grants from ConductorOne. A list that matches no workspace on the
 account fails the metastore sync.
 
-Metastores and catalogs are Unity Catalog securables and are opt-in: each type
-stays off until it is enabled for the connector in ConductorOne.
+Metastores, catalogs and schemas are Unity Catalog securables and are opt-in:
+each type stays off until it is enabled for the connector in ConductorOne.
 
 ## Authentication
 
@@ -135,7 +136,7 @@ assigned to that workspace. Otherwise the grant fails with a
 
 ## Unity Catalog
 
-Metastores and catalogs are the top two levels of Databricks Unity Catalog. The
+Metastores, catalogs and schemas cover Databricks Unity Catalog. The
 resource tree the connector syncs is:
 
 ```
