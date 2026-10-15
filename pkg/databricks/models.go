@@ -128,9 +128,7 @@ type WorkspacePrincipal struct {
 	ID                    int    `json:"principal_id"`
 }
 
-// WorkspaceAdminPermission is the permission value the account-level workspace
-// permission-assignments API uses to mark a principal as a workspace admin, as
-// opposed to WorkspaceUserPermission, which grants only basic workspace access.
+// WorkspaceAdminPermission marks a principal as a workspace admin; WorkspaceUserPermission is basic access.
 const (
 	WorkspaceAdminPermission = "ADMIN"
 	WorkspaceUserPermission  = "USER"
@@ -141,9 +139,7 @@ type WorkspaceAssignment struct {
 	Permissions []string            `json:"permissions"`
 }
 
-// HasAdmin reports whether this assignment includes workspace ADMIN-level
-// access. The account-level permission-assignments API never exposes a
-// separate "is admin" flag; ADMIN is just one of the values in Permissions.
+// HasAdmin reports whether this assignment includes workspace ADMIN-level access.
 func (w WorkspaceAssignment) HasAdmin() bool {
 	for _, p := range w.Permissions {
 		if p == WorkspaceAdminPermission {

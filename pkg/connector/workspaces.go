@@ -223,10 +223,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource ID: %w", err)
 		}
 
-		// Workspace ADMIN status isn't modeled as its own entitlement/grant
-		// (see CXH-2346 report for the design question on how it should be
-		// surfaced in C1); log it so it's at least visible to operators
-		// inspecting a sync, rather than silently discarded.
+		// ADMIN isn't its own entitlement; log it so it's visible in sync output.
 		if assignment.HasAdmin() {
 			l.Debug("grants: workspace assignment includes ADMIN permission",
 				zap.String("workspace_id", workspace),
@@ -272,9 +269,12 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	_, err := w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	alreadyGranted, _, err := w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
+	}
+	if alreadyGranted {
+		return annotations.New(&v2.GrantAlreadyExists{}), nil
 	}
 
 	return nil, nil
@@ -304,9 +304,12 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	_, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	alreadyRevoked, _, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to remove workspace member: %w", err)
+	}
+	if alreadyRevoked {
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 
 	return nil, nil

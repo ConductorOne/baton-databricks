@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // workspaceMembersHostRewriter sends every request to the test server,
@@ -122,9 +125,8 @@ func containsAll(got []string, want ...string) bool {
 	return true
 }
 
-// TestCreateOrUpdateWorkspaceMember_PreservesExistingAdmin is the core
-// regression test for CXH-2346: granting the "member" entitlement to a
-// principal that already holds ADMIN must not demote them to USER-only.
+// TestCreateOrUpdateWorkspaceMember_PreservesExistingAdmin: granting "member"
+// to a principal that already holds ADMIN must not demote them to USER-only.
 func TestCreateOrUpdateWorkspaceMember_PreservesExistingAdmin(t *testing.T) {
 	var puts []recordedRequest
 	c := newWorkspaceMembersTestClient(t, []WorkspaceAssignment{
@@ -134,9 +136,12 @@ func TestCreateOrUpdateWorkspaceMember_PreservesExistingAdmin(t *testing.T) {
 		},
 	}, &puts)
 
-	_, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
 		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
+	}
+	if alreadyGranted {
+		t.Errorf("alreadyGranted = true, want false (ADMIN-only principal does not already hold USER)")
 	}
 
 	if len(puts) != 1 {
@@ -152,10 +157,9 @@ func TestCreateOrUpdateWorkspaceMember_PreservesExistingAdmin(t *testing.T) {
 	}
 }
 
-// TestCreateOrUpdateWorkspaceMember_UserOnlyNoRegression is the non-regression
-// companion: a principal who only ever held USER must still end up with USER
-// after the fix (no unexpected permissions introduced).
-func TestCreateOrUpdateWorkspaceMember_UserOnlyNoRegression(t *testing.T) {
+// TestCreateOrUpdateWorkspaceMember_AlreadyGranted: a principal that already
+// holds USER needs no PUT; the grant reports GrantAlreadyExists upstream.
+func TestCreateOrUpdateWorkspaceMember_AlreadyGranted(t *testing.T) {
 	var puts []recordedRequest
 	c := newWorkspaceMembersTestClient(t, []WorkspaceAssignment{
 		{
@@ -164,17 +168,15 @@ func TestCreateOrUpdateWorkspaceMember_UserOnlyNoRegression(t *testing.T) {
 		},
 	}, &puts)
 
-	_, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
 		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
 	}
-
-	if len(puts) != 1 {
-		t.Fatalf("expected exactly 1 PUT request, got %d: %+v", len(puts), puts)
+	if !alreadyGranted {
+		t.Errorf("alreadyGranted = false, want true (principal already holds USER)")
 	}
-	permissions := permissionsFromBody(t, puts[0].body)
-	if len(permissions) != 1 || permissions[0] != "USER" {
-		t.Errorf("permissions sent = %v, want exactly [USER]", permissions)
+	if len(puts) != 0 {
+		t.Fatalf("expected no PUT requests, got %d: %+v", len(puts), puts)
 	}
 }
 
@@ -184,9 +186,12 @@ func TestCreateOrUpdateWorkspaceMember_NoExistingAssignment(t *testing.T) {
 	var puts []recordedRequest
 	c := newWorkspaceMembersTestClient(t, nil, &puts)
 
-	_, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
 		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
+	}
+	if alreadyGranted {
+		t.Errorf("alreadyGranted = true, want false (no prior assignment)")
 	}
 
 	if len(puts) != 1 {
@@ -198,10 +203,8 @@ func TestCreateOrUpdateWorkspaceMember_NoExistingAssignment(t *testing.T) {
 	}
 }
 
-// TestRemoveWorkspaceMember_PreservesExistingAdmin asserts that revoking the
-// "member" entitlement from a principal who holds both USER and ADMIN leaves
-// ADMIN intact - the revoke path has the same full-replacement hazard as
-// Grant, so it must not wipe permissions it wasn't asked to touch.
+// TestRemoveWorkspaceMember_PreservesExistingAdmin: revoking "member" from a
+// principal holding both USER and ADMIN must leave ADMIN intact.
 func TestRemoveWorkspaceMember_PreservesExistingAdmin(t *testing.T) {
 	var puts []recordedRequest
 	c := newWorkspaceMembersTestClient(t, []WorkspaceAssignment{
@@ -211,9 +214,12 @@ func TestRemoveWorkspaceMember_PreservesExistingAdmin(t *testing.T) {
 		},
 	}, &puts)
 
-	_, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
 		t.Fatalf("RemoveWorkspaceMember: %v", err)
+	}
+	if alreadyRevoked {
+		t.Errorf("alreadyRevoked = true, want false (a PUT was needed to drop USER)")
 	}
 
 	if len(puts) != 1 {
@@ -241,9 +247,12 @@ func TestRemoveWorkspaceMember_UserOnlyEndsUpWithNoPermissions(t *testing.T) {
 		},
 	}, &puts)
 
-	_, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
 		t.Fatalf("RemoveWorkspaceMember: %v", err)
+	}
+	if alreadyRevoked {
+		t.Errorf("alreadyRevoked = true, want false (a PUT was needed to drop USER)")
 	}
 
 	if len(puts) != 1 {
@@ -252,6 +261,48 @@ func TestRemoveWorkspaceMember_UserOnlyEndsUpWithNoPermissions(t *testing.T) {
 	permissions := permissionsFromBody(t, puts[0].body)
 	if len(permissions) != 0 {
 		t.Errorf("permissions sent = %v, want empty", permissions)
+	}
+}
+
+// TestRemoveWorkspaceMember_AdminOnlyFailsPrecondition: a principal who holds
+// ADMIN but not USER can't be "revoked" from member without silently leaving
+// ADMIN in place, so this must error instead of PUTting.
+func TestRemoveWorkspaceMember_AdminOnlyFailsPrecondition(t *testing.T) {
+	var puts []recordedRequest
+	c := newWorkspaceMembersTestClient(t, []WorkspaceAssignment{
+		{
+			Principal:   &WorkspacePrincipal{ID: 100, UserName: "admin@example.com"},
+			Permissions: []string{"ADMIN"},
+		},
+	}, &puts)
+
+	_, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err == nil {
+		t.Fatal("RemoveWorkspaceMember: expected error, got nil")
+	}
+	if code := status.Code(err); code != codes.FailedPrecondition {
+		t.Errorf("status code = %v, want FailedPrecondition", code)
+	}
+	if len(puts) != 0 {
+		t.Fatalf("expected no PUT requests, got %d: %+v", len(puts), puts)
+	}
+}
+
+// TestRemoveWorkspaceMember_AlreadyRevoked: a principal who holds nothing at
+// all needs no PUT; the revoke reports GrantAlreadyRevoked upstream.
+func TestRemoveWorkspaceMember_AlreadyRevoked(t *testing.T) {
+	var puts []recordedRequest
+	c := newWorkspaceMembersTestClient(t, nil, &puts)
+
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("RemoveWorkspaceMember: %v", err)
+	}
+	if !alreadyRevoked {
+		t.Errorf("alreadyRevoked = false, want true (principal holds nothing)")
+	}
+	if len(puts) != 0 {
+		t.Fatalf("expected no PUT requests, got %d: %+v", len(puts), puts)
 	}
 }
 
