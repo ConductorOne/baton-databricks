@@ -306,6 +306,58 @@ func TestRemoveWorkspaceMember_AlreadyRevoked(t *testing.T) {
 	}
 }
 
+// newNoRequestsTestClient fails the test if any HTTP request reaches the
+// server, so callers can assert a validation error short-circuits before I/O.
+func newNoRequestsTestClient(t *testing.T) *Client {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &workspaceMembersHostRewriter{target: target}}
+	c, err := NewClient(context.Background(), httpClient, testHostnameForWorkspaceMembers, testAccountHostForWorkspaceMembers, testAccountId, "", &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c
+}
+
+// TestCreateOrUpdateWorkspaceMember_RejectsCompositePrincipalID: a group's
+// composite resource ID must never reach the permission-assignments API.
+func TestCreateOrUpdateWorkspaceMember_RejectsCompositePrincipalID(t *testing.T) {
+	c := newNoRequestsTestClient(t)
+
+	_, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, "account/abc/group/100")
+	if err == nil {
+		t.Fatal("CreateOrUpdateWorkspaceMember: expected error, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("status code = %v, want InvalidArgument", code)
+	}
+}
+
+// TestRemoveWorkspaceMember_RejectsCompositePrincipalID: same validation on
+// revoke, so a compound group ID can't be silently read as "already revoked".
+func TestRemoveWorkspaceMember_RejectsCompositePrincipalID(t *testing.T) {
+	c := newNoRequestsTestClient(t)
+
+	_, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, "account/abc/group/100")
+	if err == nil {
+		t.Fatal("RemoveWorkspaceMember: expected error, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("status code = %v, want InvalidArgument", code)
+	}
+}
+
 func TestWorkspaceAssignmentHasAdmin(t *testing.T) {
 	tests := []struct {
 		name        string

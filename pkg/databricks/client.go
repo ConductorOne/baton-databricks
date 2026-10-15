@@ -630,11 +630,14 @@ func (c *Client) CreateOrUpdateWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
-) (
-	alreadyGranted bool,
-	ratelimitData *v2.RateLimitDescription,
-	err error,
-) {
+) (bool, *v2.RateLimitDescription, error) {
+	if _, convErr := strconv.Atoi(principalId); convErr != nil {
+		return false, nil, uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %s", principalId),
+		)
+	}
+
 	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
 	if err != nil {
 		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
@@ -676,11 +679,14 @@ func (c *Client) RemoveWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
-) (
-	alreadyRevoked bool,
-	ratelimitData *v2.RateLimitDescription,
-	err error,
-) {
+) (bool, *v2.RateLimitDescription, error) {
+	if _, convErr := strconv.Atoi(principalId); convErr != nil {
+		return false, nil, uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %s", principalId),
+		)
+	}
+
 	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
 	if err != nil {
 		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
