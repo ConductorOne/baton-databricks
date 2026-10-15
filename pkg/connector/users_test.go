@@ -22,9 +22,8 @@ type capturedCreate struct {
 	body databricks.CreateUserBody
 }
 
-// newCapturingUserBuilder returns a user builder backed by a test server that
-// records the CreateUser request body into captured and answers both the
-// create call and the post-create GetUser fetch that CreateAccount performs.
+// newCapturingUserBuilder backs a user builder with a test server that
+// captures the CreateUser body and also answers the post-create GetUser fetch.
 func newCapturingUserBuilder(t *testing.T, captured *capturedCreate) *userBuilder {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,11 +31,15 @@ func newCapturingUserBuilder(t *testing.T, captured *capturedCreate) *userBuilde
 		case http.MethodPost:
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
-				t.Fatalf("read create request body: %v", err)
+				t.Errorf("read create request body: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
 			captured.raw = raw
 			if err := json.Unmarshal(raw, &captured.body); err != nil {
-				t.Fatalf("decode create request body: %v", err)
+				t.Errorf("decode create request body: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(databricks.CreateUserResponse{
@@ -68,10 +71,8 @@ func newCapturingUserBuilder(t *testing.T, captured *capturedCreate) *userBuilde
 	return newUserBuilder(c)
 }
 
-// Regression for CXH-2345: Databricks defaults a user to active when the
-// field is absent from the request, but CreateUserBody.Active has no
-// `omitempty`, so a zero-valued body silently sent "active": false on every
-// created account, leaving it unable to authenticate.
+// CreateUserBody.Active has no `omitempty`, so a zero-valued body silently
+// sends "active": false even when the profile never set it.
 func TestCreateAccountActiveDefault(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -125,9 +126,7 @@ func TestCreateAccountActiveDefault(t *testing.T) {
 				t.Errorf("serialized request body active = %v, want %v", captured.body.Active, tc.wantActive)
 			}
 
-			// Active has no `omitempty` tag, so the key must always be present
-			// on the wire regardless of its value, or Databricks falls back to
-			// its own default instead of honoring what the connector intended.
+			// No omitempty: the key must always be present on the wire.
 			var raw map[string]interface{}
 			if err := json.Unmarshal(captured.raw, &raw); err != nil {
 				t.Fatalf("unmarshal raw request body: %v", err)
@@ -139,8 +138,7 @@ func TestCreateAccountActiveDefault(t *testing.T) {
 	}
 }
 
-// Regression for CXH-2345: a non-boolean `active` profile value must error
-// instead of panicking the type assertion.
+// A non-boolean active profile value must error, not panic the type assertion.
 func TestCreateAccountActiveNonBoolProfileValue(t *testing.T) {
 	var captured capturedCreate
 	b := newCapturingUserBuilder(t, &captured)
