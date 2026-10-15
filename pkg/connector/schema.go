@@ -53,7 +53,6 @@ type schemaPageState struct {
 	WorkspaceID    string `json:"i"`
 	WorkspaceName  string `json:"n"`
 	MetastoreOwner string `json:"o"`
-	CatalogOwner   string `json:"c"`
 }
 
 func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
@@ -182,29 +181,26 @@ func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableR
 	}
 
 	metastoreOwner := snap.metastores[parent.metastoreID].Owner
-	for _, workspace := range facts.workspaces {
-		complete, probeRateLimit, err := b.uc.schemaListingIsComplete(ctx, snap, metastoreOwner, facts.owner, parent.catalog(), workspace)
-		if probeRateLimit != nil {
-			rateLimit = probeRateLimit
-		}
-		if err != nil {
-			return nil, rateLimit, fmt.Errorf("databricks-connector: failed to confirm schema listing visibility for catalog %s: %w", parent.catalog(), err)
-		}
-		if !complete {
-			continue
-		}
-
-		return &schemaPageState{
-			Workspace:      workspace,
-			WorkspaceID:    snap.workspaceIDs[workspace],
-			WorkspaceName:  snap.workspaceNames[workspace],
-			MetastoreOwner: metastoreOwner,
-			CatalogOwner:   facts.owner,
-		}, rateLimit, nil
+	workspace, probeRateLimit, err := firstTrustedWorkspace(ctx, parent, facts.workspaces, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
+		return b.uc.schemaListingIsComplete(ctx, snap, metastoreOwner, facts.owner, parent.catalog(), workspace)
+	})
+	if probeRateLimit != nil {
+		rateLimit = probeRateLimit
+	}
+	if err != nil {
+		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to confirm schema listing visibility for catalog %s: %w", parent.catalog(), err)
+	}
+	if workspace == "" {
+		return nil, rateLimit, status.Errorf(codes.PermissionDenied,
+			"databricks-connector: cannot list every schema in catalog %s: %s", parent.catalog(), schemaListRemedy)
 	}
 
-	return nil, rateLimit, status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot list every schema in catalog %s: %s", parent.catalog(), schemaListRemedy)
+	return &schemaPageState{
+		Workspace:      workspace,
+		WorkspaceID:    snap.workspaceIDs[workspace],
+		WorkspaceName:  snap.workspaceNames[workspace],
+		MetastoreOwner: metastoreOwner,
+	}, rateLimit, nil
 }
 
 func (b *schemaBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {

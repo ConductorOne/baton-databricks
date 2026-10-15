@@ -28,6 +28,10 @@ type fakeSchemaAccount struct {
 	schemaCode     string
 	// manage is the effective catalog privilege set for the connector principal.
 	manage []string
+	// second attaches wsb beside wsa. permissionStatus forces the permissions
+	// read on that deployment name; 0 leaves it as 200.
+	second           bool
+	permissionStatus map[string]int
 
 	routing int
 	patches int
@@ -47,11 +51,21 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 				{"metastore_id": "ms-1", "name": "main", "owner": f.metastoreOwner},
 			}})
 		case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"workspace_ids": []int{1}})
+			ids := []int{1}
+			if f.second {
+				ids = append(ids, 2)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspace_ids": ids})
 		case strings.HasSuffix(path, "/workspaces"):
-			_ = json.NewEncoder(w).Encode([]map[string]any{
+			listed := []map[string]any{
 				{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
-			})
+			}
+			if f.second {
+				listed = append(listed, map[string]any{
+					"workspace_id": 2, "workspace_name": "other", "deployment_name": "wsb", "workspace_status": "RUNNING",
+				})
+			}
+			_ = json.NewEncoder(w).Encode(listed)
 		case strings.HasSuffix(path, "/unity-catalog/catalogs"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": []map[string]any{
 				{"name": "main", "metastore_id": "ms-1", "owner": f.catalogOwner},
@@ -81,6 +95,10 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"schemas": all[start : start+size], "next_page_token": next})
 		case strings.Contains(path, "/unity-catalog/permissions/"):
+			if code := f.permissionStatus[r.Header.Get("X-Test-Workspace")]; code != 0 {
+				http.Error(w, `{"message":"refused"}`, code)
+				return
+			}
 			if r.Method == http.MethodPatch {
 				f.patches++
 				_, _ = io.Copy(io.Discard, r.Body)
@@ -188,6 +206,47 @@ func TestSchemaListTrustsManageOnTheCatalog(t *testing.T) {
 	}
 	if len(resources) != 1 {
 		t.Fatalf("listed %d schemas, want 1", len(resources))
+	}
+}
+
+func TestSchemaListTriesTheNextWorkspaceWhenOneRefusesTheProbe(t *testing.T) {
+	f := &fakeSchemaAccount{
+		metastoreOwner:   "someone",
+		catalogOwner:     "someone",
+		manage:           []string{"MANAGE"},
+		second:           true,
+		permissionStatus: map[string]int{"wsa": http.StatusForbidden},
+		schemas:          []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newFakeSchemaBuilder(t, f)
+
+	resources, err := listSchemas(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("listed %d schemas, want 1", len(resources))
+	}
+	got, ok := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace)
+	if !ok || got != "wsb" {
+		t.Fatalf("workspace = %q, ok %v, want wsb", got, ok)
+	}
+}
+
+func TestSchemaListDoesNotSkipAProbeThatIsNotARefusal(t *testing.T) {
+	f := &fakeSchemaAccount{
+		metastoreOwner:   "someone",
+		catalogOwner:     "someone",
+		manage:           []string{"MANAGE"},
+		second:           true,
+		permissionStatus: map[string]int{"wsa": http.StatusInternalServerError},
+		schemas:          []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newFakeSchemaBuilder(t, f)
+
+	_, err := listSchemas(t, b)
+	if err == nil || !strings.Contains(err.Error(), "failed to confirm schema listing visibility") {
+		t.Fatalf("List = %v, want the probe error from wsa", err)
 	}
 }
 
