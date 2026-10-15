@@ -23,9 +23,9 @@ type capturedCreate struct {
 }
 
 // newCapturingUserBuilder returns a user builder backed by a test server that
-// records the CreateUser request body into cap and answers both the create
-// call and the post-create GetUser fetch that CreateAccount performs.
-func newCapturingUserBuilder(t *testing.T, cap *capturedCreate) *userBuilder {
+// records the CreateUser request body into captured and answers both the
+// create call and the post-create GetUser fetch that CreateAccount performs.
+func newCapturingUserBuilder(t *testing.T, captured *capturedCreate) *userBuilder {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -34,21 +34,21 @@ func newCapturingUserBuilder(t *testing.T, cap *capturedCreate) *userBuilder {
 			if err != nil {
 				t.Fatalf("read create request body: %v", err)
 			}
-			cap.raw = raw
-			if err := json.Unmarshal(raw, &cap.body); err != nil {
+			captured.raw = raw
+			if err := json.Unmarshal(raw, &captured.body); err != nil {
 				t.Fatalf("decode create request body: %v", err)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(databricks.CreateUserResponse{
 				Id:          "u1",
-				UserName:    cap.body.UserName,
-				DisplayName: cap.body.DisplayName,
-				Active:      cap.body.Active,
+				UserName:    captured.body.UserName,
+				DisplayName: captured.body.DisplayName,
+				Active:      captured.body.Active,
 			})
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"id":"u1","userName":%q,"displayName":%q,"active":%t,"emails":[{"primary":true,"value":%q}]}`,
-				cap.body.UserName, cap.body.DisplayName, cap.body.Active, cap.body.UserName)
+				captured.body.UserName, captured.body.DisplayName, captured.body.Active, captured.body.UserName)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -108,8 +108,8 @@ func TestCreateAccountActiveDefault(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var cap capturedCreate
-			b := newCapturingUserBuilder(t, &cap)
+			var captured capturedCreate
+			b := newCapturingUserBuilder(t, &captured)
 
 			profile, err := structpb.NewStruct(tc.profile)
 			if err != nil {
@@ -121,15 +121,15 @@ func TestCreateAccountActiveDefault(t *testing.T) {
 				t.Fatalf("CreateAccount: %v", err)
 			}
 
-			if cap.body.Active != tc.wantActive {
-				t.Errorf("serialized request body active = %v, want %v", cap.body.Active, tc.wantActive)
+			if captured.body.Active != tc.wantActive {
+				t.Errorf("serialized request body active = %v, want %v", captured.body.Active, tc.wantActive)
 			}
 
 			// Active has no `omitempty` tag, so the key must always be present
 			// on the wire regardless of its value, or Databricks falls back to
 			// its own default instead of honoring what the connector intended.
 			var raw map[string]interface{}
-			if err := json.Unmarshal(cap.raw, &raw); err != nil {
+			if err := json.Unmarshal(captured.raw, &raw); err != nil {
 				t.Fatalf("unmarshal raw request body: %v", err)
 			}
 			if _, ok := raw["active"]; !ok {
@@ -142,8 +142,8 @@ func TestCreateAccountActiveDefault(t *testing.T) {
 // Regression for CXH-2345: a non-boolean `active` profile value must error
 // instead of panicking the type assertion.
 func TestCreateAccountActiveNonBoolProfileValue(t *testing.T) {
-	var cap capturedCreate
-	b := newCapturingUserBuilder(t, &cap)
+	var captured capturedCreate
+	b := newCapturingUserBuilder(t, &captured)
 
 	profile, err := structpb.NewStruct(map[string]interface{}{
 		"email":       "alice@example.com",
