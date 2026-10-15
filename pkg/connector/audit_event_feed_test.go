@@ -353,14 +353,12 @@ func TestMapAuditRowToResource(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                string
-		row                 auditLogRow
-		accountAPIAvailable bool
-		want                []wantResource
+		name string
+		row  auditLogRow
+		want []wantResource
 	}{
 		{
-			name:                "account-level group create",
-			accountAPIAvailable: true,
+			name: "account-level group create",
 			row: auditLogRow{
 				ActionName:    "createGroup",
 				ServiceName:   "accounts",
@@ -372,8 +370,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "workspace-scoped group change stays account-parented when the Account API is available",
-			accountAPIAvailable: true,
+			name: "workspace-scoped group change stays account-parented",
 			row: auditLogRow{
 				ActionName:    "removeGroup",
 				ServiceName:   "accounts",
@@ -387,21 +384,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "workspace-scoped group change is workspace-parented under token auth",
-			accountAPIAvailable: false,
-			row: auditLogRow{
-				ActionName:    "removeGroup",
-				ServiceName:   "accounts",
-				WorkspaceID:   123,
-				RequestParams: map[string]string{"targetGroupId": "g-1"},
-			},
-			want: []wantResource{
-				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", workspaceParent), workspaceResourceType.Id, "my-workspace"},
-			},
-		},
-		{
-			name:                "workspace-scoped acl change also refreshes the workspace-access role",
-			accountAPIAvailable: true,
+			name: "workspace-scoped acl change also refreshes the workspace-access role",
 			row: auditLogRow{
 				ActionName:  "changeDatabricksWorkspaceAcl",
 				ServiceName: "accounts",
@@ -413,8 +396,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "setAdmin refreshes the user and the account-admin role",
-			accountAPIAvailable: true,
+			name: "setAdmin refreshes the user and the account-admin role",
 			row: auditLogRow{
 				ActionName:    "setAdmin",
 				ServiceName:   "accounts",
@@ -426,8 +408,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "setAccountAdmin refreshes the user and the account-admin role",
-			accountAPIAvailable: true,
+			name: "setAccountAdmin refreshes the user and the account-admin role",
 			row: auditLogRow{
 				ActionName:    "setAccountAdmin",
 				ServiceName:   "accounts",
@@ -439,8 +420,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "removeAccountAdmin refreshes the user and the account-admin role",
-			accountAPIAvailable: true,
+			name: "removeAccountAdmin refreshes the user and the account-admin role",
 			row: auditLogRow{
 				ActionName:    "removeAccountAdmin",
 				ServiceName:   "accounts",
@@ -452,8 +432,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "deactivateUser refreshes the user",
-			accountAPIAvailable: true,
+			name: "deactivateUser refreshes the user",
 			row: auditLogRow{
 				ActionName:    "deactivateUser",
 				ServiceName:   "accounts",
@@ -464,8 +443,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "account-level addPermissionAssignment resolves the workspace from request_params",
-			accountAPIAvailable: true,
+			name: "account-level addPermissionAssignment resolves the workspace from request_params",
 			row: auditLogRow{
 				ActionName:    "addPermissionAssignment",
 				ServiceName:   "workspace",
@@ -477,8 +455,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "account-level updatePermissionAssignment resolves the workspace from request_params",
-			accountAPIAvailable: true,
+			name: "account-level updatePermissionAssignment resolves the workspace from request_params",
 			row: auditLogRow{
 				ActionName:    "updatePermissionAssignment",
 				ServiceName:   "workspace",
@@ -490,8 +467,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "updatePermissionAssignment uses the row's workspace_id",
-			accountAPIAvailable: true,
+			name: "updatePermissionAssignment uses the row's workspace_id",
 			row: auditLogRow{
 				ActionName:    "updatePermissionAssignment",
 				ServiceName:   "workspace",
@@ -503,8 +479,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "deletePermissionAssignment for a workspace outside sync scope is skipped",
-			accountAPIAvailable: true,
+			name: "deletePermissionAssignment for a workspace outside sync scope is skipped",
 			row: auditLogRow{
 				ActionName:    "deletePermissionAssignment",
 				ServiceName:   "workspace",
@@ -512,8 +487,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "permission assignment with an unparseable workspace_id is skipped",
-			accountAPIAvailable: true,
+			name: "permission assignment with an unparseable workspace_id is skipped",
 			row: auditLogRow{
 				ActionName:    "deletePermissionAssignment",
 				ServiceName:   "workspace",
@@ -521,8 +495,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 		},
 		{
-			name:                "updateUser stays account-parented when the Account API is available, but workspace roles still refresh",
-			accountAPIAvailable: true,
+			name: "updateUser stays account-parented, but workspace roles still refresh",
 			row: auditLogRow{
 				ActionName:    "updateUser",
 				ServiceName:   "accounts",
@@ -531,21 +504,6 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 			want: []wantResource{
 				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
-				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
-				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
-			},
-		},
-		{
-			name:                "updateUser is workspace-parented under token auth",
-			accountAPIAvailable: false,
-			row: auditLogRow{
-				ActionName:    "updateUser",
-				ServiceName:   "accounts",
-				WorkspaceID:   123,
-				RequestParams: map[string]string{"targetUserId": "u-1"},
-			},
-			want: []wantResource{
-				{userResourceType.Id, "u-1", workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 			},
@@ -559,8 +517,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 			row:  auditLogRow{ActionName: "delete", ServiceName: "clusters"},
 		},
 		{
-			name:                "unresolvable workspace is skipped",
-			accountAPIAvailable: true,
+			name: "unresolvable workspace is skipped",
 			row: auditLogRow{
 				ActionName:    "add",
 				ServiceName:   "accounts",
@@ -576,7 +533,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := mapAuditRowToResource(context.Background(), client, tc.row, accountId, tc.accountAPIAvailable, workspaceLookup)
+			got, _, err := mapAuditRowToResource(context.Background(), client, tc.row, accountId, workspaceLookup)
 			if err != nil {
 				t.Fatalf("mapAuditRowToResource() error = %v", err)
 			}
@@ -657,7 +614,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 				RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1"},
 			}
 
-			got, _, err := mapAuditRowToResource(context.Background(), client, row, accountId, true, nil)
+			got, _, err := mapAuditRowToResource(context.Background(), client, row, accountId, nil)
 			if err != nil {
 				t.Fatalf("mapAuditRowToResource() error = %v", err)
 			}
@@ -684,7 +641,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), client, row, accountId, true, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), client, row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -698,7 +655,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "g-2"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), groupClient, row, accountId, true, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), groupClient, row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -718,7 +675,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "sp-1"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), spClient, row, accountId, true, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), spClient, row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -737,7 +694,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "ghost"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), notFoundClient, row, accountId, true, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), notFoundClient, row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -751,7 +708,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1"},
 		}
-		if _, _, err := mapAuditRowToResource(context.Background(), errClient, row, accountId, true, nil); err == nil {
+		if _, _, err := mapAuditRowToResource(context.Background(), errClient, row, accountId, nil); err == nil {
 			t.Error("mapAuditRowToResource() error = nil, want a propagated lookup error")
 		}
 	})
@@ -864,7 +821,7 @@ func TestListEventsEndToEnd(t *testing.T) {
 	const wantRemaining = 42
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ListEvents (OAuth2-only, now that token auth can't reach it) always lists
+		// ListEvents always lists
 		// workspaces via the Account API before querying the audit log.
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
 			w.Header().Set("Content-Type", "application/json")

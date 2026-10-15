@@ -370,7 +370,7 @@ func (f *auditEventFeed) ListEvents(
 
 	var events []*v2.Event
 	for _, row := range rows {
-		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, row, f.client.GetAccountId(), f.client.IsAccountAPIAvailable(), workspaceLookup)
+		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, row, f.client.GetAccountId(), workspaceLookup)
 		if rowRateLimit != nil {
 			annos.WithRateLimiting(rowRateLimit)
 		}
@@ -480,14 +480,13 @@ type affectedGrant struct {
 }
 
 // mapAuditRowToResource maps an audit row to every Baton resource its action affects, skipping
-// anything unresolvable. The principal's parent mirrors how it's actually synced (account
-// when accountAPIAvailable, else workspace), not the scope the audit row occurred in.
+// anything unresolvable. Principals are always account-parented, mirroring full sync, regardless
+// of the workspace the audit row occurred in.
 func mapAuditRowToResource(
 	ctx context.Context,
 	client *databricks.Client,
 	row auditLogRow,
 	accountId string,
-	accountAPIAvailable bool,
 	workspaceLookup map[int64]string,
 ) ([]affectedResource, *v2.RateLimitDescription, error) {
 	mapping, ok := auditLogActions[auditActionKey{Service: row.ServiceName, Action: row.ActionName}]
@@ -523,14 +522,6 @@ func mapAuditRowToResource(
 		}
 		affected = append(affected, affectedResource{resourceId: workspaceParent, parentResourceId: accountParent})
 	case mapping.resourceType != nil:
-		parent := accountParent
-		if !accountAPIAvailable {
-			if workspaceParent == nil {
-				return nil, nil, nil
-			}
-			parent = workspaceParent
-		}
-
 		nativeId, ok := row.RequestParams[mapping.idParam]
 		if !ok || nativeId == "" {
 			return nil, nil, nil
@@ -538,27 +529,22 @@ func mapAuditRowToResource(
 
 		resourceId := &v2.ResourceId{ResourceType: mapping.resourceType.Id, Resource: nativeId}
 		if mapping.resourceType == groupResourceType {
-			resourceId.Resource = groupResourceId(ctx, nativeId, parent)
+			resourceId.Resource = groupResourceId(ctx, nativeId, accountParent)
 		}
 
 		if mapping.grant != nil {
-			lookupWorkspaceId := ""
-			if parent.ResourceType == workspaceResourceType.Id {
-				lookupWorkspaceId = parent.Resource
-			}
-
-			g, rateLimit, err := buildAffectedGrant(ctx, client, lookupWorkspaceId, row, mapping.grant, resourceId, parent)
+			g, rateLimit, err := buildAffectedGrant(ctx, client, row, mapping.grant, resourceId, accountParent)
 			if err != nil {
 				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
 			}
 			if g == nil {
 				// No resolvable principal: still refresh the group's grants.
-				return []affectedResource{{resourceId: resourceId, parentResourceId: parent}}, rateLimit, nil
+				return []affectedResource{{resourceId: resourceId, parentResourceId: accountParent}}, rateLimit, nil
 			}
 			return []affectedResource{{grant: g}}, rateLimit, nil
 		}
 
-		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: parent})
+		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: accountParent})
 	}
 
 	if mapping.accountRole != "" {
@@ -585,7 +571,6 @@ func mapAuditRowToResource(
 func buildAffectedGrant(
 	ctx context.Context,
 	client *databricks.Client,
-	workspaceId string,
 	row auditLogRow,
 	gm *auditGrantMapping,
 	entitlementResourceId, parent *v2.ResourceId,
@@ -595,7 +580,7 @@ func buildAffectedGrant(
 		return nil, nil, nil
 	}
 
-	principalType, rateLimit, err := resolvePrincipalType(ctx, client, workspaceId, principalNativeId)
+	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalNativeId)
 	if err != nil {
 		return nil, rateLimit, err
 	}
@@ -617,22 +602,22 @@ func buildAffectedGrant(
 }
 
 // resolvePrincipalType finds which resource type nativeId belongs to, trying user, group, then
-// service principal in that order and stopping at the first match: the audit log's
+// service principal in that order via the Account API and stopping at the first match: the audit log's
 // targetUserId doesn't record which kind of principal it actually is. Returns a nil type (no
 // error) if nativeId doesn't match any of the three.
-func resolvePrincipalType(ctx context.Context, client *databricks.Client, workspaceId, nativeId string) (*v2.ResourceType, *v2.RateLimitDescription, error) {
+func resolvePrincipalType(ctx context.Context, client *databricks.Client, nativeId string) (*v2.ResourceType, *v2.RateLimitDescription, error) {
 	candidates := []struct {
 		resourceType *v2.ResourceType
 		found        func() (bool, *v2.RateLimitDescription, error)
 	}{
 		{userResourceType, func() (bool, *v2.RateLimitDescription, error) {
-			return principalExists(client.GetUser(ctx, workspaceId, nativeId))
+			return principalExists(client.GetUser(ctx, "", nativeId))
 		}},
 		{groupResourceType, func() (bool, *v2.RateLimitDescription, error) {
-			return principalExists(client.GetGroup(ctx, workspaceId, nativeId))
+			return principalExists(client.GetGroup(ctx, "", nativeId))
 		}},
 		{servicePrincipalResourceType, func() (bool, *v2.RateLimitDescription, error) {
-			return principalExists(client.GetServicePrincipal(ctx, workspaceId, nativeId))
+			return principalExists(client.GetServicePrincipal(ctx, "", nativeId))
 		}},
 	}
 
