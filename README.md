@@ -85,6 +85,8 @@ baton resources
 - Metastores
 - Catalogs
 - Schemas
+- Tables
+- Volumes
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
@@ -96,8 +98,9 @@ listed workspace reaches are synced, so narrowing the list removes the others
 and their grants from ConductorOne. A list that matches no workspace on the
 account fails the metastore sync.
 
-Metastores, catalogs and schemas are Unity Catalog securables and are opt-in:
-each type stays off until it is enabled for the connector in ConductorOne.
+Metastores, catalogs, schemas, tables and volumes are Unity Catalog securables
+and are opt-in: each type stays off until it is enabled for the connector in
+ConductorOne.
 
 ## Authentication
 
@@ -136,8 +139,8 @@ assigned to that workspace. Otherwise the grant fails with a
 
 ## Unity Catalog
 
-Metastores, catalogs and schemas cover Databricks Unity Catalog. The
-resource tree the connector syncs is:
+Metastores, catalogs, schemas, tables and volumes cover Databricks Unity
+Catalog. The resource tree the connector syncs is:
 
 ```
 account
@@ -149,7 +152,20 @@ account
 └── metastore
     └── catalog
         └── schema
+            ├── table
+            └── volume
 ```
+
+Views, materialized views, metric views and streaming tables are tables: Unity
+Catalog uses one `table` securable, and `table_type` picks the privilege set. A
+view is not offered `DELETE`, `INSERT`, `UPDATE` or `MODIFY`. `ALL_PRIVILEGES`
+on a view is reported when it already exists, and it is not requestable: the
+grants API rejects adding it. A streaming table is offered `SELECT`,
+`READ_METADATA`, `APPLY_TAG`, `MANAGE`, `ALL_PRIVILEGES`, `REFRESH` and
+`MODIFY`, not the table DML trio. `MANAGED`, `EXTERNAL` and both shallow
+clones stay on the table set. A `FOREIGN` table is read-only, so it is not
+offered `DELETE`, `INSERT`, `UPDATE` or `MODIFY`. An unrecognised `table_type`
+reports the union of every variant; `REFRESH` in that union is not requestable.
 
 Each level exposes its privileges as entitlements (`CREATE_CATALOG` on a
 metastore, `USE_CATALOG` or `SELECT` on a catalog, `USE_SCHEMA` on a schema,
@@ -164,7 +180,8 @@ when the service principal can list every schema in its catalog: it owns the
 metastore or the catalog, or it holds `MANAGE`, `USE_SCHEMA` or
 `ALL_PRIVILEGES` on the catalog. Workspace Admin alone is not enough, and a
 short listing fails that catalog's schema sync with `PermissionDenied`.
-`information_schema` is skipped. Tables and volumes are not synced yet.
+`information_schema` is skipped. Tables and volumes under a schema are listed
+through a workspace whose schema listing is complete.
 
 The endpoints, the permission model, principal resolution and the connector's
 limitations are in [docs/docs-info.md](./docs/docs-info.md).

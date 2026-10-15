@@ -129,7 +129,7 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 			continue
 		}
 
-		built, err := newSecurableResource(schemaResourceType, securableTypeSchema, nil, securable{
+		built, err := newSecurableResource(schemaResourceType, securableTypeSchema, []*v2.ResourceType{tableResourceType, volumeResourceType}, securable{
 			name:  schema.Name,
 			owner: schema.Owner,
 			profile: map[string]any{
@@ -159,17 +159,25 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 // openSchemaListing picks a workspace whose schema listing is complete. nil
 // means the parent catalog is not listed by this sync.
 func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableRef) (*schemaPageState, *v2.RateLimitDescription, error) {
-	snap, rateLimit, err := b.uc.buildRouting(ctx)
+	return b.openListedCatalog(ctx, parent, "schema")
+}
+
+// openListedCatalog picks a workspace whose schema listing is complete. Tables
+// and volumes are listed through that same workspace: a short schema listing is
+// already a failed sync, and a later page must not rebuild the routing.
+// nil means the parent catalog is not listed by this sync.
+func (d *securableDeps) openListedCatalog(ctx context.Context, parent securableRef, noun string) (*schemaPageState, *v2.RateLimitDescription, error) {
+	snap, rateLimit, err := d.uc.buildRouting(ctx)
 	if err != nil {
-		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists schemas under %s: %w", parent.resourceKey(), err)
+		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists %ss under %s: %w", noun, parent.resourceKey(), err)
 	}
 
-	catalogs, state, catalogRateLimit, err := b.uc.catalogsOf(ctx, snap, parent.metastoreID)
+	catalogs, state, catalogRateLimit, err := d.uc.catalogsOf(ctx, snap, parent.metastoreID)
 	if catalogRateLimit != nil {
 		rateLimit = catalogRateLimit
 	}
 	if err != nil {
-		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists schemas under %s: %w", parent.resourceKey(), err)
+		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists %ss under %s: %w", noun, parent.resourceKey(), err)
 	}
 	if state != securableInScope {
 		return nil, rateLimit, nil
@@ -182,7 +190,7 @@ func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableR
 
 	metastoreOwner := snap.metastores[parent.metastoreID].Owner
 	workspace, probeRateLimit, err := firstTrustedWorkspace(ctx, parent, facts.workspaces, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
-		return b.uc.schemaListingIsComplete(ctx, snap, metastoreOwner, facts.owner, parent.catalog(), workspace)
+		return d.uc.schemaListingIsComplete(ctx, snap, metastoreOwner, facts.owner, parent.catalog(), workspace)
 	})
 	if probeRateLimit != nil {
 		rateLimit = probeRateLimit
@@ -192,7 +200,7 @@ func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableR
 	}
 	if workspace == "" {
 		return nil, rateLimit, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot list every schema in catalog %s: %s", parent.catalog(), schemaListRemedy)
+			"databricks-connector: cannot list every %s in catalog %s: %s", noun, parent.catalog(), schemaListRemedy)
 	}
 
 	return &schemaPageState{
@@ -201,6 +209,107 @@ func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableR
 		WorkspaceName:  snap.workspaceNames[workspace],
 		MetastoreOwner: metastoreOwner,
 	}, rateLimit, nil
+}
+
+// listSchemaChildren pages one kind of securable under a schema. The workspace
+// is chosen once and stored on the page token.
+func (d *securableDeps) listSchemaChildren(
+	ctx context.Context,
+	parentResourceID *v2.ResourceId,
+	attr rs.SyncOpAttrs,
+	resourceType *v2.ResourceType,
+	securableType, noun string,
+	fetch func(ctx context.Context, workspace, pageToken string) ([]securable, string, *v2.RateLimitDescription, error),
+) ([]*v2.Resource, *rs.SyncOpResults, error) {
+	if parentResourceID.GetResourceType() != schemaResourceType.Id {
+		return nil, nil, nil
+	}
+
+	parent, err := parseSecurableRef(parentResourceID.GetResource())
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse %s parent %q: %w", noun, parentResourceID.GetResource(), err)
+	}
+	if isUnderInformationSchema(parent) {
+		return nil, nil, nil
+	}
+
+	annos := annotations.Annotations{}
+	bag := &pagination.Bag{}
+	if err := bag.Unmarshal(attr.PageToken.Token); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid %s page token: %v", noun, err)
+	}
+
+	var rateLimit *v2.RateLimitDescription
+	if bag.Current() == nil {
+		current, openRateLimit, err := d.openListedCatalog(ctx, parent, noun)
+		rateLimit = openRateLimit
+		noteRateLimit(&annos, rateLimit)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		if current == nil {
+			ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed",
+				zap.String("resource_type", resourceType.Id),
+				zap.String("parent", parent.resourceKey()),
+			)
+
+			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		}
+
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		bag.Push(pagination.PageState{ResourceTypeID: resourceType.Id, ResourceID: string(encoded)})
+	}
+
+	var current schemaPageState
+	if err := json.Unmarshal([]byte(bag.ResourceID()), &current); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid %s page token: %v", noun, err)
+	}
+
+	items, next, listRateLimit, err := fetch(ctx, current.Workspace, bag.PageToken())
+	if listRateLimit != nil {
+		rateLimit = listRateLimit
+	}
+	noteRateLimit(&annos, rateLimit)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.Unavailable,
+				fmt.Sprintf("databricks-connector: schema %s is listed, but its %ss could not be read through workspace %s",
+					parent.fullName(), noun, current.Workspace),
+				err)
+		}
+
+		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+			"databricks-connector: failed to list %ss under %s: %w", noun, parent.resourceKey(), err)
+	}
+
+	var rv []*v2.Resource
+	for _, item := range items {
+		if item.profile == nil {
+			item.profile = map[string]any{}
+		}
+		item.profile[profileKeyMetastoreOwner] = current.MetastoreOwner
+		item.profile[profileKeyWorkspace] = current.Workspace
+		item.profile[profileKeyWorkspaceID] = current.WorkspaceID
+		item.profile[profileKeyWorkspaceName] = current.WorkspaceName
+
+		childRef := parent.child(item.name)
+		built, err := newSecurableResource(resourceType, securableType, nil, item, childRef, parentResourceID)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+				"databricks-connector: failed to build %s resource %s: %w", resourceType.Id, childRef.resourceKey(), err)
+		}
+		rv = append(rv, built)
+	}
+
+	nextToken, err := bag.NextToken(next)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
+	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
 func (b *schemaBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -225,13 +334,25 @@ func (b *schemaBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 }
 
 func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	return b.grantsOn(ctx, resource, attr, databricks.SecurableSchema, schemaPrivileges)
+}
+
+// grantsOn reads one page of direct grants. offered is the set this resource
+// reports; a privilege outside it is not a grant ConductorOne can represent.
+func (d *securableDeps) grantsOn(
+	ctx context.Context,
+	resource *v2.Resource,
+	attr rs.SyncOpAttrs,
+	securableType string,
+	offered []string,
+) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	ref, err := parseSecurableRef(resource.GetId().GetResource())
 	if err != nil {
 		return nil, nil, err
 	}
 
 	annos := annotations.Annotations{}
-	workspace, state, rateLimit, err := b.catalogAccess(ctx, resource, ref, false)
+	workspace, state, rateLimit, err := d.catalogAccess(ctx, resource, ref, false)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
 		if code := status.Code(err); code == codes.PermissionDenied || code == codes.FailedPrecondition {
@@ -242,8 +363,8 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
 	}
 	if state != securableInScope {
-		ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed; skipping its schema grants",
-			zap.String("schema", ref.resourceKey()),
+		ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed; skipping its grants",
+			zap.String("securable", ref.resourceKey()),
 			zap.String("catalog", ref.catalog()),
 		)
 
@@ -252,12 +373,12 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 
 	l := ctxzap.Extract(ctx)
 	pageToken := attr.PageToken.Token
-	assignments, nextPageToken, rateLimit, err := b.client.ListPermissions(
-		ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "", pageToken)
+	assignments, nextPageToken, rateLimit, err := d.client.ListPermissions(
+		ctx, workspace, securableType, ref.permissionsName(), "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableSchema, ref.permissionsName(), err)
+			"databricks-connector: failed to list permissions on %s %s: %w", securableType, ref.permissionsName(), err)
 	}
 
 	owner := ""
@@ -265,7 +386,7 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 		owner = profileString(resource, profileKeyOwner)
 	}
 
-	principals, principalRateLimit, err := b.uc.principalsForGrants(ctx, assignments, owner)
+	principals, principalRateLimit, err := d.uc.principalsForGrants(ctx, assignments, owner)
 	noteRateLimit(&annos, principalRateLimit)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
@@ -284,13 +405,13 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 
 			continue
 		}
-		if !emitPrincipal(b.sync, principalId.GetResourceType()) {
+		if !emitPrincipal(d.sync, principalId.GetResourceType()) {
 			continue
 		}
 
 		options := groupSecurableGrantOptions(principalId)
 		for _, assigned := range assignment.Privileges {
-			if assigned == "" || !slices.Contains(schemaPrivileges, assigned) {
+			if assigned == "" || !slices.Contains(offered, assigned) {
 				continue
 			}
 			rv = append(rv, grant.NewGrant(resource, assigned, principalId, options...))
@@ -299,7 +420,7 @@ func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr 
 
 	if owner != "" {
 		principalId, found := principals.lookupName(owner)
-		if found && emitPrincipal(b.sync, principalId.GetResourceType()) {
+		if found && emitPrincipal(d.sync, principalId.GetResourceType()) {
 			options := groupSecurableGrantOptions(principalId)
 			options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
 			rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))

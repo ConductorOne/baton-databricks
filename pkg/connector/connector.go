@@ -37,6 +37,8 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newMetastoreBuilder(d.client, d.unityCatalog, principals),
 		newCatalogBuilder(d.client, d.unityCatalog, principals),
 		newSchemaBuilder(d.client, d.unityCatalog, principals),
+		newTableBuilder(d.client, d.unityCatalog, principals),
+		newVolumeBuilder(d.client, d.unityCatalog, principals),
 	}
 }
 
@@ -60,7 +62,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton, " +
-			"along with Unity Catalog data assets — metastores, catalogs and schemas — and the privileges granted on them",
+			"along with Unity Catalog data assets — metastores, catalogs, schemas, tables, views and volumes — and the privileges granted on them",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"email": {

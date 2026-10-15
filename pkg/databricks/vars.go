@@ -174,9 +174,14 @@ func NewNameVars(name string, etag string) *NameVars {
 // maxResults is a pointer: its presence is the signal.
 type unityCatalogVars struct {
 	catalogName string
+	schemaName  string
 	principal   string
 	maxResults  *uint
 	pageToken   string
+
+	// omit_username is deliberately not sent alongside these: it also removes
+	// owner, which every securable's profile and its owner grant depend on.
+	omitTablePayload bool
 
 	// include_unbound lists catalogs not bound to the calling workspace. The
 	// API honours it only when the caller can update catalog-workspace bindings.
@@ -186,6 +191,10 @@ type unityCatalogVars struct {
 func (v *unityCatalogVars) Apply(params *url.Values) {
 	if v.catalogName != "" {
 		params.Add("catalog_name", v.catalogName)
+	}
+
+	if v.schemaName != "" {
+		params.Add("schema_name", v.schemaName)
 	}
 
 	if v.principal != "" {
@@ -198,6 +207,11 @@ func (v *unityCatalogVars) Apply(params *url.Values) {
 
 	if v.pageToken != "" {
 		params.Add("page_token", v.pageToken)
+	}
+
+	if v.omitTablePayload {
+		params.Add("omit_columns", "true")
+		params.Add("omit_properties", "true")
 	}
 
 	if v.includeUnbound {

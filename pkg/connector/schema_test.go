@@ -103,7 +103,7 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 				f.patches++
 				_, _ = io.Copy(io.Discard, r.Body)
 			}
-			if f.schemaCode != "" && strings.Contains(path, "/permissions/schema/") {
+			if f.schemaCode != "" && (strings.Contains(path, "/permissions/schema/") || strings.Contains(path, "/permissions/table/")) {
 				http.Error(w, fmt.Sprintf(`{"error_code":%q,"message":"gone"}`, f.schemaCode), http.StatusNotFound)
 				return
 			}
@@ -311,6 +311,42 @@ func TestRevokeOnADroppedSchemaIsAlreadyRevoked(t *testing.T) {
 	}
 	if f.patches != 0 {
 		t.Errorf("dropped schema sent %d PATCHes", f.patches)
+	}
+}
+
+func TestRevokeOnADroppedParentSchemaForATableIsAlreadyRevoked(t *testing.T) {
+	f := &fakeSchemaAccount{
+		metastoreOwner: "app-1",
+		catalogOwner:   "someone",
+		schemaCode:     "SCHEMA_DOES_NOT_EXIST",
+		users:          map[string]string{"1": "alice@example.com"},
+	}
+	parent := newFakeSchemaBuilder(t, f)
+	b := newTableBuilder(parent.client, parent.uc, syncPrincipals{})
+	principal := &v2.Resource{Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "1"}}
+	resource, err := newSecurableResource(tableResourceType, securableTypeTable, nil, securable{
+		name: "orders", owner: "someone",
+		profile: map[string]any{
+			profileKeyTableType:      "MANAGED",
+			profileKeyMetastoreOwner: "app-1",
+			profileKeyWorkspace:      "wsa",
+			profileKeyWorkspaceID:    "1",
+			profileKeyWorkspaceName:  "prod",
+		},
+	}, securableRef{metastoreID: "ms-1", parts: []string{"main", "sales", "orders"}}, &v2.ResourceId{ResourceType: schemaResourceType.Id, Resource: "ms-1::main.sales"})
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+
+	annos, err := b.Revoke(context.Background(), grant.NewGrant(resource, "SELECT", principal.GetId()))
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Fatal("dropped parent schema did not report GrantAlreadyRevoked")
+	}
+	if f.patches != 0 {
+		t.Errorf("dropped parent schema sent %d PATCHes", f.patches)
 	}
 }
 

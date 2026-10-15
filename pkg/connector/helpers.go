@@ -249,6 +249,14 @@ func isNotFoundError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
+// isRejectedFilter reports a SCIM filter Databricks refused. A quoted value
+// should not hit this; when it does, the owner stays unresolved instead of
+// failing the sync.
+func isRejectedFilter(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest
+}
+
 func isForbiddenError(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden

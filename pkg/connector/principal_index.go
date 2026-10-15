@@ -101,13 +101,36 @@ func (u *unityCatalog) principalsForGrants(
 	return u.indexAssignments(ctx, assignments, owner)
 }
 
+// lookupOwner treats a rejected SCIM filter as a miss. The value is quoted, so
+// an apostrophe should not reach this; a 400 still must not fail Grants.
+func (u *unityCatalog) lookupOwner(
+	ctx context.Context,
+	owner, kind string,
+	find func() (string, *v2.RateLimitDescription, error),
+) (string, *v2.RateLimitDescription, error) {
+	id, rateLimit, err := find()
+	if err == nil || !isRejectedFilter(err) {
+		return id, rateLimit, err
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: owner lookup was rejected; leaving that principal unresolved",
+		zap.String("owner", owner),
+		zap.String("kind", kind),
+		zap.Error(err),
+	)
+
+	return "", rateLimit, nil
+}
+
 // indexOwner asks each principal namespace for that one name. The first hit
 // wins, in the same order lookupPrincipalByID tries (users, groups,
 // service principals).
 func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principalIndex, *v2.RateLimitDescription, error) {
 	index := newPrincipalIndex()
 
-	userID, rateLimit, err := u.client.FindUserID(ctx, "", owner)
+	userID, rateLimit, err := u.lookupOwner(ctx, owner, "user", func() (string, *v2.RateLimitDescription, error) {
+		return u.client.FindUserID(ctx, "", owner)
+	})
 	if err != nil {
 		return nil, rateLimit, fmt.Errorf("failed to resolve owner %q as a user: %w", owner, err)
 	}
@@ -117,7 +140,9 @@ func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principal
 		return index, rateLimit, nil
 	}
 
-	groupID, groupRateLimit, err := u.client.FindGroupID(ctx, "", owner)
+	groupID, groupRateLimit, err := u.lookupOwner(ctx, owner, "group", func() (string, *v2.RateLimitDescription, error) {
+		return u.client.FindGroupID(ctx, "", owner)
+	})
 	if groupRateLimit != nil {
 		rateLimit = groupRateLimit
 	}
@@ -138,7 +163,9 @@ func (u *unityCatalog) indexOwner(ctx context.Context, owner string) (*principal
 		return index, rateLimit, nil
 	}
 
-	servicePrincipalID, servicePrincipalRateLimit, err := u.client.FindServicePrincipalID(ctx, "", owner)
+	servicePrincipalID, servicePrincipalRateLimit, err := u.lookupOwner(ctx, owner, "service principal", func() (string, *v2.RateLimitDescription, error) {
+		return u.client.FindServicePrincipalID(ctx, "", owner)
+	})
 	if servicePrincipalRateLimit != nil {
 		rateLimit = servicePrincipalRateLimit
 	}

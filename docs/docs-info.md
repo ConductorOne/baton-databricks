@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs Unity Catalog metastores, catalogs and schemas. Each resource type is opt-in — it stays off until it is enabled per resource type in ConductorOne.
+   > It also syncs Unity Catalog metastores, catalogs, schemas, tables and volumes. Each resource type is opt-in — it stays off until it is enabled per resource type in ConductorOne.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on a metastore, catalog or schema. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on a metastore, catalog, schema, table or volume. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`. `ALL_PRIVILEGES` on a view is reported when Databricks already has it and is not grantable.
 
 ## Connector credentials
 
@@ -61,11 +61,18 @@ through a workspace host assigned to that metastore.
 | Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
 | Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
 | Schemas | `GET /api/2.1/unity-catalog/schemas` |
+| Tables | `GET /api/2.1/unity-catalog/tables` |
+| Volumes | `GET /api/2.1/unity-catalog/volumes` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 - **HTTP cache keys include the request Host.** Two workspaces share paths such
   as `/unity-catalog/permissions/...`, and without the host in the key one
   workspace's response would be served for another.
+- **The tables endpoint caps `max_results` at 50 and requires `schema_name`.**
+  Listing tables therefore costs one call per schema.
+- **Table listings are requested with `omit_columns` and `omit_properties`**,
+  which carry most of a table response's weight, but deliberately not
+  `omit_username` — that flag also drops `owner`.
 
 ## Permission model
 
@@ -80,7 +87,7 @@ The scopes:
 
 | Scope | Covers |
 |-------|--------|
-| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, schemas, and the permissions endpoint |
+| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, schemas, tables, volumes, and the permissions endpoint |
 | `scim` | Account users, groups and service principals |
 | `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
 | `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
@@ -169,8 +176,18 @@ for that catalog fails with `PermissionDenied` instead of emitting the short lis
   with `PermissionDenied`. Revoking a privilege on a schema Databricks reports
   as `SCHEMA_DOES_NOT_EXIST` returns `GrantAlreadyRevoked`. A 404 with any
   other error code still fails.
-- **Other securables are not synced yet:** tables, volumes,
-  functions, registered models, external locations, storage credentials,
-  connections, shares and Delta Sharing recipients.
+- **Tables and volumes are synced under a schema** whose listing is complete.
+  `table_type` picks the privilege set. `MANAGED`, `EXTERNAL` and both shallow
+  clones use the table set. A view or metric view does not offer the table DML
+  privileges, and `ALL_PRIVILEGES` on one is not requestable. A `FOREIGN` table
+  is read-only and is not offered those DML privileges either. An unrecognised
+  `table_type` reports the union of every variant, and `REFRESH` in that union
+  is not requestable. Revoking a privilege on a table or volume
+  Databricks reports as `TABLE_DOES_NOT_EXIST`, `VOLUME_DOES_NOT_EXIST`,
+  `SCHEMA_DOES_NOT_EXIST` or `CATALOG_DOES_NOT_EXIST` returns
+  `GrantAlreadyRevoked`. A 404 with any other error code still fails.
+- **Other securables are not synced yet:** functions, registered models,
+  external locations, storage credentials, connections, shares and Delta
+  Sharing recipients.
 - **Tags are not synced**, including the `SYSTEM.TEAM` convention some customers
   use to drive just-in-time access.

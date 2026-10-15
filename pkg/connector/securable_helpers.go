@@ -20,6 +20,8 @@ const (
 	securableTypeMetastore = "METASTORE"
 	securableTypeCatalog   = "CATALOG"
 	securableTypeSchema    = "SCHEMA"
+	securableTypeTable     = "TABLE"
+	securableTypeVolume    = "VOLUME"
 
 	profileKeyMetastoreID    = "metastore_id"
 	profileKeyMetastoreOwner = "metastore_owner"
@@ -28,6 +30,10 @@ const (
 	profileKeySecurableType  = "securable_type"
 	profileKeyCatalogName    = "catalog_name"
 	profileKeySchemaName     = "schema_name"
+	profileKeyTableName      = "table_name"
+	profileKeyTableType      = "table_type"
+	profileKeyVolumeName     = "volume_name"
+	profileKeyVolumeType     = "volume_type"
 	profileKeyCatalogType    = "catalog_type"
 	profileKeyIsolationMode  = "isolation_mode"
 	profileKeyRegion         = "region"
@@ -103,6 +109,10 @@ func parseSecurableRef(resourceID string) (securableRef, error) {
 
 func (r securableRef) catalog() string {
 	return r.part(0)
+}
+
+func (r securableRef) schema() string {
+	return r.part(1)
 }
 
 func (r securableRef) part(i int) string {

@@ -375,6 +375,82 @@
     },
     {
       "resourceType": {
+        "id": "table",
+        "displayName": "Table",
+        "traits": [
+          "TRAIT_APP"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.OptInRequired"
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "unity-catalog"
+              },
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "provisioning"
+              },
+              {
+                "permission": "Account admin"
+              },
+              {
+                "permission": "Workspace admin"
+              },
+              {
+                "permission": "USE_CATALOG"
+              },
+              {
+                "permission": "USE_SCHEMA"
+              }
+            ]
+          }
+        ]
+      },
+      "capabilities": [
+        "CAPABILITY_SYNC",
+        "CAPABILITY_PROVISION"
+      ],
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "unity-catalog"
+          },
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "provisioning"
+          },
+          {
+            "permission": "Account admin"
+          },
+          {
+            "permission": "Workspace admin"
+          },
+          {
+            "permission": "USE_CATALOG"
+          },
+          {
+            "permission": "USE_SCHEMA"
+          }
+        ]
+      },
+      "optInRequired": true
+    },
+    {
+      "resourceType": {
         "id": "user",
         "displayName": "User",
         "traits": [
@@ -412,6 +488,85 @@
           }
         ]
       }
+    },
+    {
+      "resourceType": {
+        "id": "volume",
+        "displayName": "Volume",
+        "traits": [
+          "TRAIT_APP"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.OptInRequired"
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "unity-catalog"
+              },
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "provisioning"
+              },
+              {
+                "permission": "Account admin"
+              },
+              {
+                "permission": "Workspace admin"
+              },
+              {
+                "permission": "USE_CATALOG"
+              },
+              {
+                "permission": "USE_SCHEMA"
+              }
+            ]
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.SkipEntitlements"
+          }
+        ]
+      },
+      "capabilities": [
+        "CAPABILITY_SYNC",
+        "CAPABILITY_PROVISION"
+      ],
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "unity-catalog"
+          },
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "provisioning"
+          },
+          {
+            "permission": "Account admin"
+          },
+          {
+            "permission": "Workspace admin"
+          },
+          {
+            "permission": "USE_CATALOG"
+          },
+          {
+            "permission": "USE_SCHEMA"
+          }
+        ]
+      },
+      "optInRequired": true
     },
     {
       "resourceType": {

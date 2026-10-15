@@ -654,3 +654,121 @@ func TestGrantsFallsBackWhenTheProfileWorkspaceCannotBeUsed(t *testing.T) {
 		})
 	}
 }
+
+// table_type is the only field that says which privilege set a table row uses.
+// A view still emits ALL_PRIVILEGES, because SQL can grant it, but that
+// entitlement is not requestable: the grants API rejects the write.
+func TestTablePrivilegesFollowTableType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		tableType        string
+		setType          bool
+		wantAll          bool
+		wantRefresh      bool
+		refreshGrantable bool
+		viewLike         bool
+		readOnly         bool
+	}{
+		{name: "view", tableType: "VIEW", setType: true, wantAll: true, wantRefresh: false, viewLike: true},
+		{name: "padded view", tableType: " VIEW", setType: true, wantAll: true, wantRefresh: false, viewLike: true},
+		{name: "metric view", tableType: "METRIC_VIEW", setType: true, wantAll: true, wantRefresh: false, viewLike: true},
+		{name: "managed", tableType: "MANAGED", setType: true, wantAll: true, wantRefresh: false},
+		{name: "external", tableType: "EXTERNAL", setType: true, wantAll: true, wantRefresh: false},
+		{name: "managed shallow clone", tableType: "MANAGED_SHALLOW_CLONE", setType: true, wantAll: true, wantRefresh: false},
+		{name: "external shallow clone", tableType: "EXTERNAL_SHALLOW_CLONE", setType: true, wantAll: true, wantRefresh: false},
+		{name: "foreign", tableType: "FOREIGN", setType: true, wantAll: true, wantRefresh: false, readOnly: true},
+		{name: "materialized view", tableType: "MATERIALIZED_VIEW", setType: true, wantAll: true, wantRefresh: true, refreshGrantable: true},
+		{name: "streaming table", tableType: "STREAMING_TABLE", setType: true, wantAll: true, wantRefresh: true, refreshGrantable: true},
+		{name: "unknown type", tableType: "SOMETHING_NEW", setType: true, wantAll: true, wantRefresh: true},
+		{name: "missing type", setType: false, wantAll: true, wantRefresh: true},
+		{name: "empty type", tableType: "", setType: true, wantAll: true, wantRefresh: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			profile := map[string]any{}
+			if tc.setType {
+				profile[profileKeyTableType] = tc.tableType
+			}
+			resource, err := rs.NewAppResource("main.sales.orders", tableResourceType, "ms::main.sales.orders", nil, rs.WithResourceProfile(profile))
+			if err != nil {
+				t.Fatalf("build resource: %v", err)
+			}
+
+			offered := privilegesForTable(context.Background(), resource)
+			if slices.Contains(offered, privilegeAllPrivileges) != tc.wantAll {
+				t.Errorf("ALL_PRIVILEGES present = %v, want %v", slices.Contains(offered, privilegeAllPrivileges), tc.wantAll)
+			}
+			if slices.Contains(offered, privilegeRefresh) != tc.wantRefresh {
+				t.Errorf("REFRESH present = %v, want %v", slices.Contains(offered, privilegeRefresh), tc.wantRefresh)
+			}
+			if tc.readOnly && slices.Contains(offered, "MODIFY") {
+				t.Error("MODIFY is offered on a read-only table")
+			}
+
+			entitlements, _, err := (&tableBuilder{}).Entitlements(context.Background(), resource, rs.SyncOpAttrs{})
+			if err != nil {
+				t.Fatalf("entitlements: %v", err)
+			}
+
+			var slugs []string
+			for _, entitlement := range entitlements {
+				slug := entitlement.GetSlug()
+				if slug == ownerEntitlement {
+					if len(entitlement.GetGrantableTo()) != 0 {
+						t.Errorf("owner is grantable")
+					}
+					continue
+				}
+				slugs = append(slugs, slug)
+				reportedOnly := (slug == privilegeAllPrivileges && tc.viewLike) ||
+					(slug == privilegeRefresh && !tc.refreshGrantable)
+				if reportedOnly && len(entitlement.GetGrantableTo()) != 0 {
+					t.Errorf("%s is grantable", slug)
+				}
+				if !reportedOnly && len(entitlement.GetGrantableTo()) == 0 {
+					t.Errorf("%s is not grantable", slug)
+				}
+			}
+			if !slices.Equal(slugs, offered) {
+				t.Errorf("entitlement slugs %v differ from the reported set %v", slugs, offered)
+			}
+		})
+	}
+}
+
+func TestGrantAllPrivilegesOnAViewIsRejected(t *testing.T) {
+	t.Parallel()
+
+	resource, err := rs.NewAppResource("main.sales.orders", tableResourceType, "ms::main.sales.orders", nil, rs.WithResourceProfile(map[string]any{
+		profileKeyTableType: " view ",
+	}))
+	if err != nil {
+		t.Fatalf("build resource: %v", err)
+	}
+	principal := &v2.Resource{Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "1"}}
+	_, err = (&tableBuilder{}).Grant(context.Background(), principal, grant.NewGrant(resource, privilegeAllPrivileges, principal.GetId()).GetEntitlement())
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Grant = %v, want InvalidArgument", err)
+	}
+}
+
+func TestGrantRefreshOnAForeignTableIsRejected(t *testing.T) {
+	t.Parallel()
+
+	resource, err := rs.NewAppResource("main.sales.orders", tableResourceType, "ms::main.sales.orders", nil, rs.WithResourceProfile(map[string]any{
+		profileKeyTableType: "FOREIGN",
+	}))
+	if err != nil {
+		t.Fatalf("build resource: %v", err)
+	}
+	principal := &v2.Resource{Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "1"}}
+	_, err = (&tableBuilder{}).Grant(context.Background(), principal, grant.NewGrant(resource, privilegeRefresh, principal.GetId()).GetEntitlement())
+	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "FOREIGN") {
+		t.Fatalf("Grant = %v, want InvalidArgument naming FOREIGN", err)
+	}
+}
