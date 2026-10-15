@@ -14,12 +14,15 @@ const (
 
 	// A view and a materialized view are both securable_type "table", so table_type
 	// is the only field that says which privileges apply.
-	tableTypeManaged          = "MANAGED"
-	tableTypeExternal         = "EXTERNAL"
-	tableTypeView             = "VIEW"
-	tableTypeMaterializedView = "MATERIALIZED_VIEW"
-	tableTypeStreamingTable   = "STREAMING_TABLE"
-	tableTypeMetricView       = "METRIC_VIEW"
+	tableTypeManaged              = "MANAGED"
+	tableTypeExternal             = "EXTERNAL"
+	tableTypeManagedShallowClone  = "MANAGED_SHALLOW_CLONE"
+	tableTypeExternalShallowClone = "EXTERNAL_SHALLOW_CLONE"
+	tableTypeForeign              = "FOREIGN"
+	tableTypeView                 = "VIEW"
+	tableTypeMaterializedView     = "MATERIALIZED_VIEW"
+	tableTypeStreamingTable       = "STREAMING_TABLE"
+	tableTypeMetricView           = "METRIC_VIEW"
 
 	// ownerEntitlement names the securable's owner. Ownership is single-valued and
 	// Databricks has no notion of removing an owner, so it is never grantable.
@@ -129,7 +132,14 @@ var (
 		"SELECT",
 	}
 
-	// For a grant whose table variant is not knowable.
+	// A foreign table is read-only. MODIFY cannot be granted on one, and the
+	// DML trio fails with it.
+	// https://docs.databricks.com/aws/en/data-governance/unity-catalog/access-control/privileges-reference
+	foreignTablePrivileges = withoutPrivileges(tablePrivileges, "DELETE", "INSERT", "MODIFY", "UPDATE")
+
+	// For a grant whose table variant is not knowable. REFRESH is reported so a
+	// held one is not dropped, and it is not requestable: only a materialized
+	// view or a streaming table accepts that grant.
 	anyTablePrivileges = append(slices.Clone(tablePrivileges), privilegeRefresh)
 
 	volumePrivileges = []string{
@@ -168,9 +178,23 @@ func isViewLike(tableType string) bool {
 	}
 }
 
-// privilegesForTableType returns the set for a known table_type. MANAGED and
-// EXTERNAL are named so they stay on the table set. Anything else, including a
-// type Databricks adds later, gets the union so a held REFRESH is not dropped.
+// refreshIsRequestable reports the table types whose grants API accepts REFRESH.
+// The privileges reference lists it on a materialized view. A streaming table
+// accepts it too. Every other type, including one this connector does not name,
+// keeps a held REFRESH in the reported set and does not offer the grant.
+func refreshIsRequestable(tableType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(tableType)) {
+	case tableTypeMaterializedView, tableTypeStreamingTable:
+		return true
+	default:
+		return false
+	}
+}
+
+// privilegesForTableType returns the set for a known table_type. MANAGED,
+// EXTERNAL and both shallow clones stay on the table set. A foreign table is
+// read-only. Anything else, including a type Databricks adds later, gets the
+// union so a held REFRESH is not dropped.
 func privilegesForTableType(tableType string) []string {
 	if isViewLike(tableType) {
 		return viewPrivileges
@@ -181,8 +205,10 @@ func privilegesForTableType(tableType string) []string {
 		return materializedViewPrivileges
 	case tableTypeStreamingTable:
 		return streamingTablePrivileges
-	case tableTypeManaged, tableTypeExternal:
+	case tableTypeManaged, tableTypeExternal, tableTypeManagedShallowClone, tableTypeExternalShallowClone:
 		return tablePrivileges
+	case tableTypeForeign:
+		return foreignTablePrivileges
 	default:
 		return anyTablePrivileges
 	}

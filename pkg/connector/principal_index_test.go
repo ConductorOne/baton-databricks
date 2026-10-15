@@ -141,6 +141,61 @@ func TestPrincipalsForGrantsWorkspaceAdminsOwnerDoesNotListAccount(t *testing.T)
 	}
 }
 
+func TestOwnerLookupContinuesAfterARejectedUserFilter(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	var sawGroup bool
+	client, _ := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/scim/v2/Users"):
+			http.Error(w, `{"message":"bad filter"}`, http.StatusBadRequest)
+		case strings.Contains(r.URL.Path, "/scim/v2/Groups"):
+			sawGroup = true
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Resources":    []map[string]any{{"id": "g-1", "displayName": "data-eng"}},
+				"totalResults": 1,
+			})
+		default:
+			t.Errorf("unexpected lookup %s", r.URL.Path)
+		}
+	})
+
+	uc := newUnityCatalog(client, "app-1", nil)
+	index, _, err := uc.principalsForGrants(context.Background(), nil, "data-eng")
+	if err != nil {
+		t.Fatalf("principalsForGrants: %v", err)
+	}
+	if !sawGroup {
+		t.Fatal("group lookup did not run after the user filter was rejected")
+	}
+	got, ok := index.lookupName("data-eng")
+	if !ok || got.GetResourceType() != groupResourceType.Id {
+		t.Fatalf("owner = %v, want the group", got)
+	}
+}
+
+func TestOwnerLookupFailsOnAServerError(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	var sawGroup bool
+	client, _ := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/scim/v2/Groups") {
+			sawGroup = true
+		}
+		http.Error(w, `{"message":"unavailable"}`, http.StatusInternalServerError)
+	})
+
+	uc := newUnityCatalog(client, "app-1", nil)
+	_, _, err := uc.principalsForGrants(context.Background(), nil, "alice@example.com")
+	if err == nil || !strings.Contains(err.Error(), "failed to resolve owner") {
+		t.Fatalf("principalsForGrants = %v, want the user lookup error", err)
+	}
+	if sawGroup {
+		t.Fatal("group lookup ran after the user lookup failed")
+	}
+}
+
 func TestPrincipalsForGrantsAssignmentsResolvePerPrincipal(t *testing.T) {
 	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
 

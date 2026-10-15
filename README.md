@@ -162,8 +162,10 @@ view is not offered `DELETE`, `INSERT`, `UPDATE` or `MODIFY`. `ALL_PRIVILEGES`
 on a view is reported when it already exists, and it is not requestable: the
 grants API rejects adding it. A streaming table is offered `SELECT`,
 `READ_METADATA`, `APPLY_TAG`, `MANAGE`, `ALL_PRIVILEGES`, `REFRESH` and
-`MODIFY`, not the table DML trio. An unrecognised `table_type` uses the union
-of every variant. `MANAGED` and `EXTERNAL` stay on the table set.
+`MODIFY`, not the table DML trio. `MANAGED`, `EXTERNAL` and both shallow
+clones stay on the table set. A `FOREIGN` table is read-only, so it is not
+offered `DELETE`, `INSERT`, `UPDATE` or `MODIFY`. An unrecognised `table_type`
+reports the union of every variant; `REFRESH` in that union is not requestable.
 
 Each level exposes its privileges as entitlements (`CREATE_CATALOG` on a
 metastore, `USE_CATALOG` or `SELECT` on a catalog, `USE_SCHEMA` on a schema,

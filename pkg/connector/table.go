@@ -104,9 +104,13 @@ func (b *tableBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 			ent.WithDisplayName(fmt.Sprintf("%s %s", resource.GetDisplayName(), privilege)),
 			ent.WithDescription(fmt.Sprintf("%s privilege on table %s in Databricks", privilege, ref.permissionsName())),
 		}
-		// ALL_PRIVILEGES on a view is reported when SQL already granted it. The
-		// grants API rejects adding it, so it is not requestable.
-		if privilege != privilegeAllPrivileges || !isViewLike(variant) {
+		// ALL_PRIVILEGES on a view, and REFRESH on anything that is not a
+		// materialized view or a streaming table, are reported when they
+		// already exist. The grants API rejects adding them, so they are not
+		// requestable.
+		reportOnly := (privilege == privilegeAllPrivileges && isViewLike(variant)) ||
+			(privilege == privilegeRefresh && !refreshIsRequestable(variant))
+		if !reportOnly {
 			options = append([]ent.EntitlementOption{grantable}, options...)
 		}
 		rv = append(rv, ent.NewPermissionEntitlement(resource, privilege, options...))
@@ -127,11 +131,17 @@ func (b *tableBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 func (b *tableBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	resource := entitlement.GetResource()
 	variant := profileString(resource, profileKeyTableType)
-	if privilege, err := parseEntitlementPrivilege(entitlement.GetId()); err == nil &&
-		privilege == privilegeAllPrivileges && isViewLike(variant) {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"databricks-connector: the grants API rejects ALL_PRIVILEGES on a %s; grant SELECT or MANAGE instead",
-			strings.ToUpper(strings.TrimSpace(variant)))
+	if privilege, err := parseEntitlementPrivilege(entitlement.GetId()); err == nil {
+		switch {
+		case privilege == privilegeAllPrivileges && isViewLike(variant):
+			return nil, status.Errorf(codes.InvalidArgument,
+				"databricks-connector: the grants API rejects ALL_PRIVILEGES on a %s; grant SELECT or MANAGE instead",
+				strings.ToUpper(strings.TrimSpace(variant)))
+		case privilege == privilegeRefresh && !refreshIsRequestable(variant):
+			return nil, status.Errorf(codes.InvalidArgument,
+				"databricks-connector: REFRESH can be granted on a materialized view or a streaming table, not on table type %q",
+				strings.ToUpper(strings.TrimSpace(variant)))
+		}
 	}
 
 	return b.grantSecurable(ctx, principal, entitlement, tableKind(privilegesForTable(ctx, resource)))

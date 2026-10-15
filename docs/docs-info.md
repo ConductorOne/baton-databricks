@@ -177,10 +177,12 @@ for that catalog fails with `PermissionDenied` instead of emitting the short lis
   as `SCHEMA_DOES_NOT_EXIST` returns `GrantAlreadyRevoked`. A 404 with any
   other error code still fails.
 - **Tables and volumes are synced under a schema** whose listing is complete.
-  `table_type` picks the privilege set. `MANAGED` and `EXTERNAL` use the table
-  set. A view or metric view does not offer the table DML privileges, and
-  `ALL_PRIVILEGES` on one is not requestable. An unrecognised `table_type`
-  uses the union of every variant. Revoking a privilege on a table or volume
+  `table_type` picks the privilege set. `MANAGED`, `EXTERNAL` and both shallow
+  clones use the table set. A view or metric view does not offer the table DML
+  privileges, and `ALL_PRIVILEGES` on one is not requestable. A `FOREIGN` table
+  is read-only and is not offered those DML privileges either. An unrecognised
+  `table_type` reports the union of every variant, and `REFRESH` in that union
+  is not requestable. Revoking a privilege on a table or volume
   Databricks reports as `TABLE_DOES_NOT_EXIST`, `VOLUME_DOES_NOT_EXIST`,
   `SCHEMA_DOES_NOT_EXIST` or `CATALOG_DOES_NOT_EXIST` returns
   `GrantAlreadyRevoked`. A 404 with any other error code still fails.
