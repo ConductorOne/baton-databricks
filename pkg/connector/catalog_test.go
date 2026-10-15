@@ -38,6 +38,10 @@ type fakeCatalogAccount struct {
 	unbound []map[string]any
 	// manage names the catalogs the connector principal holds MANAGE on.
 	manage map[string]bool
+	// permissionStatus fails a catalog's permissions read with that status.
+	permissionStatus map[string]int
+	// permissionErrorCode is the Databricks error_code on that failed read.
+	permissionErrorCode map[string]string
 	// workspaceAdmins names workspace ids where the connector principal is a direct Admin.
 	workspaceAdmins map[string]bool
 
@@ -145,6 +149,14 @@ func (f *fakeCatalogAccount) handler(t *testing.T) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": all[start : start+size], "next_page_token": next})
 		case strings.Contains(path, "/unity-catalog/permissions/catalog/"):
 			name := path[strings.LastIndex(path, "/")+1:]
+			if code, ok := f.permissionStatus[name]; ok {
+				body := `{"message":"nope"}`
+				if errorCode := f.permissionErrorCode[name]; errorCode != "" {
+					body = fmt.Sprintf(`{"error_code":%q,"message":"nope"}`, errorCode)
+				}
+				http.Error(w, body, code)
+				return
+			}
 			if r.Method == http.MethodPatch {
 				f.patches++
 				body, _ := io.ReadAll(r.Body)
@@ -543,8 +555,9 @@ func TestACatalogOnlyAnOutOfScopeWorkspaceListsIsNotSynced(t *testing.T) {
 // Emitting what the other workspaces list would read as deleting the rest.
 func TestAnUnreadableCatalogListingFailsInsteadOfEmittingAShortList(t *testing.T) {
 	f := &fakeCatalogAccount{
-		attached: []int{1, 2},
-		listed:   map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
+		metastoreOwner: "app-1",
+		attached:       []int{1, 2},
+		listed:         map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
 		listStatus: map[string]int{
 			"wsb": http.StatusForbidden,
 		},
@@ -595,9 +608,10 @@ func TestCatalogGrantsNeedOwnershipOrManage(t *testing.T) {
 	}
 }
 
-// A catalog the connector cannot fully read is left out of the sync. Emitting it
-// with the partial grant list would read as revoking every grant it cannot see.
-func TestACatalogWithoutFullGrantVisibilityIsNotSynced(t *testing.T) {
+// A catalog the connector cannot fully read fails the sync. Omitting it would
+// delete the catalog in ConductorOne, and emitting the partial grant list would
+// revoke every grant the principal cannot see.
+func TestACatalogWithoutFullGrantVisibilityFailsTheSync(t *testing.T) {
 	f := &fakeCatalogAccount{
 		metastoreOwner: "someone",
 		attached:       []int{1},
@@ -605,13 +619,67 @@ func TestACatalogWithoutFullGrantVisibilityIsNotSynced(t *testing.T) {
 	}
 	b := newFakeCatalogBuilder(t, f, nil)
 
-	resources, err := listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List: %v", err)
+	_, err := listAllCatalogs(t, b)
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "hidden") || !strings.Contains(err.Error(), catalogTrustRemedy) {
+		t.Fatalf("List = %v, want PermissionDenied naming hidden and the remedy", err)
 	}
-	if len(resources) != 0 {
-		t.Fatalf("listed %d catalogs, want none", len(resources))
-	}
+}
+
+// A catalog that vanishes between the listing and the visibility check is left
+// off the page. A 404 that is not CATALOG_DOES_NOT_EXIST fails the sync, and it
+// must not come back as NotFound or the SDK drops the whole page.
+func TestACatalogPermissions404IsAbsenceOnlyWithTheGoneCode(t *testing.T) {
+	t.Run("gone", func(t *testing.T) {
+		f := &fakeCatalogAccount{
+			metastoreOwner: "someone",
+			attached:       []int{1},
+			listed: map[string][]map[string]any{"wsa": {
+				catalogEntry("gone", "someone"),
+				catalogEntry("kept", "app-1"),
+			}},
+			permissionStatus:    map[string]int{"gone": http.StatusNotFound},
+			permissionErrorCode: map[string]string{"gone": databricks.ErrorCodeCatalogDoesNotExist},
+		}
+		b := newFakeCatalogBuilder(t, f, nil)
+
+		resources, err := listAllCatalogs(t, b)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(resources) != 1 || resources[0].GetDisplayName() != "kept" {
+			t.Fatalf("listed %v, want only kept", resources)
+		}
+	})
+
+	t.Run("not an absence", func(t *testing.T) {
+		f := &fakeCatalogAccount{
+			metastoreOwner:   "someone",
+			attached:         []int{1},
+			listed:           map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
+			permissionStatus: map[string]int{"main": http.StatusNotFound},
+		}
+		b := newFakeCatalogBuilder(t, f, nil)
+
+		_, err := listAllCatalogs(t, b)
+		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "main") {
+			t.Fatalf("List = %v, want FailedPrecondition naming main", err)
+		}
+	})
+
+	t.Run("forbidden keeps its code", func(t *testing.T) {
+		f := &fakeCatalogAccount{
+			metastoreOwner:   "someone",
+			attached:         []int{1},
+			listed:           map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
+			permissionStatus: map[string]int{"main": http.StatusForbidden},
+		}
+		b := newFakeCatalogBuilder(t, f, nil)
+
+		_, err := listAllCatalogs(t, b)
+		if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "main") {
+			t.Fatalf("List = %v, want PermissionDenied naming main", err)
+		}
+	})
 }
 
 // A direct Admin of a workspace sees every grant on a catalog that workspace's
@@ -635,12 +703,9 @@ func TestWorkspaceAdminsGroupOwnershipTrustsADirectAdmin(t *testing.T) {
 
 	f.workspaceAdmins = nil
 	b = newFakeCatalogBuilder(t, f, nil)
-	resources, err = listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List without admin: %v", err)
-	}
-	if len(resources) != 0 {
-		t.Fatalf("listed %d catalogs without workspace Admin, want none", len(resources))
+	_, err = listAllCatalogs(t, b)
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "main") {
+		t.Fatalf("List without admin = %v, want PermissionDenied naming main", err)
 	}
 }
 

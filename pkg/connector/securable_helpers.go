@@ -448,6 +448,20 @@ func readProfileRoute(resource *v2.Resource) profileRoute {
 	}
 }
 
+// profileRouteAllowed reports whether the profile workspace is still one this
+// sync is allowed to read through.
+func profileRouteAllowed(uc *unityCatalog, route profileRoute) bool {
+	if route.workspace == "" || route.workspaceID == "" {
+		return false
+	}
+	if len(uc.workspaces) == 0 {
+		return true
+	}
+	_, ok := matchConfiguredWorkspace(uc.workspaces, route.workspace, route.workspaceName, route.workspaceID)
+
+	return ok
+}
+
 // profileWorkspace reports false whenever the profile workspace cannot be used
 // as is, so the caller rebuilds the routing instead. Only a rate limit or a
 // cancelled context is returned: retrying elsewhere would not help either.
@@ -457,13 +471,8 @@ func (d *securableDeps) profileWorkspace(
 	route profileRoute,
 	probe workspaceProbe,
 ) (string, bool, *v2.RateLimitDescription, error) {
-	if route.workspace == "" || route.workspaceID == "" {
+	if !profileRouteAllowed(d.uc, route) {
 		return "", false, nil, nil
-	}
-	if len(d.uc.workspaces) > 0 {
-		if _, ok := matchConfiguredWorkspace(d.uc.workspaces, route.workspace, route.workspaceName, route.workspaceID); !ok {
-			return "", false, nil, nil
-		}
 	}
 
 	trustworthy, rateLimit, err := probe(ctx, route.workspace)

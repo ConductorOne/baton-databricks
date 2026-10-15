@@ -107,13 +107,16 @@ assigned Admin directly on the workspace. Workspace Admin does not open a
 catalog owned by anyone else. `ALL_PRIVILEGES` does not count either: it
 excludes `MANAGE`.
 
-A catalog that meets none of these is not synced. Databricks answers an
-under-permissioned privilege read with HTTP 200 and a partial list of privilege
-assignments, which is byte-indistinguishable from an object that genuinely has
-no grants on it. Reporting that partial list would make ConductorOne read every
-privilege the principal cannot see as revoked access. A metastore that fails
-the same check still fails the sync: leaving it out would delete it in
-ConductorOne, and there is no narrower object to skip.
+A catalog that meets none of these fails the catalog sync with
+`PermissionDenied` naming the catalog, and ConductorOne does not remove it.
+Databricks answers an under-permissioned privilege read with HTTP 200 and a
+partial list of privilege assignments, which is byte-indistinguishable from an
+object that genuinely has no grants on it. Reporting that partial list would
+make ConductorOne revoke every privilege the principal cannot see. Leaving the
+catalog out would delete it and its grants. A catalog that disappears between
+the listing and this check (`CATALOG_DOES_NOT_EXIST`) is left off that page.
+Any other permissions 404 fails the sync with `FailedPrecondition`: a
+`NotFound` on the page would drop the other catalogs listed with it.
 
 ## Limitations
 

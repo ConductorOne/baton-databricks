@@ -79,6 +79,11 @@ func (u *unityCatalog) catalogGrantsAreTrustworthy(
 
 // workspaceAdminsGroupOwns reports whether owner is the system group Databricks
 // creates for a workspace, named _workspace_admins_<workspace>_<workspace id>.
+// That group is the default owner of the workspace catalog, and the owner of an
+// object sees every grant on it. A direct Admin of the workspace is treated as
+// a member of the group. Group membership itself is not listed.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
 func workspaceAdminsGroupOwns(owner, workspaceID string) bool {
 	if owner == "" || workspaceID == "" {
 		return false

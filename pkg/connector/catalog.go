@@ -14,6 +14,7 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -283,15 +284,29 @@ func pageCatalogs(
 			rateLimit = trustRateLimit
 		}
 		if err != nil {
-			return nil, "", rateLimit, fmt.Errorf("failed to confirm grant visibility for catalog %s: %w", catalog.Name, err)
+			// CATALOG_DOES_NOT_EXIST is this catalog disappearing between the
+			// listing and the probe. Any other 404 must not leave List as
+			// NotFound: the SDK would skip the page and drop the catalogs on it.
+			if databricks.IsSecurableGone(err, databricks.ErrorCodeCatalogDoesNotExist) {
+				ctxzap.Extract(ctx).Debug("databricks-connector: catalog is gone; skipping it",
+					zap.String("catalog", catalog.Name),
+				)
+
+				continue
+			}
+			if isNotFoundError(err) {
+				return nil, "", rateLimit, uhttp.WrapErrors(codes.FailedPrecondition,
+					fmt.Sprintf("databricks-connector: permissions on catalog %s returned 404 without %s, so this is not an absence",
+						catalog.Name, databricks.ErrorCodeCatalogDoesNotExist),
+					err)
+			}
+
+			return nil, "", rateLimit, fmt.Errorf(
+				"databricks-connector: failed to confirm grant visibility for catalog %s: %w", catalog.Name, err)
 		}
 		if !trusted {
-			ctxzap.Extract(ctx).Debug(
-				"databricks-connector: catalog grants are not fully visible; skipping the catalog",
-				zap.String("catalog", catalog.Name),
-				zap.String("workspace", current.Workspace),
-			)
-			continue
+			return nil, "", rateLimit, status.Errorf(codes.PermissionDenied,
+				"databricks-connector: cannot read every grant on catalog %s: %s", catalog.Name, catalogTrustRemedy)
 		}
 
 		items = append(items, securable{
