@@ -31,6 +31,7 @@ const (
 	// uppercase securable_type a listed securable carries. A metastore is
 	// addressed by its UUID: its name is rejected.
 	SecurableMetastore = "metastore"
+	SecurableCatalog   = "catalog"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
@@ -111,9 +112,9 @@ func listSecurables[R any, T any](
 	return items, nextPageToken, ratelimitData, nil
 }
 
-// listCatalogs (GET /api/2.1/unity-catalog/catalogs) pages the catalogs of the
-// metastore attached to workspaceId, which is a deployment name.
-func (c *Client) listCatalogs(
+// ListCatalogs (GET /api/2.1/unity-catalog/catalogs) reads one page of the catalogs
+// of the metastore attached to workspaceId, which is a deployment name.
+func (c *Client) ListCatalogs(
 	ctx context.Context,
 	workspaceId, pageToken string,
 	maxResults uint,
@@ -136,16 +137,48 @@ func (c *Client) listCatalogs(
 	return catalogs, next, ratelimitData, nil
 }
 
-// ForEachCatalogPage walks listCatalogs without retaining the pages.
-func (c *Client) ForEachCatalogPage(
+// DrainCatalogs walks ListCatalogs to exhaustion.
+func (c *Client) DrainCatalogs(
 	ctx context.Context,
 	workspaceId string,
 	maxResults uint,
-	visit func([]Catalog) (bool, error),
-) (*v2.RateLimitDescription, error) {
-	return forEachPageFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
-		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults)
-	}, visit)
+) (
+	[]Catalog,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return drainPagesFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
+		return c.ListCatalogs(ctx, workspaceId, pageToken, maxResults)
+	})
+}
+
+// DrainUnboundCatalogs lists every catalog of the metastore, including those not
+// bound to workspaceId. Databricks honours include_unbound only for a caller that
+// can update catalog bindings and otherwise answers as if it were absent. It reads
+// past the cache because it decides whether a Revoke may report the catalog gone.
+func (c *Client) DrainUnboundCatalogs(
+	ctx context.Context,
+	workspaceId string,
+	maxResults uint,
+) (
+	[]Catalog,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return drainPagesFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
+		var res catalogsResponse
+		u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogCatalogsEndpoint)
+		ratelimitData, err := c.GetUncached(ctx, u, &res, &unityCatalogVars{
+			maxResults:     &maxResults,
+			pageToken:      pageToken,
+			includeUnbound: true,
+		})
+		if err != nil {
+			return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to list unbound catalogs: %w", err))
+		}
+
+		return res.Catalogs, res.NextPageToken, ratelimitData, nil
+	})
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).
@@ -202,26 +235,10 @@ func (c *Client) listPermissions(
 	return res.PrivilegeAssignments, res.NextPageToken, ratelimitData, nil
 }
 
-// DrainPermissions walks ListPermissions to exhaustion for every principal,
-// bypassing the response cache. Its only caller is the pre-read that decides
-// whether a Grant still has to PATCH, and that decision is wrong when it is made
-// against a page the cache has been holding since before the last change.
-func (c *Client) DrainPermissions(
-	ctx context.Context,
-	workspaceId, securableType, fullName string,
-) (
-	[]PrivilegeAssignment,
-	*v2.RateLimitDescription,
-	error,
-) {
-	return drainPagesFrom(ctx, "", func(pageToken string) ([]PrivilegeAssignment, string, *v2.RateLimitDescription, error) {
-		return c.listPermissions(ctx, workspaceId, securableType, fullName, "", pageToken, true)
-	})
-}
-
 // ForEachUncachedPermissionsPage walks ListPermissions past the cache, without
-// retaining the pages, for the pre-read that decides whether a Revoke still has
-// to PATCH. See DrainPermissions.
+// retaining the pages. It is the pre-read that decides whether a Grant or Revoke
+// still has to PATCH, and that decision is wrong when it is made against a page
+// the cache has held since before the last change.
 func (c *Client) ForEachUncachedPermissionsPage(
 	ctx context.Context,
 	workspaceId, securableType, fullName, principal string,

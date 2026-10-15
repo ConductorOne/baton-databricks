@@ -22,6 +22,11 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+	principals := syncPrincipals{
+		groups:            d.willSyncResourceType(groupResourceType.Id),
+		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
+	}
+
 	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
@@ -29,10 +34,8 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.unityCatalog, syncPrincipals{
-			groups:            d.willSyncResourceType(groupResourceType.Id),
-			servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
-		}),
+		newMetastoreBuilder(d.client, d.unityCatalog, principals),
+		newCatalogBuilder(d.client, d.unityCatalog, principals),
 	}
 }
 
@@ -56,7 +59,7 @@ func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton, " +
-			"along with Unity Catalog metastores and the privileges granted on them",
+			"along with Unity Catalog data assets — metastores and catalogs — and the privileges granted on them",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"email": {

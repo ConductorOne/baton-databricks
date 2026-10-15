@@ -229,7 +229,7 @@ func TestAMetastoreOnlyAnOutOfScopeWorkspaceReachesIsAbsentRatherThanFatal(t *te
 	if err != nil {
 		t.Fatalf("resolving the out-of-scope metastore errored instead of reporting it out of scope: %v", err)
 	}
-	if state != metastoreOutOfScope || len(workspaces) != 0 {
+	if state != securableOutOfScope || len(workspaces) != 0 {
 		t.Errorf("ms-b resolved to workspaces %v (state=%v), want out of scope", workspaces, state)
 	}
 }

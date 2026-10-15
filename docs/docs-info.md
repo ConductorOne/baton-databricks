@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs Unity Catalog metastores. That resource type is opt-in — it stays off until it is enabled per resource type in ConductorOne.
+   > It also syncs Unity Catalog metastores and catalogs. Both resource types are opt-in — each stays off until it is enabled per resource type in ConductorOne.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a metastore privilege for a user, group or service principal. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a metastore or catalog privilege for a user, group or service principal. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
 
 ## Connector credentials
 
@@ -40,7 +40,7 @@ While developing the connector, please fill out this form. This information is n
      >
      > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing). The scope-by-scope breakdown is in `## Permission model` below.
      >
-     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. `## Permission model` explains why neither is optional.
+     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. A catalog is synced only when the service principal owns the metastore, owns the catalog, holds `MANAGE` on the catalog, or is a direct Admin of the workspace whose admins group owns it. A catalog that does not meet that fails the catalog sync with `PermissionDenied`, and ConductorOne does not remove it. `## Permission model` explains why.
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
@@ -52,13 +52,14 @@ While developing the connector, please fill out this form. This information is n
 
 ## Unity Catalog API
 
-A metastore lives on the account plane, but its privileges are read through a
-workspace host assigned to it.
+A metastore lives on the account plane, but every securable below it is reached
+through a workspace host assigned to that metastore.
 
 | Level | Endpoint |
 |-------|----------|
 | Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
 | Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
+| Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 - **HTTP cache keys include the request Host.** Two workspaces share paths such
@@ -78,7 +79,7 @@ The scopes:
 
 | Scope | Covers |
 |-------|--------|
-| `unity-catalog` | Metastores, metastore workspace assignments, and the permissions endpoint |
+| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, and the permissions endpoint |
 | `scim` | Account users, groups and service principals |
 | `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
 | `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
@@ -98,12 +99,24 @@ Holding a privilege is not an option at this level: Databricks rejects `MANAGE`
 and `ALL_PRIVILEGES` on a metastore, so there is no privilege whose presence
 would prove the read is complete.
 
-When neither holds, the connector fails the sync rather than reporting what
-it can see. Databricks answers an under-permissioned privilege read with HTTP
-200 and a partial list of privilege assignments, which is byte-indistinguishable
-from an object that genuinely has no grants on it. Reporting that partial list
-would make ConductorOne read every privilege the principal cannot see as revoked
-access.
+For a catalog, the read is trustworthy when the service principal owns the
+metastore, owns the catalog, or holds `MANAGE` on it. It is also trustworthy
+when the catalog owner is that workspace's admins group
+(`_workspace_admins_<workspace>_<workspace id>`) and the service principal is
+assigned Admin directly on the workspace. Workspace Admin does not open a
+catalog owned by anyone else. `ALL_PRIVILEGES` does not count either: it
+excludes `MANAGE`.
+
+A catalog that meets none of these fails the catalog sync with
+`PermissionDenied` naming the catalog, and ConductorOne does not remove it.
+Databricks answers an under-permissioned privilege read with HTTP 200 and a
+partial list of privilege assignments, which is byte-indistinguishable from an
+object that genuinely has no grants on it. Reporting that partial list would
+make ConductorOne revoke every privilege the principal cannot see. Leaving the
+catalog out would delete it and its grants. A catalog that disappears between
+the listing and this check (`CATALOG_DOES_NOT_EXIST`) is left off that page.
+Any other permissions 404 fails the sync with `FailedPrecondition`: a
+`NotFound` on the page would drop the other catalogs listed with it.
 
 ## Limitations
 
@@ -116,8 +129,8 @@ access.
   service principal's application ID or its own SCIM id against the workspace's
   ADMIN assignments. Admin inherited only through a group is not treated as
   enough.
-- **Ownership is read-only.** The owner of a metastore is shown but cannot be
-  provisioned. An owner that is not an account identity — `System user`, or a
+- **Ownership is read-only.** The owner of a metastore or catalog is shown but
+  cannot be provisioned. An owner that is not an account identity — `System user`, or a
   workspace admins group such as `_workspace_admins_<workspace_id>` — does not
   resolve, and no owner grant is emitted for it.
 - **`MANAGE` and `ALL_PRIVILEGES` do not exist at the metastore level** —
@@ -142,7 +155,16 @@ access.
 - **Admin on any attached workspace is enough.** The connector tries each
   attached workspace in turn and reads through the first one where it holds
   Admin directly.
-- **Other securables are not synced yet:** catalogs, schemas, tables, volumes,
+- **A catalog is synced when a workspace in the sync lists it.** An `ISOLATED`
+  catalog is listed only by the workspaces bound to it, so one bound only to
+  workspaces outside the sync is not synced. If a synced workspace cannot list
+  catalogs, the catalog sync for that metastore fails rather than reporting a
+  short list.
+- **Revoking on a catalog no synced workspace lists** reports it already revoked
+  only when the connector can prove it was deleted. That proof needs the
+  service principal to own the metastore. Otherwise the revoke fails with
+  `FailedPrecondition` and changes nothing.
+- **Other securables are not synced yet:** schemas, tables, volumes,
   functions, registered models, external locations, storage credentials,
   connections, shares and Delta Sharing recipients.
 - **Tags are not synced**, including the `SYSTEM.TEAM` convention some customers

@@ -18,14 +18,20 @@ import (
 
 const (
 	securableTypeMetastore = "METASTORE"
+	securableTypeCatalog   = "CATALOG"
 
-	profileKeyMetastoreID   = "metastore_id"
-	profileKeyOwner         = "owner"
-	profileKeySecurableType = "securable_type"
-	profileKeyRegion        = "region"
-	profileKeyWorkspace     = "workspace"
-	profileKeyWorkspaceID   = "workspace_id"
-	profileKeyWorkspaceName = "workspace_name"
+	profileKeyMetastoreID    = "metastore_id"
+	profileKeyMetastoreOwner = "metastore_owner"
+	profileKeyFullName       = "full_name"
+	profileKeyOwner          = "owner"
+	profileKeySecurableType  = "securable_type"
+	profileKeyCatalogName    = "catalog_name"
+	profileKeyCatalogType    = "catalog_type"
+	profileKeyIsolationMode  = "isolation_mode"
+	profileKeyRegion         = "region"
+	profileKeyWorkspace      = "workspace"
+	profileKeyWorkspaceID    = "workspace_id"
+	profileKeyWorkspaceName  = "workspace_name"
 
 	// Not a dot: a securable's full name is already dot-separated.
 	securableKeySeparator = "::"
@@ -83,6 +89,75 @@ func (r securableRef) resourceKey() string {
 	return r.metastoreID + securableKeySeparator + r.fullName()
 }
 
+// parseSecurableRef reads a securable resource id, "{metastore_id}::{full_name}".
+func parseSecurableRef(resourceID string) (securableRef, error) {
+	metastoreID, fullName, ok := strings.Cut(resourceID, securableKeySeparator)
+	if !ok || metastoreID == "" || fullName == "" {
+		return securableRef{}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid securable resource id %q", resourceID)
+	}
+
+	return securableRef{metastoreID: metastoreID, parts: strings.Split(fullName, ".")}, nil
+}
+
+func (r securableRef) catalog() string {
+	return r.part(0)
+}
+
+func (r securableRef) part(i int) string {
+	if i < len(r.parts) {
+		return r.parts[i]
+	}
+
+	return ""
+}
+
+func (r securableRef) child(name string) securableRef {
+	return securableRef{metastoreID: r.metastoreID, parts: append(slices.Clone(r.parts), name)}
+}
+
+// securable is one row of a child listing, before it becomes a resource.
+type securable struct {
+	name    string
+	owner   string
+	profile map[string]any
+}
+
+// RawId equals the resource id: C1 matches preloaded resources on that annotation.
+func newSecurableResource(
+	resourceType *v2.ResourceType,
+	securableTypeEnum string,
+	childTypes []*v2.ResourceType,
+	item securable,
+	ref securableRef,
+	parent *v2.ResourceId,
+) (*v2.Resource, error) {
+	profile := map[string]any{
+		profileKeyMetastoreID:   ref.metastoreID,
+		profileKeyFullName:      ref.fullName(),
+		profileKeyOwner:         item.owner,
+		profileKeySecurableType: securableTypeEnum,
+	}
+	for key, value := range item.profile {
+		profile[key] = value
+	}
+
+	resourceKey := ref.resourceKey()
+	options := []rs.ResourceOption{
+		rs.WithResourceProfile(profile),
+		rs.WithParentResourceID(parent),
+		rs.WithAnnotation(&v2.RawId{Id: resourceKey}),
+	}
+
+	for _, childType := range childTypes {
+		// Without this annotation the child's List is never invoked.
+		options = append(options, rs.WithAnnotation(&v2.ChildResourceType{ResourceTypeId: childType.Id}))
+	}
+
+	// The display name is the full name rather than the leaf: main.sales.orders and
+	// main.finance.orders would otherwise be two rows reading "orders" in C1.
+	return rs.NewAppResource(ref.fullName(), resourceType, resourceKey, nil, options...)
+}
+
 // securableDeps is the client state every Unity Catalog builder shares.
 type securableDeps struct {
 	client *databricks.Client
@@ -96,6 +171,11 @@ type securableKind struct {
 	name       string
 	parse      func(string) (securableRef, error)
 	privileges []string
+	// writeRemedy is what a 403 on the PATCH tells the operator.
+	writeRemedy string
+	// access resolves the workspace a write goes through, confirmed against
+	// Databricks rather than the profile.
+	access func(ctx context.Context, d *securableDeps, resource *v2.Resource, ref securableRef) (string, accessState, *v2.RateLimitDescription, error)
 }
 
 type changeMode int
@@ -204,9 +284,9 @@ func (d *securableDeps) resolveSecurableChange(
 			privilege, kind.name, ref.permissionsName())
 	}
 
-	// The profile was written by the last sync, and the metastore may have been
+	// The profile was written by the last sync, and the securable may have been
 	// deleted since: a write must confirm it is still listed before addressing it.
-	workspace, state, rateLimit, err := d.accessPath(ctx, entitlement.GetResource(), ref, true)
+	workspace, state, rateLimit, err := kind.access(ctx, d, entitlement.GetResource(), ref)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
 		if status.Code(err) == codes.PermissionDenied {
@@ -216,7 +296,7 @@ func (d *securableDeps) resolveSecurableChange(
 		return securableChange{}, annos, true, fmt.Errorf("databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
 	}
 	switch state {
-	case metastoreGone:
+	case securableGone:
 		if mode == changeRevoke {
 			annos.Update(&v2.GrantAlreadyRevoked{})
 			return securableChange{}, annos, true, nil
@@ -224,13 +304,13 @@ func (d *securableDeps) resolveSecurableChange(
 
 		return securableChange{}, annos, true, status.Errorf(codes.NotFound,
 			"databricks-connector: %s %s no longer exists in Databricks, so it cannot be changed", kind.name, ref.permissionsName())
-	case metastoreOutOfScope:
-		// The metastore still holds its privileges, so a revoke cannot be reported done.
+	case securableOutOfScope:
+		// The securable still holds its privileges, so a revoke cannot be reported done.
 		return securableChange{}, annos, true, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: %s %s cannot be changed: no workspace this sync can use is attached to it — every attached one is "+
-				"left out of workspaces or named in databricks-exclude-workspaces, or none is assigned — so it is outside the sync scope",
+			"databricks-connector: %s %s cannot be changed: no workspace this sync can use reaches it — every one that could is "+
+				"left out of workspaces or named in databricks-exclude-workspaces, or none is attached — so it is outside the sync scope",
 			kind.name, ref.permissionsName())
-	case metastoreInScope:
+	case securableInScope:
 	}
 
 	scimID, err := unityPrincipalScimID(principalID)
@@ -269,39 +349,72 @@ func (d *securableDeps) accessPath(
 	resource *v2.Resource,
 	ref securableRef,
 	confirm bool,
-) (string, metastoreState, *v2.RateLimitDescription, error) {
+) (string, accessState, *v2.RateLimitDescription, error) {
 	if !confirm {
-		workspace, ok, rateLimit, err := d.profileWorkspace(ctx, resource, ref)
+		route := readProfileRoute(resource)
+		snap := profileRoutingSnapshot(ref.metastoreID, route.workspace, route.workspaceID, route.owner)
+		workspace, ok, rateLimit, err := d.profileWorkspace(ctx, ref, route, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
+			return d.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
+		})
 		if err != nil {
-			return "", metastoreInScope, rateLimit, err
+			return "", securableInScope, rateLimit, err
 		}
 		if ok {
-			return workspace, metastoreInScope, rateLimit, nil
+			return workspace, securableInScope, rateLimit, nil
 		}
 	}
 
 	snap, rateLimit, err := d.uc.buildRouting(ctx)
 	if err != nil {
-		return "", metastoreInScope, rateLimit, err
+		return "", securableInScope, rateLimit, err
 	}
 	workspaces, state, err := usableWorkspaces(snap, ref.metastoreID)
-	if err != nil || state != metastoreInScope {
+	if err != nil || state != securableInScope {
 		return "", state, rateLimit, err
 	}
 
-	// Admin on any one attached workspace is enough, and ListWorkspaces order says
-	// nothing about which one that is, so every usable workspace is tried.
+	workspace, probeRateLimit, err := firstTrustedWorkspace(ctx, ref, workspaces, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
+		return d.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
+	})
+	if probeRateLimit != nil {
+		rateLimit = probeRateLimit
+	}
+	if err != nil {
+		return "", securableInScope, rateLimit, err
+	}
+	if workspace == "" {
+		return "", securableInScope, rateLimit, status.Errorf(codes.PermissionDenied,
+			"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
+			ref.metastoreID)
+	}
+
+	return workspace, securableInScope, rateLimit, nil
+}
+
+// workspaceProbe reports whether every grant on a securable is visible through workspace.
+type workspaceProbe func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error)
+
+// firstTrustedWorkspace returns the first workspace whose probe passes, or "" when
+// none does. Visibility through any one workspace is enough, and the listing order
+// says nothing about which one that is. A workspace that refuses the probe is skipped.
+func firstTrustedWorkspace(
+	ctx context.Context,
+	ref securableRef,
+	workspaces []string,
+	probe workspaceProbe,
+) (string, *v2.RateLimitDescription, error) {
+	var rateLimit *v2.RateLimitDescription
 	for _, workspace := range workspaces {
-		trustworthy, probeRateLimit, err := d.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
+		trustworthy, probeRateLimit, err := probe(ctx, workspace)
 		if probeRateLimit != nil {
 			rateLimit = probeRateLimit
 		}
 		if err != nil {
 			if ctx.Err() != nil || !isUnreadableWorkspaceError(err) {
-				return "", metastoreInScope, rateLimit, err
+				return "", rateLimit, err
 			}
-			ctxzap.Extract(ctx).Debug("databricks-connector: could not read the permission assignments of an attached workspace; trying the next one",
-				zap.String("metastore", ref.metastoreID),
+			ctxzap.Extract(ctx).Debug("databricks-connector: the visibility probe was refused through this workspace; trying the next one",
+				zap.String("securable", ref.resourceKey()),
 				zap.String("workspace", workspace),
 				zap.Error(err),
 			)
@@ -309,13 +422,44 @@ func (d *securableDeps) accessPath(
 			continue
 		}
 		if trustworthy {
-			return workspace, metastoreInScope, rateLimit, nil
+			return workspace, rateLimit, nil
 		}
 	}
 
-	return "", metastoreInScope, rateLimit, status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot read every grant on metastore %s: the connector principal must own the metastore or be assigned Admin directly on a workspace attached to it",
-		ref.metastoreID)
+	return "", rateLimit, nil
+}
+
+// profileRoute is the access path the last sync wrote on a securable's profile.
+type profileRoute struct {
+	workspace      string
+	workspaceID    string
+	workspaceName  string
+	owner          string
+	metastoreOwner string
+}
+
+func readProfileRoute(resource *v2.Resource) profileRoute {
+	return profileRoute{
+		workspace:      profileString(resource, profileKeyWorkspace),
+		workspaceID:    profileString(resource, profileKeyWorkspaceID),
+		workspaceName:  profileString(resource, profileKeyWorkspaceName),
+		owner:          profileString(resource, profileKeyOwner),
+		metastoreOwner: profileString(resource, profileKeyMetastoreOwner),
+	}
+}
+
+// profileRouteAllowed reports whether the profile workspace is still one this
+// sync is allowed to read through.
+func profileRouteAllowed(uc *unityCatalog, route profileRoute) bool {
+	if route.workspace == "" || route.workspaceID == "" {
+		return false
+	}
+	if len(uc.workspaces) == 0 {
+		return true
+	}
+	_, ok := matchConfiguredWorkspace(uc.workspaces, route.workspace, route.workspaceName, route.workspaceID)
+
+	return ok
 }
 
 // profileWorkspace reports false whenever the profile workspace cannot be used
@@ -323,48 +467,34 @@ func (d *securableDeps) accessPath(
 // cancelled context is returned: retrying elsewhere would not help either.
 func (d *securableDeps) profileWorkspace(
 	ctx context.Context,
-	resource *v2.Resource,
 	ref securableRef,
+	route profileRoute,
+	probe workspaceProbe,
 ) (string, bool, *v2.RateLimitDescription, error) {
-	workspace, workspaceID, workspaceName, owner := profileAccessPath(resource)
-	if workspace == "" || workspaceID == "" {
+	if !profileRouteAllowed(d.uc, route) {
 		return "", false, nil, nil
 	}
-	if len(d.uc.workspaces) > 0 {
-		if _, ok := matchConfiguredWorkspace(d.uc.workspaces, workspace, workspaceName, workspaceID); !ok {
-			return "", false, nil, nil
-		}
-	}
 
-	snap := profileRoutingSnapshot(ref.metastoreID, workspace, workspaceID, owner)
-	trustworthy, rateLimit, err := d.uc.metastoreGrantsAreTrustworthy(ctx, snap, ref.metastoreID, workspace)
+	trustworthy, rateLimit, err := probe(ctx, route.workspace)
 	if err != nil {
 		if ctx.Err() != nil || isRateLimitError(err) {
 			return "", false, rateLimit, err
 		}
-		ctxzap.Extract(ctx).Debug("databricks-connector: the workspace on the metastore profile did not answer; rebuilding the routing",
-			zap.String("metastore", ref.metastoreID),
-			zap.String("workspace", workspace),
+		ctxzap.Extract(ctx).Debug("databricks-connector: the workspace on the profile did not answer; rebuilding the routing",
+			zap.String("securable", ref.resourceKey()),
+			zap.String("workspace", route.workspace),
 			zap.Error(err),
 		)
 
 		return "", false, rateLimit, nil
 	}
 
-	return workspace, trustworthy, rateLimit, nil
+	return route.workspace, trustworthy, rateLimit, nil
 }
 
-func profileAccessPath(resource *v2.Resource) (string, string, string, string) {
-	if resource == nil {
-		return "", "", "", ""
-	}
-	profile := rs.GetProfile(resource)
-	workspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
-	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
-	workspaceName, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceName)
-	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
-
-	return workspace, workspaceID, workspaceName, owner
+func profileString(resource *v2.Resource, key string) string {
+	value, _ := rs.GetProfileStringValue(rs.GetProfile(resource), key)
+	return value
 }
 
 func profileRoutingSnapshot(metastoreID, workspace, workspaceID, owner string) routingSnapshot {

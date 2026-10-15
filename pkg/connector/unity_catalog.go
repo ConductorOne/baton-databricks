@@ -44,16 +44,16 @@ type routingSnapshot struct {
 	pruned map[string]struct{}
 }
 
-// metastoreState is where a metastore stands in a routing snapshot.
-type metastoreState int
+// accessState is where a securable stands against the sync scope.
+type accessState int
 
 const (
-	// metastoreGone is a metastore the account no longer lists.
-	metastoreGone metastoreState = iota
-	// metastoreInScope is listed and not pruned.
-	metastoreInScope
-	// metastoreOutOfScope is listed but pruned: no workspace this sync can use is attached.
-	metastoreOutOfScope
+	// securableGone no longer exists in Databricks.
+	securableGone accessState = iota
+	// securableInScope is reachable through a workspace this sync can use.
+	securableInScope
+	// securableOutOfScope still exists, but no workspace this sync can use reaches it.
+	securableOutOfScope
 )
 
 // unityCatalog holds no state beyond the client and the workspace filter: every
@@ -126,18 +126,18 @@ func allowlistMiss(u *unityCatalog) error {
 
 // usableWorkspaces returns workspaces only for an in-scope metastore. One that is
 // in scope but has no usable workspace yet fails with FailedPrecondition.
-func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, metastoreState, error) {
+func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, accessState, error) {
 	if workspaces := snap.workspaces[metastoreID]; len(workspaces) > 0 {
-		return workspaces, metastoreInScope, nil
+		return workspaces, securableInScope, nil
 	}
 	if _, ok := snap.pruned[metastoreID]; ok {
-		return nil, metastoreOutOfScope, nil
+		return nil, securableOutOfScope, nil
 	}
 	if _, ok := snap.metastores[metastoreID]; !ok {
-		return nil, metastoreGone, nil
+		return nil, securableGone, nil
 	}
 	if slices.Contains(snap.unreadable, metastoreID) {
-		return nil, metastoreInScope, status.Errorf(codes.FailedPrecondition,
+		return nil, securableInScope, status.Errorf(codes.FailedPrecondition,
 			"metastore %s exists on the account but its workspace assignment list could not be read, so the sync cannot tell which workspaces serve it",
 			metastoreID)
 	}
@@ -147,7 +147,7 @@ func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, metas
 		pending = fmt.Sprintf("; %d attached workspace(s) are not RUNNING: %s", len(waiting), strings.Join(waiting, ", "))
 	}
 
-	return nil, metastoreInScope, status.Errorf(codes.FailedPrecondition,
+	return nil, securableInScope, status.Errorf(codes.FailedPrecondition,
 		"metastore %s exists on the account but no workspace this sync can use is attached to it, so its securables cannot be read: "+
 			"every attached workspace is either left out of workspaces, named in databricks-exclude-workspaces, not RUNNING, "+
 			"or reports no metastore assignment%s",
