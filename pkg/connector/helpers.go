@@ -260,8 +260,9 @@ func isRateLimitError(err error) bool {
 }
 
 // isUnreadableWorkspaceError reports an answer that says this credential cannot
-// read this workspace, not a fact about the account. Only codes.NotFound is a
-// warning to the SDK; any other code fails the whole sync.
+// read this workspace, not a fact about the account. A 404 is included so the
+// caller tries the next workspace: returning it would surface as codes.NotFound,
+// and the SDK treats that as a warning and drops the grants.
 func isUnreadableWorkspaceError(err error) bool {
 	var apiErr *databricks.APIError
 	if !errors.As(err, &apiErr) {
@@ -269,7 +270,7 @@ func isUnreadableWorkspaceError(err error) bool {
 	}
 
 	switch apiErr.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
 		return true
 	default:
 		return false

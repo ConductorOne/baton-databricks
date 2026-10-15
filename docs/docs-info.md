@@ -40,7 +40,7 @@ While developing the connector, please fill out this form. This information is n
      >
      > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing). The scope-by-scope breakdown is in `## Permission model` below.
      >
-     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. A catalog is synced only when the service principal owns the metastore, owns the catalog, holds `MANAGE` on the catalog, or is a direct Admin of the workspace whose admins group owns it. A catalog that does not meet that is left out of the sync. `## Permission model` explains why.
+     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. A catalog is synced only when the service principal owns the metastore, owns the catalog, holds `MANAGE` on the catalog, or is a direct Admin of the workspace whose admins group owns it. A catalog that does not meet that fails the catalog sync with `PermissionDenied`, and ConductorOne does not remove it. `## Permission model` explains why.
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
@@ -58,7 +58,7 @@ through a workspace host assigned to that metastore.
 | Level | Endpoint |
 |-------|----------|
 | Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
-| Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
+| Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
 | Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
@@ -142,9 +142,16 @@ Any other permissions 404 fails the sync with `FailedPrecondition`: a
   ConductorOne removes it and its grants. Granting or revoking a privilege on
   such a metastore fails with `FailedPrecondition` and changes nothing in
   Databricks. An allowlist that matches no
-  workspace on the account fails the sync. While an attached in-scope workspace
-  is not `RUNNING`, or a metastore's workspace assignments cannot be read,
-  nothing is removed: that metastore fails the sync instead.
+  workspace on the account fails the whole sync, including users, groups,
+  service principals and workspaces. A name that is also in
+  `databricks-exclude-workspaces` is reported as excluded; a name Databricks
+  does not have is reported as not on the account. A workspace that is
+  `PROVISIONING` or `NOT_PROVISIONED` keeps its metastore, and that metastore's
+  grants fail until it is `RUNNING`. A workspace that is `FAILED` or `BANNED`
+  does not: when it is the only one attached, the metastore is left out of the
+  sync. While a metastore's workspace assignments cannot be read, nothing is
+  removed: that metastore fails the sync, and the error says the assignment
+  list could not be read.
 - **Admin on any attached workspace is enough.** The connector tries each
   attached workspace in turn and reads through the first one where it holds
   Admin directly.

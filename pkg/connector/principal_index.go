@@ -236,19 +236,21 @@ func (u *unityCatalog) lookupPrincipalByID(
 		return &v2.ResourceId{ResourceType: userResourceType.Id, Resource: user.ID}, rateLimit, nil
 	}
 
-	group, groupRateLimit, err := u.client.GetGroup(ctx, "", id)
+	// Account GET /Groups/{id} returns members. A filtered list with count 1
+	// answers the same question without pulling that list into the cache.
+	displayName, groupRateLimit, err := u.client.FindGroupDisplayName(ctx, "", id)
 	if groupRateLimit != nil {
 		rateLimit = groupRateLimit
 	}
-	if err != nil && !isNotFoundError(err) {
+	if err != nil {
 		return nil, rateLimit, fmt.Errorf("failed to resolve principal %s as a group: %w", id, err)
 	}
-	if err == nil && group != nil && group.ID != "" {
+	if displayName != "" {
 		accountResourceId, err := rs.NewResourceID(accountResourceType, u.client.GetAccountId())
 		if err != nil {
 			return nil, rateLimit, err
 		}
-		resourceId, err := rs.NewResourceID(groupResourceType, groupResourceId(ctx, group.ID, accountResourceId))
+		resourceId, err := rs.NewResourceID(groupResourceType, groupResourceId(ctx, id, accountResourceId))
 		if err != nil {
 			return nil, rateLimit, err
 		}
