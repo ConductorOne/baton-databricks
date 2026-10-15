@@ -77,6 +77,59 @@ func (u *unityCatalog) catalogGrantsAreTrustworthy(
 	return manageable, rateLimit, nil
 }
 
+// schemaListRemedy is what PermissionDenied on a schema listing tells the operator.
+const schemaListRemedy = "the connector principal must own the metastore or the catalog, or hold MANAGE, USE_SCHEMA, or ALL_PRIVILEGES on the catalog"
+
+// schemaListingIsComplete reports whether ListSchemas will return every schema
+// in the catalog. Measured on a workspace Admin that does not own the metastore:
+// the system catalog came back with 2 schemas instead of 15, and a catalog grant
+// of MANAGE alone (with no USE_SCHEMA) did list a schema owned by someone else.
+// Workspace Admin is not on this list.
+func (u *unityCatalog) schemaListingIsComplete(
+	ctx context.Context,
+	snap routingSnapshot,
+	metastoreOwner, catalogOwner, catalogName, workspace string,
+) (bool, *v2.RateLimitDescription, error) {
+	if u.ownsPrincipal(metastoreOwner) || u.ownsPrincipal(catalogOwner) {
+		return true, nil, nil
+	}
+	if workspaceAdminsGroupOwns(catalogOwner, snap.workspaceIDs[workspace]) {
+		admin, rateLimit, err := u.isWorkspaceAdmin(ctx, snap, workspace)
+		if err != nil || admin {
+			return admin, rateLimit, err
+		}
+	}
+
+	var complete bool
+	rateLimit, err := u.client.ForEachUncachedPermissionsPage(
+		ctx, workspace, databricks.SecurableCatalog, catalogName, u.ownPrincipal,
+		func(page []databricks.PrivilegeAssignment) (bool, error) {
+			if !holdsSchemaListingPrivilege(page) {
+				return false, nil
+			}
+			complete = true
+			return true, nil
+		})
+	if err != nil {
+		return false, rateLimit, err
+	}
+
+	return complete, rateLimit, nil
+}
+
+func holdsSchemaListingPrivilege(assignments []databricks.PrivilegeAssignment) bool {
+	for _, assignment := range assignments {
+		for _, privilege := range assignment.Privileges {
+			switch privilege {
+			case privilegeManage, "USE_SCHEMA", privilegeAllPrivileges:
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // workspaceAdminsGroupOwns reports whether owner is the system group Databricks
 // creates for a workspace, named _workspace_admins_<workspace>_<workspace id>.
 // That group is the default owner of the workspace catalog, and the owner of an

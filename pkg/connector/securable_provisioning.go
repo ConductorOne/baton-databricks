@@ -34,6 +34,10 @@ func (d *securableDeps) grantSecurable(
 	held, rateLimit, err := d.preReadHeld(ctx, change, kind, matchHeld)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if annos, done, goneErr := kind.whenGone(changeGrant, name, err, annos); done {
+			return annos, goneErr
+		}
+
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w", kind.name, name, err)
 	}
 
@@ -53,6 +57,9 @@ func (d *securableDeps) grantSecurable(
 		})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if annos, done, goneErr := kind.whenGone(changeGrant, name, err, annos); done {
+			return annos, goneErr
+		}
 		if isForbiddenError(err) {
 			return annos, uhttp.WrapErrors(codes.PermissionDenied,
 				fmt.Sprintf("databricks-connector: cannot grant %s on %s %s: %s", change.privilege, kind.name, name, kind.writeRemedy),
@@ -93,6 +100,10 @@ func (d *securableDeps) revokeSecurable(
 	readHeld, rateLimit, err := d.preReadHeld(ctx, change, kind, matchHeld)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if annos, done, goneErr := kind.whenGone(changeRevoke, name, err, annos); done {
+			return annos, goneErr
+		}
+
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w", kind.name, name, err)
 	}
 
@@ -113,6 +124,9 @@ func (d *securableDeps) revokeSecurable(
 	result, rateLimit, err := d.client.UpdatePermissions(ctx, change.workspace, kind.name, name, []databricks.PermissionsChange{removal})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		if annos, done, goneErr := kind.whenGone(changeRevoke, name, err, annos); done {
+			return annos, goneErr
+		}
 		if isForbiddenError(err) {
 			return annos, uhttp.WrapErrors(codes.PermissionDenied,
 				fmt.Sprintf("databricks-connector: cannot revoke %s on %s %s: %s", change.privilege, kind.name, name, kind.writeRemedy),
@@ -135,6 +149,28 @@ func (d *securableDeps) revokeSecurable(
 	}
 
 	return annos, nil
+}
+
+// whenGone maps a 404 whose error_code says this securable was deleted.
+// Revoke reports the grant already gone. Grant reports NotFound. Any other
+// error, including a route-level 404, is left for the caller.
+func (kind securableKind) whenGone(
+	mode changeMode,
+	name string,
+	err error,
+	annos annotations.Annotations,
+) (annotations.Annotations, bool, error) {
+	if !databricks.IsSecurableGone(err, kind.goneCodes...) {
+		return annos, false, nil
+	}
+	if mode == changeRevoke {
+		annos.Update(&v2.GrantAlreadyRevoked{})
+
+		return annos, true, nil
+	}
+
+	return annos, true, status.Errorf(codes.NotFound,
+		"databricks-connector: %s %s no longer exists in Databricks, so it cannot be changed", kind.name, name)
 }
 
 // preReadHeld reads the securable's assignments past the cache, stopping at the

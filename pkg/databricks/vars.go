@@ -173,9 +173,10 @@ func NewNameVars(name string, etag string) *NameVars {
 // while an absent max_results asks for the deprecated unpaginated response, so
 // maxResults is a pointer: its presence is the signal.
 type unityCatalogVars struct {
-	principal  string
-	maxResults *uint
-	pageToken  string
+	catalogName string
+	principal   string
+	maxResults  *uint
+	pageToken   string
 
 	// include_unbound lists catalogs not bound to the calling workspace. The
 	// API honours it only when the caller can update catalog-workspace bindings.
@@ -183,6 +184,10 @@ type unityCatalogVars struct {
 }
 
 func (v *unityCatalogVars) Apply(params *url.Values) {
+	if v.catalogName != "" {
+		params.Add("catalog_name", v.catalogName)
+	}
+
 	if v.principal != "" {
 		params.Add("principal", v.principal)
 	}

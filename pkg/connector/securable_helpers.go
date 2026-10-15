@@ -19,6 +19,7 @@ import (
 const (
 	securableTypeMetastore = "METASTORE"
 	securableTypeCatalog   = "CATALOG"
+	securableTypeSchema    = "SCHEMA"
 
 	profileKeyMetastoreID    = "metastore_id"
 	profileKeyMetastoreOwner = "metastore_owner"
@@ -26,6 +27,7 @@ const (
 	profileKeyOwner          = "owner"
 	profileKeySecurableType  = "securable_type"
 	profileKeyCatalogName    = "catalog_name"
+	profileKeySchemaName     = "schema_name"
 	profileKeyCatalogType    = "catalog_type"
 	profileKeyIsolationMode  = "isolation_mode"
 	profileKeyRegion         = "region"
@@ -115,6 +117,12 @@ func (r securableRef) child(name string) securableRef {
 	return securableRef{metastoreID: r.metastoreID, parts: append(slices.Clone(r.parts), name)}
 }
 
+// isUnderInformationSchema reports a securable inside Databricks' information_schema,
+// which is a virtual schema the connector does not sync.
+func isUnderInformationSchema(ref securableRef) bool {
+	return slices.Contains(ref.parts, "information_schema")
+}
+
 // securable is one row of a child listing, before it becomes a resource.
 type securable struct {
 	name    string
@@ -173,6 +181,9 @@ type securableKind struct {
 	privileges []string
 	// writeRemedy is what a 403 on the PATCH tells the operator.
 	writeRemedy string
+	// goneCodes are the Databricks error_code values that mean this securable
+	// itself was deleted. A 404 with any other code is a routing miss.
+	goneCodes []string
 	// access resolves the workspace a write goes through, confirmed against
 	// Databricks rather than the profile.
 	access func(ctx context.Context, d *securableDeps, resource *v2.Resource, ref securableRef) (string, accessState, *v2.RateLimitDescription, error)

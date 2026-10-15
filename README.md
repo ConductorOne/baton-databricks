@@ -5,7 +5,7 @@
 `baton-databricks` is a connector for Databricks built using the
 [Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
 Databricks API, to sync data about Databricks identities (users, groups and
-service principals), roles, workspaces and Unity Catalog metastores and catalogs.
+service principals), roles, workspaces and Unity Catalog metastores, catalogs and schemas.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
@@ -84,6 +84,7 @@ baton resources
 - Roles
 - Metastores
 - Catalogs
+- Schemas
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
@@ -97,8 +98,8 @@ account fails the whole sync, including users, groups, service principals and
 workspaces. A name that is also in `databricks-exclude-workspaces` is reported
 as excluded.
 
-Metastores and catalogs are Unity Catalog securables and are opt-in: each type
-stays off until it is enabled for the connector in ConductorOne.
+Metastores, catalogs and schemas are Unity Catalog securables and are opt-in:
+each type stays off until it is enabled for the connector in ConductorOne.
 
 ## Authentication
 
@@ -137,7 +138,7 @@ assigned to that workspace. Otherwise the grant fails with a
 
 ## Unity Catalog
 
-Metastores and catalogs are the top two levels of Databricks Unity Catalog. The
+Metastores, catalogs and schemas cover Databricks Unity Catalog. The
 resource tree the connector syncs is:
 
 ```
@@ -149,18 +150,23 @@ account
 ├── service principal
 └── metastore
     └── catalog
+        └── schema
 ```
 
-Both levels expose their privileges as entitlements (`CREATE_CATALOG` on a
-metastore, `USE_CATALOG` or `SELECT` on a catalog, and so on) plus a
-non-grantable `owner`. A privilege held by a group is expandable, so
-ConductorOne resolves the group's members as holders.
+Each level exposes its privileges as entitlements (`CREATE_CATALOG` on a
+metastore, `USE_CATALOG` or `SELECT` on a catalog, `USE_SCHEMA` on a schema,
+and so on) plus a non-grantable `owner`. A privilege held by a group is
+expandable, so ConductorOne resolves the group's members as holders.
 
 `MANAGE` and `ALL_PRIVILEGES` are not offered on a metastore: Databricks rejects
 both at that level.
 
-A catalog is synced when a workspace in the sync lists it. Schemas, tables and
-volumes are not synced yet.
+A catalog is synced when a workspace in the sync lists it. A schema is synced
+when the service principal can list every schema in its catalog: it owns the
+metastore or the catalog, or it holds `MANAGE`, `USE_SCHEMA` or
+`ALL_PRIVILEGES` on the catalog. Workspace Admin alone is not enough, and a
+short listing fails that catalog's schema sync with `PermissionDenied`.
+`information_schema` is skipped. Tables and volumes are not synced yet.
 
 The endpoints, the permission model, principal resolution and the connector's
 limitations are in [docs/docs-info.md](./docs/docs-info.md).
@@ -168,7 +174,7 @@ limitations are in [docs/docs-info.md](./docs/docs-info.md).
 ## Unity Catalog provisioning
 
 A privilege can be granted to and revoked from a user, group or service
-principal at both levels. The `owner` entitlement is read-only: granting or
+principal at each level. The `owner` entitlement is read-only: granting or
 revoking it fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions

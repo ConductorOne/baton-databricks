@@ -94,8 +94,14 @@ func TestResourcesHaveRawId(t *testing.T) {
 			// Keyed by metastore: several workspaces list the same catalog.
 			"catalog",
 			build(buildSecurable(t, catalogResourceType, securableTypeCatalog, metastoreResourceType.Id,
-				nil, "ms1", nil, securable{name: "cat"})),
+				[]*v2.ResourceType{schemaResourceType}, "ms1", nil, securable{name: "cat"})),
 			"ms1::cat",
+		},
+		{
+			"schema",
+			build(buildSecurable(t, schemaResourceType, securableTypeSchema, catalogResourceType.Id,
+				nil, "ms1", []string{"cat"}, securable{name: "sch"})),
+			"ms1::cat.sch",
 		},
 	}
 

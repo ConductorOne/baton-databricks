@@ -66,7 +66,7 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 	var rv []*v2.Resource
 	for _, item := range items {
 		childRef := parent.child(item.name)
-		built, err := newSecurableResource(catalogResourceType, securableTypeCatalog, nil, item, childRef, parentResourceID)
+		built, err := newSecurableResource(catalogResourceType, securableTypeCatalog, []*v2.ResourceType{schemaResourceType}, item, childRef, parentResourceID)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 				"databricks-connector: failed to build %s resource %s: %w", catalogResourceType.Id, childRef.resourceKey(), err)

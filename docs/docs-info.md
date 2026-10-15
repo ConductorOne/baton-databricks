@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs Unity Catalog metastores and catalogs. Both resource types are opt-in — each stays off until it is enabled per resource type in ConductorOne.
+   > It also syncs Unity Catalog metastores, catalogs and schemas. Each resource type is opt-in — it stays off until it is enabled per resource type in ConductorOne.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a metastore or catalog privilege for a user, group or service principal. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a privilege for a user, group or service principal on a metastore, catalog or schema. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
 
 ## Connector credentials
 
@@ -60,6 +60,7 @@ through a workspace host assigned to that metastore.
 | Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
 | Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
 | Catalogs | `GET /api/2.1/unity-catalog/catalogs` |
+| Schemas | `GET /api/2.1/unity-catalog/schemas` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 - **HTTP cache keys include the request Host.** Two workspaces share paths such
@@ -79,7 +80,7 @@ The scopes:
 
 | Scope | Covers |
 |-------|--------|
-| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, and the permissions endpoint |
+| `unity-catalog` | Metastores, metastore workspace assignments, catalogs, schemas, and the permissions endpoint |
 | `scim` | Account users, groups and service principals |
 | `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
 | `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
@@ -117,6 +118,15 @@ catalog out would delete it and its grants. A catalog that disappears between
 the listing and this check (`CATALOG_DOES_NOT_EXIST`) is left off that page.
 Any other permissions 404 fails the sync with `FailedPrecondition`: a
 `NotFound` on the page would drop the other catalogs listed with it.
+
+A schema listing is complete when the service principal owns the metastore,
+owns the catalog, or holds `MANAGE`, `USE_SCHEMA` or `ALL_PRIVILEGES` on the
+catalog. Workspace Admin is not enough: measured against the `system` catalog,
+a direct workspace Admin that did not own the metastore received 2 schemas
+where the metastore owner received 15. `MANAGE` alone is enough: a principal
+holding only `MANAGE` listed a schema owned by someone else, and the same
+principal without that grant did not. When none of these hold, the schema sync
+for that catalog fails with `PermissionDenied` instead of emitting the short list.
 
 ## Limitations
 
@@ -164,7 +174,12 @@ Any other permissions 404 fails the sync with `FailedPrecondition`: a
   only when the connector can prove it was deleted. That proof needs the
   service principal to own the metastore. Otherwise the revoke fails with
   `FailedPrecondition` and changes nothing.
-- **Other securables are not synced yet:** schemas, tables, volumes,
+- **`information_schema` is not synced.** It is a virtual schema.
+- **A schema listing that is not complete fails the sync** for that catalog
+  with `PermissionDenied`. Revoking a privilege on a schema Databricks reports
+  as `SCHEMA_DOES_NOT_EXIST` returns `GrantAlreadyRevoked`. A 404 with any
+  other error code still fails.
+- **Other securables are not synced yet:** tables, volumes,
   functions, registered models, external locations, storage credentials,
   connections, shares and Delta Sharing recipients.
 - **Tags are not synced**, including the `SYSTEM.TEAM` convention some customers
