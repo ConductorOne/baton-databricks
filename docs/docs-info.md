@@ -58,7 +58,7 @@ workspace host assigned to it.
 | Level | Endpoint |
 |-------|----------|
 | Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
-| Workspace metastore assignment | `GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/metastore` |
+| Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
 | Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
 
 - **HTTP cache keys include the request Host.** Two workspaces share paths such
@@ -129,9 +129,16 @@ access.
   ConductorOne removes it and its grants. Granting or revoking a privilege on
   such a metastore fails with `FailedPrecondition` and changes nothing in
   Databricks. An allowlist that matches no
-  workspace on the account fails the sync. While an attached in-scope workspace
-  is not `RUNNING`, or a metastore's workspace assignments cannot be read,
-  nothing is removed: that metastore fails the sync instead.
+  workspace on the account fails the whole sync, including users, groups,
+  service principals and workspaces. A name that is also in
+  `databricks-exclude-workspaces` is reported as excluded; a name Databricks
+  does not have is reported as not on the account. A workspace that is
+  `PROVISIONING` or `NOT_PROVISIONED` keeps its metastore, and that metastore's
+  grants fail until it is `RUNNING`. A workspace that is `FAILED` or `BANNED`
+  does not: when it is the only one attached, the metastore is left out of the
+  sync. While a metastore's workspace assignments cannot be read, nothing is
+  removed: that metastore fails the sync, and the error says the assignment
+  list could not be read.
 - **Admin on any attached workspace is enough.** The connector tries each
   attached workspace in turn and reads through the first one where it holds
   Admin directly.

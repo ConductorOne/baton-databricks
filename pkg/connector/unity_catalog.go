@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	workspaceStatusRunning = "RUNNING"
+	workspaceStatusRunning        = "RUNNING"
+	workspaceStatusProvisioning   = "PROVISIONING"
+	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
 )
 
 // routingSnapshot is the account's Unity Catalog access paths for the call that
@@ -78,6 +80,50 @@ func newUnityCatalog(client *databricks.Client, ownPrincipal string, workspaces 
 	}
 }
 
+// workspaceIsPending is a status that can still become RUNNING. FAILED and BANNED
+// are terminal, so they are not pending: a pending workspace fails the sync.
+func workspaceIsPending(status string) bool {
+	switch strings.ToUpper(status) {
+	case workspaceStatusProvisioning, workspaceStatusNotProvisioned:
+		return true
+	default:
+		return false
+	}
+}
+
+// allowlistMiss distinguishes a name Databricks does not have from one the
+// exclude list already dropped. Either way the failure is the whole sync,
+// because metastore List is what returns it.
+func allowlistMiss(u *unityCatalog) error {
+	var excluded, missing []string
+	for name := range u.workspaces {
+		if u.client.IsWorkspaceNameExcluded(name) {
+			excluded = append(excluded, name)
+		} else {
+			missing = append(missing, name)
+		}
+	}
+	slices.Sort(excluded)
+	slices.Sort(missing)
+
+	switch {
+	case len(missing) == 0:
+		return status.Errorf(codes.FailedPrecondition,
+			"every workspace in the workspaces allowlist (%s) is also named in databricks-exclude-workspaces, "+
+				"so no metastore can be scoped to it; this fails the whole sync",
+			strings.Join(excluded, ", "))
+	case len(excluded) == 0:
+		return status.Errorf(codes.FailedPrecondition,
+			"none of the workspaces in the workspaces allowlist (%s) matches a workspace on the account by deployment name, name or id, "+
+				"so no metastore can be scoped to it; this fails the whole sync",
+			strings.Join(missing, ", "))
+	default:
+		return status.Errorf(codes.FailedPrecondition,
+			"the workspaces allowlist matches nothing this sync can use: %s is not on the account, and %s is also named in databricks-exclude-workspaces; this fails the whole sync",
+			strings.Join(missing, ", "), strings.Join(excluded, ", "))
+	}
+}
+
 // usableWorkspaces returns workspaces only for an in-scope metastore. One that is
 // in scope but has no usable workspace yet fails with FailedPrecondition.
 func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, metastoreState, error) {
@@ -89,6 +135,11 @@ func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, metas
 	}
 	if _, ok := snap.metastores[metastoreID]; !ok {
 		return nil, metastoreGone, nil
+	}
+	if slices.Contains(snap.unreadable, metastoreID) {
+		return nil, metastoreInScope, status.Errorf(codes.FailedPrecondition,
+			"metastore %s exists on the account but its workspace assignment list could not be read, so the sync cannot tell which workspaces serve it",
+			metastoreID)
 	}
 
 	pending := ""
@@ -129,8 +180,9 @@ func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.R
 
 	// A metastore with no usable workspace would fail its Grants with
 	// FailedPrecondition, which fails the whole sync, so it is pruned. An unknown
-	// answer (unreadable list, non-RUNNING workspace) blocks the prune: dropping it
-	// would read as a deletion in C1. Pruned is recorded apart from deleted
+	// answer (unreadable list, or a workspace still provisioning) blocks the prune:
+	// dropping it would read as a deletion in C1. A FAILED or BANNED workspace
+	// does not: it will not become RUNNING. Pruned is recorded apart from deleted
 	// because the metastore still holds its privileges.
 	l := ctxzap.Extract(ctx)
 	for metastoreID := range snap.metastores {
@@ -175,6 +227,7 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 
 	inScope := map[string]databricks.Workspace{}
 	notRunning := map[string]string{}
+	unusable := 0
 	asked := 0
 	for _, workspace := range workspaces {
 		if err := ctx.Err(); err != nil {
@@ -190,7 +243,19 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			}
 		}
 		if workspace.Status != "" && !strings.EqualFold(workspace.Status, workspaceStatusRunning) {
-			notRunning[accountID] = workspace.DeploymentName
+			// PROVISIONING and NOT_PROVISIONED can still become RUNNING.
+			// FAILED, BANNED and anything else do not, so they must not
+			// fail the sync on every run.
+			if workspaceIsPending(workspace.Status) {
+				notRunning[accountID] = fmt.Sprintf("%s (%s)", workspace.DeploymentName, workspace.Status)
+			} else {
+				unusable++
+				ctxzap.Extract(ctx).Debug("databricks-connector: skipping a workspace that will not become RUNNING",
+					zap.String("workspace", workspace.DeploymentName),
+					zap.String("status", workspace.Status),
+				)
+			}
+
 			continue
 		}
 
@@ -200,14 +265,8 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 		snap.workspaceNames[workspace.DeploymentName] = workspace.Name
 	}
 
-	if len(u.workspaces) > 0 && asked == 0 && len(notRunning) == 0 && len(snap.metastores) > 0 {
-		configured := configuredWorkspaceNames(u.workspaces)
-		slices.Sort(configured)
-
-		return rateLimit, status.Errorf(codes.FailedPrecondition,
-			"none of the workspaces in the workspaces allowlist (%s) matches a workspace on the account by deployment name, name or id, "+
-				"so no metastore can be scoped to it",
-			strings.Join(configured, ", "))
+	if len(u.workspaces) > 0 && asked == 0 && len(notRunning) == 0 && unusable == 0 && len(snap.metastores) > 0 {
+		return rateLimit, allowlistMiss(u)
 	}
 
 	var unreadable []string
@@ -226,6 +285,10 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			// the metastore and its grants. A metastore that really is gone stops
 			// appearing in ListMetastores on the next sync.
 			if isUnreadableWorkspaceError(err) || isNotFoundError(err) {
+				ctxzap.Extract(ctx).Debug("databricks-connector: could not read the workspace assignment list",
+					zap.String("metastore", metastoreID),
+					zap.Error(err),
+				)
 				unreadable = append(unreadable, metastoreID)
 				continue
 			}

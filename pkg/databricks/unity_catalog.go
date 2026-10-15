@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
 
 // A metastore lives on the account plane; every securable below it is only
@@ -303,8 +305,16 @@ func (c *Client) updatePermissions(
 	// The provisioning pre-read stored page one under the key the sync reads,
 	// and a PATCH does not invalidate it. Re-reading past the cache overwrites
 	// that entry with the post-change state. The write already landed, so a
-	// failed refresh must not fail it.
-	if _, _, refreshRateLimit, refreshErr := c.listPermissions(ctx, workspaceId, securableType, fullName, "", "", true); refreshErr == nil && refreshRateLimit != nil {
+	// failed refresh must not fail it. A read that stops before the last page
+	// leaves those later pages until the next cycle; max_results 0 makes that rare.
+	_, _, refreshRateLimit, refreshErr := c.listPermissions(ctx, workspaceId, securableType, fullName, "", "", true)
+	if refreshErr != nil {
+		ctxzap.Extract(ctx).Debug("could not refresh the permissions cache after the write",
+			zap.String("securable_type", securableType),
+			zap.String("full_name", fullName),
+			zap.Error(refreshErr),
+		)
+	} else if refreshRateLimit != nil {
 		ratelimitData = refreshRateLimit
 	}
 

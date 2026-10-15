@@ -106,7 +106,7 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
   <Step>
   Assign it to each workspace you want C1 to sync, as an admin: in the account console, go to **Workspaces**, open the workspace, select **Permissions**, click **Add permissions**, select the service principal, and choose **Admin**. Assign **Admin** directly to the service principal — the connector does not treat Admin inherited through a group as enough.
 
-  Repeat this for every workspace you want synced. Workspace **Admin** is enough to read Unity Catalog privileges on a metastore reached through that workspace. If the metastore's workspaces are not synced, make the service principal the **Metastore Admin** instead: in the account console, go to **Catalog**, open the metastore, and set **Metastore Admin** to the service principal's application ID.
+  Repeat this for every workspace you want synced. Workspace **Admin** is enough to read Unity Catalog privileges on a metastore reached through that workspace. If the service principal can't be assigned Admin directly on a synced workspace attached to the metastore, make it the **Metastore Admin** instead: in the account console, go to **Catalog**, open the metastore, and set **Metastore Admin** to the service principal's application ID. A metastore with no synced workspace attached is left out either way.
   </Step>
 </Steps>
 

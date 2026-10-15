@@ -52,10 +52,11 @@ func wrapTransportAuthError(err error) error {
 // A route-level 404 (workspace does not serve this metastore) uses a
 // different code, so status-only matching cannot tell the two apart.
 const (
-	ErrorCodeCatalogDoesNotExist = "CATALOG_DOES_NOT_EXIST"
-	ErrorCodeSchemaDoesNotExist  = "SCHEMA_DOES_NOT_EXIST"
-	ErrorCodeTableDoesNotExist   = "TABLE_DOES_NOT_EXIST"
-	ErrorCodeVolumeDoesNotExist  = "VOLUME_DOES_NOT_EXIST"
+	ErrorCodeMetastoreDoesNotExist = "METASTORE_DOES_NOT_EXIST"
+	ErrorCodeCatalogDoesNotExist   = "CATALOG_DOES_NOT_EXIST"
+	ErrorCodeSchemaDoesNotExist    = "SCHEMA_DOES_NOT_EXIST"
+	ErrorCodeTableDoesNotExist     = "TABLE_DOES_NOT_EXIST"
+	ErrorCodeVolumeDoesNotExist    = "VOLUME_DOES_NOT_EXIST"
 )
 
 // APIError represents an error response from the Databricks API.

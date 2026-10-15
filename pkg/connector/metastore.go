@@ -30,6 +30,41 @@ func newMetastoreBuilder(client *databricks.Client, uc *unityCatalog, sync syncP
 	return &metastoreBuilder{securableDeps{client: client, uc: uc, sync: sync}}
 }
 
+// workspaceForProfile is the first attached workspace whose grants are visible.
+// A later one wins over routed[0] when that is the only place the connector
+// holds Admin. When none pass, routed[0] is still recorded so Grants can say why.
+func (m *metastoreBuilder) workspaceForProfile(
+	ctx context.Context,
+	snap routingSnapshot,
+	metastoreID string,
+	routed []string,
+) (string, *v2.RateLimitDescription, error) {
+	var rateLimit *v2.RateLimitDescription
+	for _, workspace := range routed {
+		trustworthy, probeRateLimit, err := m.uc.metastoreGrantsAreTrustworthy(ctx, snap, metastoreID, workspace)
+		if probeRateLimit != nil {
+			rateLimit = probeRateLimit
+		}
+		if err != nil {
+			if ctx.Err() != nil || isRateLimitError(err) || !isUnreadableWorkspaceError(err) {
+				return "", rateLimit, err
+			}
+			ctxzap.Extract(ctx).Debug("databricks-connector: could not read a workspace while choosing the metastore profile; trying the next one",
+				zap.String("metastore", metastoreID),
+				zap.String("workspace", workspace),
+				zap.Error(err),
+			)
+
+			continue
+		}
+		if trustworthy {
+			return workspace, rateLimit, nil
+		}
+	}
+
+	return routed[0], rateLimit, nil
+}
+
 func (m *metastoreBuilder) ResourceType(_ context.Context) *v2.ResourceType {
 	return metastoreResourceType
 }
@@ -95,7 +130,15 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 		workspace := ""
 		if routed := snap.workspaces[metastore.MetastoreID]; len(routed) > 0 {
-			workspace = routed[0]
+			// Grants reads this workspace back and skips routing when the probe
+			// passes. The first attached workspace is not always that one.
+			chosen, probeRateLimit, err := m.workspaceForProfile(ctx, snap, metastore.MetastoreID, routed)
+			noteRateLimit(&annos, probeRateLimit)
+			if err != nil {
+				return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+					"databricks-connector: failed to choose a workspace for metastore %s: %w", metastore.MetastoreID, err)
+			}
+			workspace = chosen
 		}
 		mr, err := metastoreResource(ctx, &metastore, parentResourceID, workspace, snap.workspaceIDs[workspace], snap.workspaceNames[workspace])
 		if err != nil {
@@ -180,10 +223,26 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	assignments, nextPageToken, rateLimit, err := m.client.ListPermissions(
 		ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "", pageToken)
 	noteRateLimit(&annos, rateLimit)
-	// A 404 is returned, not read as an absence: the permissions endpoint also answers
-	// 404 for a workspace that does not serve this metastore, and only the error_code
-	// the APIError keeps tells that apart from a securable that is gone.
+	// The permissions endpoint answers 404 both when the metastore is gone and
+	// when this workspace does not serve it. Only METASTORE_DOES_NOT_EXIST is
+	// the first. Any other 404 is re-wrapped: uhttp maps HTTP 404 to
+	// codes.NotFound, and the SDK skips a NotFound grants read, which makes
+	// C1 delete the bindings.
 	if err != nil {
+		if databricks.IsSecurableGone(err, databricks.ErrorCodeMetastoreDoesNotExist) {
+			l.Debug("databricks-connector: metastore is gone; returning no grants",
+				zap.String("metastore", ref.metastoreID),
+			)
+
+			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		}
+		if isNotFoundError(err) {
+			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.FailedPrecondition,
+				fmt.Sprintf("databricks-connector: permissions on metastore %s returned 404 without %s, so this is not an absence",
+					ref.metastoreID, databricks.ErrorCodeMetastoreDoesNotExist),
+				err)
+		}
+
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
 			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableMetastore, ref.permissionsName(), err)
 	}

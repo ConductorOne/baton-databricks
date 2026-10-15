@@ -91,7 +91,9 @@ deployment name, or numeric workspace ID, matched case-insensitively.
 `--workspaces` also scopes which metastores sync: only a metastore attached to a
 listed workspace is synced, so narrowing the list removes the other metastores
 and their grants from ConductorOne. A list that matches no workspace on the
-account fails the metastore sync.
+account fails the whole sync, including users, groups, service principals and
+workspaces. A name that is also in `databricks-exclude-workspaces` is reported
+as excluded.
 
 Metastores are Unity Catalog securables and are opt-in: the type stays off until
 it is enabled for the connector in ConductorOne.
