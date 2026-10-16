@@ -324,7 +324,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 
 		// add the member to the group
 		group.Members = append(group.Members, databricks.Member{
-			ID: principal.Id.Resource,
+			ID: principalId.Resource,
 		})
 
 		_, err = g.client.UpdateGroup(ctx, workspaceId, group)

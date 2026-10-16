@@ -334,7 +334,15 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	return res, ratelimitData, nil
 }
 
+// UpdateGroup replaces a group's full SCIM representation via PUT. Because this is a
+// full-replacement write, a group fetched without displayName (e.g. an AttrVars that
+// requests only a subset of attributes) would silently wipe it; refuse rather than
+// risk that, since DisplayName is never legitimately empty for a real group.
 func (c *Client) UpdateGroup(ctx context.Context, workspaceId string, group *Group) (*v2.RateLimitDescription, error) {
+	if group.DisplayName == "" {
+		return nil, fmt.Errorf("databricks-connector: refusing to update group %s: displayName is empty, which would wipe it via this full-replacement PUT", group.ID)
+	}
+
 	var u *url.URL
 	if workspaceId == "" {
 		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), group.ID)
