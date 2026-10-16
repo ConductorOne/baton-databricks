@@ -172,7 +172,7 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	error,
 ) {
 	pMap := accountInfo.Profile.AsMap()
-	body := &databricks.CreateUserBody{}
+	body := &databricks.CreateUserBody{Active: true}
 
 	// Use email as userName since Databricks API expects email in userName field
 	if email, ok := pMap["email"]; ok {
@@ -204,7 +204,11 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	}
 
 	if active, ok := pMap["active"]; ok {
-		body.Active = active.(bool)
+		activeBool, ok := active.(bool)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("baton-databricks: active field must be a boolean")
+		}
+		body.Active = activeBool
 	}
 
 	res, _, err := o.client.CreateUser(ctx, "", body)
