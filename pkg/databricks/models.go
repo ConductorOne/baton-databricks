@@ -128,8 +128,26 @@ type WorkspacePrincipal struct {
 	ID                    int    `json:"principal_id"`
 }
 
+// WorkspaceAdminPermission marks a principal as a workspace admin; WorkspaceUserPermission is basic access.
+const (
+	WorkspaceAdminPermission = "ADMIN"
+	WorkspaceUserPermission  = "USER"
+)
+
 type WorkspaceAssignment struct {
-	Principal *WorkspacePrincipal `json:"principal"`
+	Principal   *WorkspacePrincipal `json:"principal"`
+	Permissions []string            `json:"permissions"`
+}
+
+// HasAdmin reports whether this assignment includes workspace ADMIN-level access.
+func (w WorkspaceAssignment) HasAdmin() bool {
+	for _, p := range w.Permissions {
+		if p == WorkspaceAdminPermission {
+			return true
+		}
+	}
+
+	return false
 }
 
 type Role struct {

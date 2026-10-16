@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
@@ -619,31 +621,152 @@ func (c *Client) ListWorkspaceMembers(
 	return res.Assignments, ratelimitData, nil
 }
 
+// CreateOrUpdateWorkspaceMember grants the "USER" workspace permission to a
+// principal.
+//
+// The assignments endpoint is full-replacement, not PATCH: read current
+// permissions and merge, otherwise an existing ADMIN is lost.
 func (c *Client) CreateOrUpdateWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
-) (
-	*v2.RateLimitDescription,
-	error,
-) {
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	payload := struct {
-		Permission []string `json:"permissions"`
-	}{
-		Permission: []string{"USER"},
+) (bool, *v2.RateLimitDescription, error) {
+	if _, convErr := strconv.Atoi(principalId); convErr != nil {
+		return false, nil, uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %s", principalId),
+		)
 	}
 
-	return c.Put(ctx, u, payload, nil)
+	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	if err != nil {
+		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
+	}
+
+	for _, permission := range current {
+		if permission == WorkspaceUserPermission {
+			return true, ratelimitData, nil
+		}
+	}
+
+	permissionSet := map[string]struct{}{WorkspaceUserPermission: {}}
+	for _, permission := range current {
+		permissionSet[permission] = struct{}{}
+	}
+
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
+	payload := struct {
+		Permissions []string `json:"permissions"`
+	}{
+		Permissions: sortedPermissions(permissionSet),
+	}
+
+	putRatelimitData, err := c.Put(ctx, u, payload, nil)
+	if putRatelimitData != nil {
+		ratelimitData = putRatelimitData
+	}
+
+	return false, ratelimitData, err
 }
 
+// RemoveWorkspaceMember revokes the "USER" workspace permission from a
+// principal.
+//
+// Same full-replacement endpoint as CreateOrUpdateWorkspaceMember: if the
+// principal holds ADMIN but not USER, PUTting the remainder would report
+// success while leaving ADMIN access in place, so that case errors instead.
 func (c *Client) RemoveWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
-) (*v2.RateLimitDescription, error) {
+) (bool, *v2.RateLimitDescription, error) {
+	if _, convErr := strconv.Atoi(principalId); convErr != nil {
+		return false, nil, uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %s", principalId),
+		)
+	}
+
+	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	if err != nil {
+		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
+	}
+
+	hasUser := false
+	permissionSet := make(map[string]struct{}, len(current))
+	for _, permission := range current {
+		if permission == WorkspaceUserPermission {
+			hasUser = true
+			continue
+		}
+		permissionSet[permission] = struct{}{}
+	}
+
+	if !hasUser {
+		if len(permissionSet) == 0 {
+			return true, ratelimitData, nil
+		}
+		return false, ratelimitData, uhttp.WrapErrors(
+			codes.FailedPrecondition,
+			fmt.Sprintf("databricks: principal %s holds workspace ADMIN without USER; revoke ADMIN separately before removing workspace membership", principalId),
+		)
+	}
+
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	return c.Put(ctx, u, nil, nil)
+	payload := struct {
+		Permissions []string `json:"permissions"`
+	}{
+		Permissions: sortedPermissions(permissionSet),
+	}
+
+	putRatelimitData, err := c.Put(ctx, u, payload, nil)
+	if putRatelimitData != nil {
+		ratelimitData = putRatelimitData
+	}
+
+	return false, ratelimitData, err
+}
+
+// currentWorkspacePermissions lists every assignment on the workspace and
+// matches by principal ID: there's no API to fetch a single assignment directly.
+func (c *Client) currentWorkspacePermissions(
+	ctx context.Context,
+	workspaceId string,
+	principalId string,
+) (
+	[]string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	assignments, ratelimitData, err := c.ListWorkspaceMembers(ctx, workspaceId)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	for _, assignment := range assignments {
+		if assignment.Principal == nil {
+			continue
+		}
+		if strconv.Itoa(assignment.Principal.ID) != principalId {
+			continue
+		}
+
+		return assignment.Permissions, ratelimitData, nil
+	}
+
+	return nil, ratelimitData, nil
+}
+
+// sortedPermissions returns the set's members in a deterministic (sorted)
+// order so requests and tests are stable.
+func sortedPermissions(permissionSet map[string]struct{}) []string {
+	permissions := make([]string, 0, len(permissionSet))
+	for permission := range permissionSet {
+		permissions = append(permissions, permission)
+	}
+	sort.Strings(permissions)
+
+	return permissions
 }
 
 func (c *Client) ListRuleSets(
