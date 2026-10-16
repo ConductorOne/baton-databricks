@@ -821,8 +821,7 @@ func TestListEventsEndToEnd(t *testing.T) {
 	const wantRemaining = 42
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ListEvents always lists
-		// workspaces via the Account API before querying the audit log.
+		// ListEvents always lists workspaces via the Account API before querying the audit log.
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode([]map[string]any{
@@ -1111,6 +1110,91 @@ func TestListEventsSkipsRowOnPermanentLookupFailure(t *testing.T) {
 	}
 	if streamState == nil || streamState.Cursor == "" {
 		t.Errorf("streamState = %+v, want an advanced cursor", streamState)
+	}
+}
+
+// TestListEventsFullPageCursorAdvance verifies the HasMore wiring on a full page
+// (auditLogPageLimit raw rows): it pages forward from the last raw row's boundary, but when
+// no boundary can be parsed it reports HasMore=false with the cursor unchanged rather than
+// claiming more data behind a cursor that would repeat the same query.
+func TestListEventsFullPageCursorAdvance(t *testing.T) {
+	start := eventPageCursor{StartAt: time.Now().Add(-2 * auditLogTrailingLag).UTC().Truncate(time.Second), StartAfterEventID: "evt-0"}
+	lastTime := start.StartAt.Add(time.Minute)
+
+	cases := []struct {
+		name        string
+		lastRowTime string
+		wantHasMore bool
+		wantCursor  eventPageCursor
+	}{
+		{
+			name:        "parseable last row pages forward",
+			lastRowTime: lastTime.Format(time.RFC3339),
+			wantHasMore: true,
+			wantCursor:  eventPageCursor{StartAt: lastTime, StartAfterEventID: fmt.Sprintf("evt-%d", auditLogPageLimit)},
+		},
+		{
+			name:        "no parseable boundary stops without advancing",
+			lastRowTime: "not-a-time",
+			wantHasMore: false,
+			wantCursor:  start,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces"):
+					_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1"):
+					fmt.Fprint(w, `{"id":"wh-1"}`)
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements"):
+					// Every row but the last has an unparseable event_time, so no row parses
+					// and only the last raw row can supply the boundary. The action is
+					// unmapped, so no principal lookups are made either way.
+					data := make([][]string, auditLogPageLimit)
+					for i := range data {
+						data[i] = []string{fmt.Sprintf("evt-%d", i+1), "not-a-time", "0", "someUnmappedAction", "accounts", `{}`}
+					}
+					data[len(data)-1][1] = tc.lastRowTime
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"statement_id": "stmt-1",
+						"status":       map[string]any{"state": "SUCCEEDED"},
+						"manifest": map[string]any{"schema": map[string]any{"columns": []map[string]any{
+							{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+							{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+						}}},
+						"result": map[string]any{"data_array": data},
+					})
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+
+			encoded, err := encodeEventCursor(start)
+			if err != nil {
+				t.Fatalf("encodeEventCursor() error = %v", err)
+			}
+
+			feed := newAuditEventFeed(client, nil, "wh-1")
+			events, streamState, _, err := feed.ListEvents(context.Background(), nil, &pagination.StreamToken{Cursor: encoded})
+			if err != nil {
+				t.Fatalf("ListEvents() error = %v", err)
+			}
+			if len(events) != 0 {
+				t.Errorf("len(events) = %d, want 0", len(events))
+			}
+			if streamState.HasMore != tc.wantHasMore {
+				t.Errorf("HasMore = %v, want %v", streamState.HasMore, tc.wantHasMore)
+			}
+			got := decodeEventCursor(context.Background(), streamState.Cursor, time.Now())
+			if !got.StartAt.Equal(tc.wantCursor.StartAt) || got.StartAfterEventID != tc.wantCursor.StartAfterEventID {
+				t.Errorf("cursor = %+v, want %+v", got, tc.wantCursor)
+			}
+		})
 	}
 }
 
