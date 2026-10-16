@@ -54,6 +54,19 @@ var (
 		field.WithDescription("Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces."),
 		field.WithDisplayName("Exclude Workspaces"),
 	)
+	// SQLWarehouseIDField doubles as the incremental-sync switch: set enables it, empty disables it.
+	// system.access.audit is account-wide, so this warehouse can be in any workspace in the
+	// account — its workspace is just query compute, not a data scope.
+	SQLWarehouseIDField = field.StringField(
+		"sql-warehouse-id",
+		field.WithDescription(
+			"Setting this enables incremental sync; leaving it empty disables it. "+
+				"ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, "+
+				"so access changes show up before the next full sync (deletions are still only caught by full syncs). "+
+				"The warehouse can live in any workspace; the connector discovers which one automatically.",
+		),
+		field.WithDisplayName("SQL Warehouse ID"),
+	)
 	configFields = []field.SchemaField{
 		AccountHostnameField,
 		AccountIdField,
@@ -63,6 +76,7 @@ var (
 		WorkspacesField,
 		BaseURLField,
 		ExcludeWorkspacesField,
+		SQLWarehouseIDField,
 	}
 )
 
