@@ -54,6 +54,7 @@ func (a *accountBuilder) accountResource(_ context.Context) (*v2.Resource, error
 			&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: servicePrincipalResourceType.Id},
 			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: metastoreResourceType.Id},
 		)
 	}
 

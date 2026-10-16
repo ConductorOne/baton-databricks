@@ -11,6 +11,7 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
+	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -37,6 +38,20 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
 }
 
+// groupSecurableGrantOptions annotates a group-held Unity Catalog grant so C1
+// expands it through the group's member entitlement. Shallow stays unset:
+// setting it would suppress propagation through a nested group.
+func groupSecurableGrantOptions(principalId *v2.ResourceId) []grant.GrantOption {
+	if principalId.GetResourceType() != groupResourceType.Id {
+		return nil
+	}
+
+	return []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
+		EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
+		ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
+	})}
+}
+
 func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {
 	groupResourceStr := groupResourceId(ctx, groupId, parentResource)
 	resourceId, err := rs.NewResourceID(groupResourceType, groupResourceStr)
@@ -49,9 +64,42 @@ func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2
 	}, nil
 }
 
+func capabilityPermissions(perms ...string) *v2.CapabilityPermissions {
+	cp := &v2.CapabilityPermissions{Permissions: make([]*v2.CapabilityPermission, 0, len(perms))}
+	for _, perm := range perms {
+		cp.Permissions = append(cp.Permissions, &v2.CapabilityPermission{Permission: perm})
+	}
+
+	return cp
+}
+
+// noteRateLimit puts the descriptor doRequest parsed on the sync annotations,
+// which is the only place the SDK reads it from.
+func noteRateLimit(annos *annotations.Annotations, rateLimit *v2.RateLimitDescription) {
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
+}
+
 func annotationsForUserResourceType() annotations.Annotations {
 	annos := annotations.Annotations{}
 	annos.Update(&v2.SkipEntitlementsAndGrants{})
+	annos.Update(capabilityPermissions(scopeSCIM, permissionAccountAdmin))
+	return annos
+}
+
+func annotationsForSecurableResourceType(perms ...string) annotations.Annotations {
+	annos := annotations.Annotations{}
+	annos.Update(&v2.OptInRequired{})
+	annos.Update(capabilityPermissions(perms...))
+	return annos
+}
+
+// StaticEntitlements is a separate SDK pass, so Entitlements() must not also run.
+// Grants() still runs.
+func annotationsForStaticSecurableResourceType(perms ...string) annotations.Annotations {
+	annos := annotationsForSecurableResourceType(perms...)
+	annos.Update(&v2.SkipEntitlements{})
 	return annos
 }
 
@@ -199,6 +247,72 @@ func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, enti
 func isNotFoundError(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func isForbiddenError(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
+}
+
+func isRateLimitError(err error) bool {
+	var apiErr *databricks.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests
+}
+
+// isUnreadableWorkspaceError reports an answer that says this credential cannot
+// read this workspace, not a fact about the account. A 404 is included so the
+// caller tries the next workspace: returning it would surface as codes.NotFound,
+// and the SDK treats that as a warning and drops the grants.
+func isUnreadableWorkspaceError(err error) bool {
+	var apiErr *databricks.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+
+	switch apiErr.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// A privilege assignment carries the numeric SCIM id in principal_id, which is the
+// only handle left on a principal that no longer resolves to a name.
+func unityPrincipalScimID(principal *v2.ResourceId) (string, error) {
+	if principal.GetResourceType() != groupResourceType.Id {
+		return principal.GetResource(), nil
+	}
+
+	_, parsed, err := parseResourceId(principal.GetResource())
+	if err != nil {
+		return "", fmt.Errorf("failed to parse group resource id: %w", err)
+	}
+
+	return parsed.GetResource(), nil
+}
+
+// One `principal` field carries a user's userName, a group's displayName or a service
+// principal's applicationId. The second result is false when nothing resolves it,
+// which is not an error: a deleted principal keeps its grants and is addressable
+// only by principal_id.
+func unityPrincipalName(ctx context.Context, c *databricks.Client, principal *v2.ResourceId) (string, bool, error) {
+	principalId, err := unityPrincipalScimID(principal)
+	if err != nil {
+		return "", false, err
+	}
+
+	qualified, err := preparePrincipalId(ctx, c, "", principal.GetResourceType(), principalId)
+	if err != nil {
+		return "", false, err
+	}
+
+	_, name, ok := strings.Cut(qualified, "/")
+	if !ok || name == "" {
+		return "", false, nil
+	}
+
+	return name, true, nil
 }
 
 func prepareWorkspaceRole(entitlement string) string {

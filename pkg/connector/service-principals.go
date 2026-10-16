@@ -26,7 +26,7 @@ func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.Resource
 }
 
 func (s *servicePrincipalBuilder) servicePrincipalResource(ctx context.Context, servicePrincipal *databricks.ServicePrincipal, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"application_id": servicePrincipal.ApplicationID,
 		"display_name":   servicePrincipal.DisplayName,
 		"parent_type":    parent.ResourceType,
