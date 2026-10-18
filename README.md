@@ -109,10 +109,11 @@ only caught by the next full sync.
 
 **Incremental sync is enabled by setting `--sql-warehouse-id` (or
 `BATON_SQL_WAREHOUSE_ID`) and disabled by leaving it unset or empty.** There is
-no separate on/off flag. When it is set, the connector validates the whole
-incremental-sync setup at startup (warehouse found, `system.access.audit`
-queryable, at least one workspace in sync scope) and fails validation if any
-check fails, rather than silently falling back to full syncs only.
+no separate on/off flag. The incremental-sync setup (warehouse found,
+`system.access.audit` queryable, at least one workspace in sync scope) is not
+checked at startup, so a misconfiguration never blocks full syncs or
+provisioning. Instead, each event-feed poll fails with an error naming the
+problem until it is fixed.
 
 Incremental sync requires a reachable Account API to resolve audit events back
 to synced resources, same as the rest of the connector. Audit events are only

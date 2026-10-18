@@ -235,16 +235,6 @@ func (c *Client) collectStatementResult(ctx context.Context, workspaceId string,
 	return &StatementResult{Columns: columns, Rows: rows}, rateLimit, nil
 }
 
-// ValidateAuditLogAccess confirms the configured warehouse can query system.access.audit,
-// which requires a one-time SELECT grant from a metastore admin (see README).
-func (c *Client) ValidateAuditLogAccess(ctx context.Context, workspaceId, warehouseId string) (*v2.RateLimitDescription, error) {
-	_, rateLimit, err := c.ExecuteStatement(ctx, workspaceId, warehouseId, "SELECT 1 FROM system.access.audit LIMIT 1")
-	if err != nil {
-		return rateLimit, fmt.Errorf("failed to query system.access.audit: %w", err)
-	}
-	return rateLimit, nil
-}
-
 // WarehouseExists reports whether warehouseId exists in workspaceId, since SQL warehouses
 // are workspace-scoped with no account-level lookup.
 func (c *Client) WarehouseExists(ctx context.Context, workspaceId, warehouseId string) (bool, *v2.RateLimitDescription, error) {

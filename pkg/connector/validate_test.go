@@ -10,8 +10,6 @@ import (
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // rolesTransport answers the assignable-roles calls Validate makes. failAccount
@@ -112,39 +110,30 @@ func TestValidateWithoutWarehouseIDDisablesIncrementalSync(t *testing.T) {
 	}
 }
 
-// A set sql-warehouse-id is an explicit opt-in, so a warehouse that can't be found fails
-// validation instead of silently running full syncs only.
-func TestValidateWithWarehouseIDFailsWhenWarehouseMissing(t *testing.T) {
-	tr := &incrementalTransport{}
-	d := newValidateConnector(t, &databricks.NoAuth{}, tr)
-	d.sqlWarehouseID = "wh-missing"
+// Incremental sync misconfiguration (unknown warehouse, no workspace in scope) must not
+// block full syncs, so Validate succeeds without probing the warehouse.
+func TestValidateWithWarehouseIDDoesNotProbeIncrementalSync(t *testing.T) {
+	cases := []struct {
+		name       string
+		workspaces []string
+	}{
+		{name: "unknown warehouse"},
+		{name: "no workspace in scope", workspaces: []string{"not-a-workspace"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &incrementalTransport{}
+			d := newValidateConnector(t, &databricks.NoAuth{}, tr)
+			d.sqlWarehouseID = "wh-missing"
+			d.workspaces = tc.workspaces
 
-	_, err := d.Validate(context.Background())
-	if err == nil {
-		t.Fatal("Validate: want error for unknown sql-warehouse-id, got nil")
-	}
-	if !strings.Contains(err.Error(), "sql-warehouse-id") {
-		t.Errorf("Validate error = %q, want it to name sql-warehouse-id", err)
-	}
-	if got := status.Code(err); got != codes.NotFound {
-		t.Errorf("Validate error code = %s, want %s", got, codes.NotFound)
-	}
-}
-
-// With sql-warehouse-id set, an allowlist matching no workspace leaves nothing to resolve
-// audit events against, which must fail validation.
-func TestValidateWithWarehouseIDFailsWhenNoWorkspaceInScope(t *testing.T) {
-	tr := &incrementalTransport{}
-	d := newValidateConnector(t, &databricks.NoAuth{}, tr)
-	d.sqlWarehouseID = "wh-1"
-	d.workspaces = []string{"not-a-workspace"}
-
-	_, err := d.Validate(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "no workspace is in sync scope") {
-		t.Fatalf("Validate error = %v, want a no-workspace-in-scope error", err)
-	}
-	if got := status.Code(err); got != codes.FailedPrecondition {
-		t.Errorf("Validate error code = %s, want %s", got, codes.FailedPrecondition)
+			if _, err := d.Validate(context.Background()); err != nil {
+				t.Fatalf("Validate: want nil, got %v", err)
+			}
+			if tr.hitIncrementalSyncAPI() {
+				t.Errorf("Validate made incremental-sync calls: %v", tr.paths)
+			}
+		})
 	}
 }
 
