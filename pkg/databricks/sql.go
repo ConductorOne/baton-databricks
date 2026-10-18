@@ -19,7 +19,14 @@ const (
 	statementsEndpoint = "/api/2.0/sql/statements"
 	warehousesEndpoint = "/api/2.0/sql/warehouses"
 
-	statementWaitTimeout  = "30s"
+	statementWaitTimeout = "30s"
+
+	warehouseStateRunning  = "RUNNING"
+	warehouseStateStarting = "STARTING"
+)
+
+// Vars so tests can shorten them.
+var (
 	statementPollInterval = 2 * time.Second
 	statementPollMaxWait  = 5 * time.Minute
 )
@@ -114,7 +121,7 @@ func (c *Client) ExecuteStatement(
 		return nil, rateLimit, fmt.Errorf("failed to submit statement: %w", err)
 	}
 
-	res, polledRateLimit, err := c.pollStatement(ctx, workspaceId, res)
+	res, polledRateLimit, err := c.pollStatement(ctx, workspaceId, warehouseId, res)
 	if polledRateLimit != nil {
 		rateLimit = polledRateLimit
 	}
@@ -147,7 +154,7 @@ func (c *Client) ExecuteStatement(
 // statementPollMaxWait so a warehouse stuck PENDING/RUNNING can't hang the caller
 // indefinitely; on giving up (or on ctx cancellation) it cancels the statement so it stops
 // occupying the warehouse.
-func (c *Client) pollStatement(ctx context.Context, workspaceId string, res statementResponse) (statementResponse, *v2.RateLimitDescription, error) {
+func (c *Client) pollStatement(ctx context.Context, workspaceId, warehouseId string, res statementResponse) (statementResponse, *v2.RateLimitDescription, error) {
 	l := ctxzap.Extract(ctx)
 
 	pollCtx, cancel := context.WithTimeout(ctx, statementPollMaxWait)
@@ -157,17 +164,7 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 	for res.Status.State == StatementStatePending || res.Status.State == StatementStateRunning {
 		select {
 		case <-pollCtx.Done():
-			if err := ctx.Err(); err != nil {
-				c.cancelStatement(ctx, workspaceId, res.StatementID)
-				return res, rateLimit, err
-			}
-			l.Debug("sql statement did not reach a terminal state before poll timeout, canceling",
-				zap.String("statement_id", res.StatementID),
-				zap.String("state", string(res.Status.State)),
-				zap.Duration("max_wait", statementPollMaxWait),
-			)
-			c.cancelStatement(ctx, workspaceId, res.StatementID)
-			return res, rateLimit, uhttp.WrapErrors(codes.DeadlineExceeded, fmt.Sprintf("statement %s did not reach a terminal state within %s", res.StatementID, statementPollMaxWait))
+			return res, rateLimit, c.abandonStatement(ctx, workspaceId, warehouseId, res)
 		case <-time.After(statementPollInterval):
 		}
 
@@ -182,12 +179,70 @@ func (c *Client) pollStatement(ctx context.Context, workspaceId string, res stat
 			rateLimit = polledRateLimit
 		}
 		if err != nil {
+			// The poll deadline can expire mid-request; that's still a timeout.
+			if pollCtx.Err() != nil {
+				return res, rateLimit, c.abandonStatement(ctx, workspaceId, warehouseId, res)
+			}
 			return res, rateLimit, fmt.Errorf("failed to poll statement %s: %w", res.StatementID, err)
 		}
 		res = polled
 	}
 
 	return res, rateLimit, nil
+}
+
+// abandonStatement cancels a statement that didn't finish in time and returns ctx's error if
+// the caller gave up, or else a DeadlineExceeded error saying why the statement didn't finish.
+func (c *Client) abandonStatement(ctx context.Context, workspaceId, warehouseId string, res statementResponse) error {
+	c.cancelStatement(ctx, workspaceId, res.StatementID)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	l := ctxzap.Extract(ctx)
+	l.Debug("sql statement did not reach a terminal state before poll timeout, canceled it",
+		zap.String("statement_id", res.StatementID),
+		zap.String("state", string(res.Status.State)),
+		zap.Duration("max_wait", statementPollMaxWait),
+	)
+
+	msg := fmt.Sprintf("statement %s did not finish within %s (state=%s)", res.StatementID, statementPollMaxWait, res.Status.State)
+	switch {
+	case res.Status.State == StatementStateRunning:
+		msg += ": the query was still running"
+	case res.Status.State == StatementStatePending:
+		// PENDING means waiting for compute, so the warehouse state says why.
+		state, err := c.warehouseState(ctx, workspaceId, warehouseId)
+		switch {
+		case err != nil:
+			l.Debug("failed to get sql warehouse state", zap.String("warehouse_id", warehouseId), zap.Error(err))
+		case state == "":
+		case state == warehouseStateRunning:
+			msg += fmt.Sprintf(": SQL warehouse %s is running but did not pick up the statement; it may be at capacity", warehouseId)
+		case state == warehouseStateStarting:
+			msg += fmt.Sprintf(": SQL warehouse %s was still starting; a serverless warehouse starts much faster", warehouseId)
+		default:
+			msg += fmt.Sprintf(": SQL warehouse %s is %s and has not started; check its Monitoring tab for start failures", warehouseId, state)
+		}
+	}
+
+	return uhttp.WrapErrors(codes.DeadlineExceeded, msg)
+}
+
+// warehouseState returns the warehouse's state (e.g. RUNNING, STARTING, STOPPED). Like
+// cancelStatement, it ignores ctx's cancellation.
+func (c *Client) warehouseState(ctx context.Context, workspaceId, warehouseId string) (string, error) {
+	reqCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	u := c.workspaceUrl(workspaceId).JoinPath(warehousesEndpoint, warehouseId)
+	var res struct {
+		State string `json:"state"`
+	}
+	if _, err := c.Get(WithoutCache(reqCtx), u, &res); err != nil {
+		return "", err
+	}
+	return res.State, nil
 }
 
 // cancelStatement best-effort cancels a statement we've given up polling on. The request uses
