@@ -121,27 +121,49 @@ resolved for workspaces in sync scope, so `--workspaces` and
 `--databricks-exclude-workspaces` apply to incremental sync the same way they
 apply to full syncs.
 
-Incremental sync also requires:
+### Requirements
 
-- `--sql-warehouse-id` itself: the ID of a Databricks SQL
-  warehouse the connector can use to query the `system.access.audit` table. A
-  small serverless warehouse is recommended to minimize cold-start latency.
-  The connector automatically discovers which workspace hosts it. This can be
-  any workspace in the account: `system.access.audit` is an account-wide Unity
-  Catalog system table (per [Databricks' system tables
-  reference](https://docs.databricks.com/aws/en/admin/system-tables/)), so the
-  warehouse's workspace is only the compute used to run the query — it does not
-  limit which workspaces' audit events are returned.
-- A one-time setup performed by a Databricks admin, which the connector cannot
-  do on its own:
-  - An account admin must [enable the `access` system
-    schema](https://docs.databricks.com/en/admin/system-tables/index.html) for
-    the account's Unity Catalog metastore.
-  - A metastore admin must grant `SELECT` on `system.access` to the service
-    principal or user the connector authenticates as.
+Incremental sync works only when all of the following are true:
 
-Once enabled, ongoing polling only needs that `SELECT` grant plus warehouse
-access; no further elevated privilege is required.
+- **Unity Catalog.** The SQL warehouse is in a workspace enabled for Unity
+  Catalog, and the metastore is on Unity Catalog Privilege Model Version 1.0
+  ([system tables
+  requirements](https://docs.databricks.com/aws/en/admin/system-tables/)).
+- **System tables.** The connector queries the `system.access.audit` system
+  table, which Databricks currently offers as a Public Preview.
+- **A SQL warehouse, preferably serverless.** Pass its ID with
+  `--sql-warehouse-id`. Any warehouse works, including the **Starter
+  Warehouse** Databricks creates in each workspace, so you don't need to create
+  one.
+- **Grants for the service principal** the connector authenticates as, on top of
+  the Account admin role it already needs:
+  - `USE CATALOG` on the `system` catalog
+  - `USE SCHEMA` and `SELECT` on the `system.access` schema
+  - `CAN USE` on the SQL warehouse
+
+  For example, run as a metastore admin:
+
+  ```sql
+  GRANT USE CATALOG ON CATALOG system TO `<application-id>`;
+  GRANT USE SCHEMA, SELECT ON SCHEMA system.access TO `<application-id>`;
+  ```
+
+**We recommend a serverless SQL warehouse.** It starts in seconds, while a pro
+or classic warehouse can take several minutes. Each poll waits at most 5 minutes
+for its statement, including warehouse startup; a poll that runs out of time
+fails with a `DeadlineExceeded` error and is retried on the next poll. Serverless
+SQL warehouses require the Premium plan or above.
+
+**Incremental sync covers one cloud region.** `system.access.audit` holds
+workspace-level events only for workspaces in the same cloud region as the
+workspace that queries it; account-level events are global ([system tables
+reference](https://docs.databricks.com/aws/en/admin/system-tables/)). The
+connector finds the warehouse's workspace automatically, and it receives
+incremental updates only for workspaces in that region. Workspaces in other
+regions are still covered by full syncs.
+
+Audit log entries are delivered with a delay, so the connector reads them about
+four hours after they happen.
 
 ## Group provisioning
 
