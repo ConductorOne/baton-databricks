@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -624,8 +623,9 @@ func (c *Client) ListWorkspaceMembers(
 // CreateOrUpdateWorkspaceMember grants the "USER" workspace permission to a
 // principal.
 //
-// The assignments endpoint is full-replacement, not PATCH: read current
-// permissions and merge, otherwise an existing ADMIN is lost.
+// The assignments endpoint is full-replacement, not PATCH. An existing
+// assignment of any kind (USER and/or ADMIN) already grants workspace access,
+// so nothing is written and an existing ADMIN is never touched.
 func (c *Client) CreateOrUpdateWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
@@ -643,22 +643,15 @@ func (c *Client) CreateOrUpdateWorkspaceMember(
 		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
 	}
 
-	for _, permission := range current {
-		if permission == WorkspaceUserPermission {
-			return true, ratelimitData, nil
-		}
-	}
-
-	permissionSet := map[string]struct{}{WorkspaceUserPermission: {}}
-	for _, permission := range current {
-		permissionSet[permission] = struct{}{}
+	if len(current) > 0 {
+		return true, ratelimitData, nil
 	}
 
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
 	payload := struct {
 		Permissions []string `json:"permissions"`
 	}{
-		Permissions: sortedPermissions(permissionSet),
+		Permissions: []string{WorkspaceUserPermission},
 	}
 
 	putRatelimitData, err := c.Put(ctx, u, payload, nil)
@@ -669,12 +662,12 @@ func (c *Client) CreateOrUpdateWorkspaceMember(
 	return false, ratelimitData, err
 }
 
-// RemoveWorkspaceMember revokes the "USER" workspace permission from a
-// principal.
+// RemoveWorkspaceMember removes a principal's workspace assignment.
 //
-// Same full-replacement endpoint as CreateOrUpdateWorkspaceMember: if the
-// principal holds ADMIN but not USER, PUTting the remainder would report
-// success while leaving ADMIN access in place, so that case errors instead.
+// The whole assignment (USER and/or ADMIN) is deleted because C1 models a
+// single "member" grant; this matches the previous behavior of wiping the
+// assignment with an empty PUT.
+// https://docs.databricks.com/api/access-management/v1/delete-workspace-permission-assignment
 func (c *Client) RemoveWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
@@ -692,36 +685,14 @@ func (c *Client) RemoveWorkspaceMember(
 		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
 	}
 
-	hasUser := false
-	permissionSet := make(map[string]struct{}, len(current))
-	for _, permission := range current {
-		if permission == WorkspaceUserPermission {
-			hasUser = true
-			continue
-		}
-		permissionSet[permission] = struct{}{}
-	}
-
-	if !hasUser {
-		if len(permissionSet) == 0 {
-			return true, ratelimitData, nil
-		}
-		return false, ratelimitData, uhttp.WrapErrors(
-			codes.FailedPrecondition,
-			fmt.Sprintf("databricks: principal %s holds workspace ADMIN without USER; revoke ADMIN separately before removing workspace membership", principalId),
-		)
+	if len(current) == 0 {
+		return true, ratelimitData, nil
 	}
 
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	payload := struct {
-		Permissions []string `json:"permissions"`
-	}{
-		Permissions: sortedPermissions(permissionSet),
-	}
-
-	putRatelimitData, err := c.Put(ctx, u, payload, nil)
-	if putRatelimitData != nil {
-		ratelimitData = putRatelimitData
+	deleteRatelimitData, err := c.Delete(ctx, u)
+	if deleteRatelimitData != nil {
+		ratelimitData = deleteRatelimitData
 	}
 
 	return false, ratelimitData, err
@@ -755,18 +726,6 @@ func (c *Client) currentWorkspacePermissions(
 	}
 
 	return nil, ratelimitData, nil
-}
-
-// sortedPermissions returns the set's members in a deterministic (sorted)
-// order so requests and tests are stable.
-func sortedPermissions(permissionSet map[string]struct{}) []string {
-	permissions := make([]string, 0, len(permissionSet))
-	for permission := range permissionSet {
-		permissions = append(permissions, permission)
-	}
-	sort.Strings(permissions)
-
-	return permissions
 }
 
 func (c *Client) ListRuleSets(
