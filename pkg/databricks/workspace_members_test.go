@@ -247,34 +247,56 @@ func TestRemoveWorkspaceMember_AlreadyRevoked(t *testing.T) {
 	}
 }
 
-// TestWorkspaceMember_ReadsAreNotCached: grant then revoke on the same client
-// must each see the live assignment list, not a cached one.
-func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
+// workspaceAssignmentsMock is a mutex-guarded mock of the assignments API. It
+// records the headers of every list GET and the method of every write, and can
+// answer DELETE with a configurable status.
+type workspaceAssignmentsMock struct {
+	mu           sync.Mutex
+	assignments  []WorkspaceAssignment
+	deleteStatus int // 0 means 200 OK
+	listGets     []http.Header
+	writes       []string
+}
+
+func (m *workspaceAssignmentsMock) setAssignments(assignments []WorkspaceAssignment) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.assignments = assignments
+}
+
+func (m *workspaceAssignmentsMock) snapshot() ([]http.Header, []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]http.Header(nil), m.listGets...), append([]string(nil), m.writes...)
+}
+
+func newWorkspaceAssignmentsMockClient(t *testing.T, m *workspaceAssignmentsMock) *Client {
+	t.Helper()
+
 	listPath := fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, testAccountId, testWorkspaceId)
 
-	var (
-		mu          sync.Mutex
-		assignments []WorkspaceAssignment
-		listGets    int
-		writes      []string
-	)
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == listPath:
-			listGets++
+			m.listGets = append(m.listGets, r.Header.Clone())
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(struct {
 				Assignments []WorkspaceAssignment `json:"permission_assignments"`
-			}{Assignments: assignments})
+			}{Assignments: m.assignments})
 		case r.Method == http.MethodPut && r.URL.Path == testPrincipalPath:
-			writes = append(writes, r.Method)
+			m.writes = append(m.writes, r.Method)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 		case r.Method == http.MethodDelete && r.URL.Path == testPrincipalPath:
-			writes = append(writes, r.Method)
+			m.writes = append(m.writes, r.Method)
+			if m.deleteStatus != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(m.deleteStatus)
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -292,6 +314,22 @@ func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	return c
+}
+
+var testUserAssignment = []WorkspaceAssignment{
+	{
+		Principal:   &WorkspacePrincipal{ID: 100, UserName: "user@example.com"},
+		Permissions: []string{"USER"},
+	},
+}
+
+// TestWorkspaceMember_ReadsAreNotCached: grant then revoke on the same client
+// must each see the live assignment list, not a cached one, and each
+// read-before-write GET must carry Cache-Control: no-cache.
+func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
+	m := &workspaceAssignmentsMock{}
+	c := newWorkspaceAssignmentsMockClient(t, m)
 
 	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
@@ -301,14 +339,7 @@ func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
 		t.Errorf("alreadyGranted = true, want false (empty list)")
 	}
 
-	mu.Lock()
-	assignments = []WorkspaceAssignment{
-		{
-			Principal:   &WorkspacePrincipal{ID: 100, UserName: "user@example.com"},
-			Permissions: []string{"USER"},
-		},
-	}
-	mu.Unlock()
+	m.setAssignments(testUserAssignment)
 
 	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
@@ -318,13 +349,95 @@ func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
 		t.Errorf("alreadyRevoked = true, want false (stale cached list)")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if listGets != 2 {
-		t.Errorf("list GETs = %d, want 2", listGets)
+	listGets, writes := m.snapshot()
+	if len(listGets) != 2 {
+		t.Fatalf("list GETs = %d, want 2", len(listGets))
+	}
+	for i, h := range listGets {
+		if got := h.Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("list GET %d Cache-Control = %q, want \"no-cache\"", i, got)
+		}
 	}
 	if len(writes) != 2 || writes[0] != http.MethodPut || writes[1] != http.MethodDelete {
 		t.Errorf("writes = %v, want [PUT DELETE]", writes)
+	}
+}
+
+// TestRemoveWorkspaceMember_DeleteNotFound: an assignment removed between the
+// read and the DELETE is already revoked, not an error.
+func TestRemoveWorkspaceMember_DeleteNotFound(t *testing.T) {
+	m := &workspaceAssignmentsMock{assignments: testUserAssignment, deleteStatus: http.StatusNotFound}
+	c := newWorkspaceAssignmentsMockClient(t, m)
+
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("RemoveWorkspaceMember: %v", err)
+	}
+	if !alreadyRevoked {
+		t.Errorf("alreadyRevoked = false, want true (DELETE returned 404)")
+	}
+	if _, writes := m.snapshot(); len(writes) != 1 || writes[0] != http.MethodDelete {
+		t.Errorf("writes = %v, want exactly [DELETE]", writes)
+	}
+}
+
+// TestRemoveWorkspaceMember_DeleteServerError: any other DELETE failure is
+// returned, not swallowed.
+func TestRemoveWorkspaceMember_DeleteServerError(t *testing.T) {
+	m := &workspaceAssignmentsMock{assignments: testUserAssignment, deleteStatus: http.StatusInternalServerError}
+	c := newWorkspaceAssignmentsMockClient(t, m)
+
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err == nil {
+		t.Fatal("RemoveWorkspaceMember: expected error, got nil")
+	}
+	if alreadyRevoked {
+		t.Errorf("alreadyRevoked = true, want false (DELETE failed)")
+	}
+}
+
+// TestWorkspaceMember_NoCacheReadDoesNotOverwriteSyncCache: a read-before-write
+// must see live state without replacing the cached entry that sync's
+// ListWorkspaceMembers reads from.
+func TestWorkspaceMember_NoCacheReadDoesNotOverwriteSyncCache(t *testing.T) {
+	m := &workspaceAssignmentsMock{}
+	c := newWorkspaceAssignmentsMockClient(t, m)
+	ctx := context.Background()
+
+	// State A (empty), cached by sync.
+	first, _, err := c.ListWorkspaceMembers(ctx, testWorkspaceId)
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers: %v", err)
+	}
+	if len(first) != 0 {
+		t.Fatalf("first ListWorkspaceMembers = %v, want empty", first)
+	}
+
+	// State B: the no-cache read must see it.
+	m.setAssignments(testUserAssignment)
+	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(ctx, testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
+	}
+	if !alreadyGranted {
+		t.Errorf("alreadyGranted = false, want true (read-before-write saw stale state)")
+	}
+
+	// Sync's cached entry must still be state A, served without a new GET.
+	second, _, err := c.ListWorkspaceMembers(ctx, testWorkspaceId)
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers: %v", err)
+	}
+	if len(second) != 0 {
+		t.Errorf("second ListWorkspaceMembers = %v, want cached empty list (cache entry overwritten)", second)
+	}
+
+	listGets, writes := m.snapshot()
+	if len(listGets) != 2 {
+		t.Errorf("list GETs = %d, want 2 (cached sync read, no-cache read)", len(listGets))
+	}
+	if len(writes) != 0 {
+		t.Errorf("writes = %v, want none", writes)
 	}
 }
 

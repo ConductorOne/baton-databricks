@@ -2,6 +2,7 @@ package databricks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -103,7 +104,8 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 		Host:   accountHostname,
 	}
 
-	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient)
+	// Key the cache on Cache-Control so read-before-write no-cache reads don't overwrite the shared sync entry.
+	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient, uhttp.WithCacheKeyHeaders("Cache-Control"))
 	return &Client{
 		httpClient:        cli,
 		auth:              auth,
@@ -707,18 +709,16 @@ func (c *Client) RemoveWorkspaceMember(
 		return true, ratelimitData, nil
 	}
 
-	if (WorkspaceAssignment{Permissions: current}).HasAdmin() {
-		ctxzap.Extract(ctx).Debug("databricks: removing workspace assignment that includes ADMIN",
-			zap.String("workspace_id", workspaceId),
-			zap.String("principal_id", principalId),
-			zap.Strings("permissions", current),
-		)
-	}
-
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
 	deleteRatelimitData, err := c.Delete(ctx, u)
 	if deleteRatelimitData != nil {
 		ratelimitData = deleteRatelimitData
+	}
+
+	// Removed between the read and the DELETE: already revoked.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return true, ratelimitData, nil
 	}
 
 	return false, ratelimitData, err
