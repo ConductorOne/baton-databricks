@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -243,6 +244,87 @@ func TestRemoveWorkspaceMember_AlreadyRevoked(t *testing.T) {
 	}
 	if len(writes) != 0 {
 		t.Fatalf("expected no write requests, got %d: %+v", len(writes), writes)
+	}
+}
+
+// TestWorkspaceMember_ReadsAreNotCached: grant then revoke on the same client
+// must each see the live assignment list, not a cached one.
+func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
+	listPath := fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, testAccountId, testWorkspaceId)
+
+	var (
+		mu          sync.Mutex
+		assignments []WorkspaceAssignment
+		listGets    int
+		writes      []string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPath:
+			listGets++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(struct {
+				Assignments []WorkspaceAssignment `json:"permission_assignments"`
+			}{Assignments: assignments})
+		case r.Method == http.MethodPut && r.URL.Path == testPrincipalPath:
+			writes = append(writes, r.Method)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodDelete && r.URL.Path == testPrincipalPath:
+			writes = append(writes, r.Method)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	httpClient := &http.Client{Transport: &workspaceMembersHostRewriter{target: target}}
+	c, err := NewClient(context.Background(), httpClient, testHostnameForWorkspaceMembers, testAccountHostForWorkspaceMembers, testAccountId, "", &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
+	}
+	if alreadyGranted {
+		t.Errorf("alreadyGranted = true, want false (empty list)")
+	}
+
+	mu.Lock()
+	assignments = []WorkspaceAssignment{
+		{
+			Principal:   &WorkspacePrincipal{ID: 100, UserName: "user@example.com"},
+			Permissions: []string{"USER"},
+		},
+	}
+	mu.Unlock()
+
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("RemoveWorkspaceMember: %v", err)
+	}
+	if alreadyRevoked {
+		t.Errorf("alreadyRevoked = true, want false (stale cached list)")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if listGets != 2 {
+		t.Errorf("list GETs = %d, want 2", listGets)
+	}
+	if len(writes) != 2 || writes[0] != http.MethodPut || writes[1] != http.MethodDelete {
+		t.Errorf("writes = %v, want [PUT DELETE]", writes)
 	}
 }
 

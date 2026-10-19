@@ -607,12 +607,30 @@ func (c *Client) ListWorkspaceMembers(
 	*v2.RateLimitDescription,
 	error,
 ) {
+	return c.listWorkspaceAssignments(ctx, workspaceId, false)
+}
+
+// listWorkspaceAssignments lists the workspace's assignments; noCache skips
+// the uhttp response cache.
+func (c *Client) listWorkspaceAssignments(
+	ctx context.Context,
+	workspaceId string,
+	noCache bool,
+) (
+	[]WorkspaceAssignment,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res struct {
 		Assignments []WorkspaceAssignment `json:"permission_assignments"`
 	}
 
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId))
-	ratelimitData, err := c.Get(ctx, u, &res)
+	get := c.Get
+	if noCache {
+		get = c.getNoCache
+	}
+	ratelimitData, err := get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, err
 	}
@@ -709,7 +727,8 @@ func (c *Client) currentWorkspacePermissions(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	assignments, ratelimitData, err := c.ListWorkspaceMembers(ctx, workspaceId)
+	// Read-before-write: a cached list would miss earlier PUTs/DELETEs.
+	assignments, ratelimitData, err := c.listWorkspaceAssignments(ctx, workspaceId, true)
 	if err != nil {
 		return nil, ratelimitData, err
 	}
