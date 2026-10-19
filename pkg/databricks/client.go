@@ -707,6 +707,14 @@ func (c *Client) RemoveWorkspaceMember(
 		return true, ratelimitData, nil
 	}
 
+	if (WorkspaceAssignment{Permissions: current}).HasAdmin() {
+		ctxzap.Extract(ctx).Debug("databricks: removing workspace assignment that includes ADMIN",
+			zap.String("workspace_id", workspaceId),
+			zap.String("principal_id", principalId),
+			zap.Strings("permissions", current),
+		)
+	}
+
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
 	deleteRatelimitData, err := c.Delete(ctx, u)
 	if deleteRatelimitData != nil {
