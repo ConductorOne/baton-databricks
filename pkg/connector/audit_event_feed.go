@@ -369,8 +369,9 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	var events []*v2.Event
+	principalTypes := principalTypeCache{}
 	for _, row := range rows {
-		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, row, f.client.GetAccountId(), workspaceLookup)
+		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
 		if rowRateLimit != nil {
 			annos.WithRateLimiting(rowRateLimit)
 		}
@@ -485,6 +486,7 @@ type affectedGrant struct {
 func mapAuditRowToResource(
 	ctx context.Context,
 	client *databricks.Client,
+	principalTypes principalTypeCache,
 	row auditLogRow,
 	accountId string,
 	workspaceLookup map[int64]string,
@@ -533,7 +535,7 @@ func mapAuditRowToResource(
 		}
 
 		if mapping.grant != nil {
-			g, rateLimit, err := buildAffectedGrant(ctx, client, row, mapping.grant, resourceId, accountParent)
+			g, rateLimit, err := buildAffectedGrant(ctx, client, principalTypes, row, mapping.grant, resourceId, accountParent)
 			if err != nil {
 				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
 			}
@@ -571,6 +573,7 @@ func mapAuditRowToResource(
 func buildAffectedGrant(
 	ctx context.Context,
 	client *databricks.Client,
+	principalTypes principalTypeCache,
 	row auditLogRow,
 	gm *auditGrantMapping,
 	entitlementResourceId, parent *v2.ResourceId,
@@ -580,7 +583,7 @@ func buildAffectedGrant(
 		return nil, nil, nil
 	}
 
-	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalNativeId)
+	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalTypes, principalNativeId)
 	if err != nil {
 		return nil, rateLimit, err
 	}
@@ -601,11 +604,20 @@ func buildAffectedGrant(
 	}, rateLimit, nil
 }
 
+// principalTypeCache memoizes resolvePrincipalType for one ListEvents call, so a principal
+// named on many rows is looked up once. A nil value means the id matched no principal.
+type principalTypeCache map[string]*v2.ResourceType
+
 // resolvePrincipalType finds which resource type nativeId belongs to, trying user, group, then
 // service principal in that order via the Account API and stopping at the first match: the audit log's
 // targetUserId doesn't record which kind of principal it actually is. Returns a nil type (no
-// error) if nativeId doesn't match any of the three.
-func resolvePrincipalType(ctx context.Context, client *databricks.Client, nativeId string) (*v2.ResourceType, *v2.RateLimitDescription, error) {
+// error) if nativeId doesn't match any of the three. Results, including no match, are cached
+// in principalTypes; errors aren't.
+func resolvePrincipalType(ctx context.Context, client *databricks.Client, principalTypes principalTypeCache, nativeId string) (*v2.ResourceType, *v2.RateLimitDescription, error) {
+	if resourceType, ok := principalTypes[nativeId]; ok {
+		return resourceType, nil, nil
+	}
+
 	candidates := []struct {
 		resourceType *v2.ResourceType
 		found        func() (bool, *v2.RateLimitDescription, error)
@@ -631,10 +643,12 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, native
 			return nil, rateLimit, fmt.Errorf("failed to check principal %s: %w", nativeId, err)
 		}
 		if found {
+			principalTypes[nativeId] = candidate.resourceType
 			return candidate.resourceType, rateLimit, nil
 		}
 	}
 
+	principalTypes[nativeId] = nil
 	return nil, rateLimit, nil
 }
 
