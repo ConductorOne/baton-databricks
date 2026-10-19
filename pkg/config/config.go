@@ -55,15 +55,16 @@ var (
 		field.WithDisplayName("Exclude Workspaces"),
 	)
 	// SQLWarehouseIDField doubles as the incremental-sync switch: set enables it, empty disables it.
-	// system.access.audit is account-wide, so this warehouse can be in any workspace in the
-	// account — its workspace is just query compute, not a data scope.
+	// system.access.audit only has workspace-level events from the warehouse's region, so the
+	// warehouse must share a region with the workspaces incremental sync should cover.
 	SQLWarehouseIDField = field.StringField(
 		"sql-warehouse-id",
 		field.WithDescription(
 			"Setting this enables incremental sync; leaving it empty disables it. "+
 				"ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, "+
 				"so access changes show up before the next full sync (deletions are still only caught by full syncs). "+
-				"The warehouse can live in any workspace; the connector discovers which one automatically.",
+				"The warehouse can be in any workspace in the same cloud region as the workspaces to update incrementally; "+
+				"Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically.",
 		),
 		field.WithDisplayName("SQL Warehouse ID"),
 	)

@@ -155,7 +155,7 @@
     {
       "name": "sql-warehouse-id",
       "displayName": "SQL Warehouse ID",
-      "description": "Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deletions are still only caught by full syncs). The warehouse can live in any workspace; the connector discovers which one automatically.",
+      "description": "Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deletions are still only caught by full syncs). The warehouse can be in any workspace in the same cloud region as the workspaces to update incrementally; Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically.",
       "stringField": {}
     }
   ],

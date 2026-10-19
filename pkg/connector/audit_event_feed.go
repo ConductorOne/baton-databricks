@@ -250,7 +250,7 @@ func newAuditEventFeed(
 // resolveQueryWorkspaceID returns which workspace hosts f.sqlWarehouseID, resolving it
 // once via resolveWarehouseWorkspace rather than probing on every poll. allWorkspaces
 // must be every workspace in the account, not filtered by the --workspaces allowlist:
-// the warehouse can live in a workspace outside that scope.
+// the warehouse can live in a workspace outside that scope (in the same region).
 func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, allWorkspaces []databricks.Workspace) (string, *v2.RateLimitDescription, error) {
 	f.queryWorkspaceMu.Lock()
 	defer f.queryWorkspaceMu.Unlock()
