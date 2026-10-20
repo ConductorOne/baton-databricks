@@ -32,7 +32,10 @@ func newMetastoreBuilder(client *databricks.Client, uc *unityCatalog, sync syncP
 
 // workspaceForProfile is the first attached workspace whose grants are visible.
 // A later one wins over routed[0] when that is the only place the connector
-// holds Admin. When none pass, routed[0] is still recorded so Grants can say why.
+// holds Admin. A probe error other than a rate limit or a cancelled context is
+// skipped: failing List here fails the whole sync, and Grants re-routes when
+// the recorded workspace does not answer. When none pass, routed[0] is still
+// recorded so Grants can say why.
 func (m *metastoreBuilder) workspaceForProfile(
 	ctx context.Context,
 	snap routingSnapshot,
@@ -46,7 +49,7 @@ func (m *metastoreBuilder) workspaceForProfile(
 			rateLimit = probeRateLimit
 		}
 		if err != nil {
-			if ctx.Err() != nil || isRateLimitError(err) || !isUnreadableWorkspaceError(err) {
+			if ctx.Err() != nil || isRateLimitError(err) {
 				return "", rateLimit, err
 			}
 			ctxzap.Extract(ctx).Debug("databricks-connector: could not read a workspace while choosing the metastore profile; trying the next one",
@@ -224,17 +227,31 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 		ctx, workspace, databricks.SecurableMetastore, ref.permissionsName(), "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	// The permissions endpoint answers 404 both when the metastore is gone and
-	// when this workspace does not serve it. Only METASTORE_DOES_NOT_EXIST is
-	// the first. Any other 404 is re-wrapped: uhttp maps HTTP 404 to
-	// codes.NotFound, and the SDK skips a NotFound grants read, which makes
-	// C1 delete the bindings.
+	// when this workspace does not serve it, and Databricks uses
+	// METASTORE_DOES_NOT_EXIST for both ("No metastore assigned for the current
+	// workspace"). The account list is what separates them. Any other 404 is
+	// re-wrapped: uhttp maps HTTP 404 to codes.NotFound, and the SDK skips a
+	// NotFound grants read, which makes C1 delete the bindings.
 	if err != nil {
 		if databricks.IsSecurableGone(err, databricks.ErrorCodeMetastoreDoesNotExist) {
-			l.Debug("databricks-connector: metastore is gone; returning no grants",
-				zap.String("metastore", ref.metastoreID),
-			)
+			_, confirmed, confirmRateLimit, confirmErr := m.accessPath(ctx, resource, ref, true)
+			noteRateLimit(&annos, confirmRateLimit)
+			if confirmErr != nil {
+				return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+					"databricks-connector: failed to confirm whether metastore %s is still listed: %w", ref.metastoreID, confirmErr)
+			}
+			if confirmed == metastoreGone {
+				l.Debug("databricks-connector: metastore is gone; returning no grants",
+					zap.String("metastore", ref.metastoreID),
+				)
 
-			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+				return nil, &rs.SyncOpResults{Annotations: annos}, nil
+			}
+
+			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.FailedPrecondition,
+				fmt.Sprintf("databricks-connector: permissions on metastore %s returned %s, but the account still lists the metastore, so this is not an absence",
+					ref.metastoreID, databricks.ErrorCodeMetastoreDoesNotExist),
+				err)
 		}
 		if isNotFoundError(err) {
 			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.FailedPrecondition,

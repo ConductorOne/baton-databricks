@@ -729,7 +729,8 @@ func TestAPermissions404WithoutTheGoneCodeIsNotAWarning(t *testing.T) {
 		code codes.Code
 	}{
 		{"routing miss", `{"message":"nope"}`, codes.FailedPrecondition},
-		{"gone", `{"error_code":"METASTORE_DOES_NOT_EXIST","message":"not found"}`, codes.OK},
+		// The account still lists the metastore, so the error code alone is not absence.
+		{"still listed", `{"error_code":"METASTORE_DOES_NOT_EXIST","message":"No metastore assigned for the current workspace"}`, codes.FailedPrecondition},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -809,5 +810,112 @@ func TestListRecordsTheWorkspaceWhereTheProbePasses(t *testing.T) {
 	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace)
 	if workspace != "wsb" {
 		t.Errorf("profile workspace = %q, want wsb, the workspace where the connector is Admin", workspace)
+	}
+}
+
+func TestMetastoreDoesNotExistIsAbsenceOnlyWhenTheAccountDropsIt(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	tests := []struct {
+		name   string
+		listed bool
+		want   codes.Code
+	}{
+		{"account still lists it", true, codes.FailedPrecondition},
+		{"account dropped it", false, codes.OK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				path := r.URL.Path
+				switch {
+				case strings.HasSuffix(path, "/metastores"):
+					metastores := []map[string]any{}
+					if test.listed {
+						metastores = append(metastores, map[string]any{"metastore_id": "ms-a", "name": "main", "owner": "app-1"})
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"metastores": metastores})
+				case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspace_ids": []int{1}})
+				case strings.HasSuffix(path, "/workspaces"):
+					_ = json.NewEncoder(w).Encode([]map[string]any{
+						{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+					})
+				case strings.Contains(path, "/unity-catalog/permissions/"):
+					http.Error(w, `{"error_code":"METASTORE_DOES_NOT_EXIST","message":"No metastore assigned for the current workspace"}`, http.StatusNotFound)
+				default:
+					http.Error(w, `{"message":"unexpected"}`, http.StatusInternalServerError)
+				}
+			})
+			m := newMetastoreBuilder(client, newUnityCatalog(client, "app-1", nil), syncPrincipals{})
+			account := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
+			metastore, err := metastoreResource(context.Background(), &databricks.Metastore{MetastoreID: "ms-a", Owner: "app-1"}, account, "wsa", "1", "prod")
+			if err != nil {
+				t.Fatalf("metastoreResource: %v", err)
+			}
+
+			_, _, err = m.Grants(context.Background(), metastore, rs.SyncOpAttrs{})
+			if status.Code(err) != test.want {
+				t.Fatalf("Grants = %v, want %s", err, test.want)
+			}
+		})
+	}
+}
+
+func TestListSkipsAProfileProbeThatIsNotARefusal(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	tests := []struct {
+		name      string
+		firstCode int
+		want      string
+	}{
+		{"one workspace returns 500", http.StatusInternalServerError, "wsb"},
+		{"every probe fails", http.StatusInternalServerError, "wsa"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				path := r.URL.Path
+				switch {
+				case strings.HasSuffix(path, "/workspaces/1/permissionassignments"):
+					http.Error(w, `{"message":"unavailable"}`, test.firstCode)
+				case strings.HasSuffix(path, "/workspaces/2/permissionassignments"):
+					if test.want == "wsa" {
+						http.Error(w, `{"message":"unavailable"}`, http.StatusInternalServerError)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"permission_assignments": []map[string]any{{
+						"principal":   map[string]any{"service_principal_name": "app-1", "principal_id": 7},
+						"permissions": []string{"ADMIN"},
+					}}})
+				case strings.HasSuffix(path, "/metastores"):
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"metastores": []map[string]any{{"metastore_id": "ms-a", "name": "main", "owner": "someone-else"}},
+					})
+				case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspace_ids": []int{1, 2}})
+				case strings.HasSuffix(path, "/workspaces"):
+					_ = json.NewEncoder(w).Encode([]map[string]any{
+						{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+						{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "RUNNING"},
+					})
+				default:
+					http.Error(w, `{"message":"unexpected"}`, http.StatusInternalServerError)
+				}
+			})
+			m := newMetastoreBuilder(client, newUnityCatalog(client, "app-1", nil), syncPrincipals{})
+			account := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
+			resources, _, err := m.List(context.Background(), account, rs.SyncOpAttrs{})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace)
+			if workspace != test.want {
+				t.Errorf("profile workspace = %q, want %q", workspace, test.want)
+			}
+		})
 	}
 }
