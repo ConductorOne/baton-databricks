@@ -640,41 +640,55 @@ func (c *Client) listWorkspaceAssignments(
 	return res.Assignments, ratelimitData, nil
 }
 
-// CreateOrUpdateWorkspaceMember grants the "USER" workspace permission to a
-// principal.
+// validatePrincipalID rejects non-numeric IDs: the assignments API addresses
+// principals by numeric ID, and a group's composite resource ID would never match.
+func validatePrincipalID(principalID string) error {
+	if _, err := strconv.Atoi(principalID); err != nil {
+		return uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %q", principalID),
+		)
+	}
+
+	return nil
+}
+
+// workspacePrincipalAssignmentURL is the URL of a single principal's assignment
+// on a workspace.
+func (c *Client) workspacePrincipalAssignmentURL(workspaceId, principalId string) *url.URL {
+	return c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
+}
+
+// AddWorkspaceMember grants the "USER" workspace permission to a principal.
 //
 // The assignments endpoint is full-replacement, not PATCH. An existing
 // assignment of any kind (USER and/or ADMIN) already grants workspace access,
 // so nothing is written and an existing ADMIN is never touched.
-func (c *Client) CreateOrUpdateWorkspaceMember(
+func (c *Client) AddWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
 ) (bool, *v2.RateLimitDescription, error) {
-	if _, convErr := strconv.Atoi(principalId); convErr != nil {
-		return false, nil, uhttp.WrapErrors(
-			codes.InvalidArgument,
-			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %s", principalId),
-		)
+	if err := validatePrincipalID(principalId); err != nil {
+		return false, nil, err
 	}
 
-	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	hasAssignment, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
 	if err != nil {
-		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
+		return false, ratelimitData, fmt.Errorf("databricks: failed to read current workspace permission assignment: %w", err)
 	}
 
-	if len(current) > 0 {
+	if hasAssignment {
 		return true, ratelimitData, nil
 	}
 
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
 	payload := struct {
 		Permissions []string `json:"permissions"`
 	}{
 		Permissions: []string{WorkspaceUserPermission},
 	}
 
-	putRatelimitData, err := c.Put(ctx, u, payload, nil)
+	putRatelimitData, err := c.Put(ctx, c.workspacePrincipalAssignmentURL(workspaceId, principalId), payload, nil)
 	if putRatelimitData != nil {
 		ratelimitData = putRatelimitData
 	}
@@ -693,24 +707,20 @@ func (c *Client) RemoveWorkspaceMember(
 	workspaceId string,
 	principalId string,
 ) (bool, *v2.RateLimitDescription, error) {
-	if _, convErr := strconv.Atoi(principalId); convErr != nil {
-		return false, nil, uhttp.WrapErrors(
-			codes.InvalidArgument,
-			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %s", principalId),
-		)
+	if err := validatePrincipalID(principalId); err != nil {
+		return false, nil, err
 	}
 
-	current, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	hasAssignment, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
 	if err != nil {
-		return false, ratelimitData, fmt.Errorf("failed to list current workspace permission assignments: %w", err)
+		return false, ratelimitData, fmt.Errorf("databricks: failed to read current workspace permission assignment: %w", err)
 	}
 
-	if len(current) == 0 {
+	if !hasAssignment {
 		return true, ratelimitData, nil
 	}
 
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	deleteRatelimitData, err := c.Delete(ctx, u)
+	deleteRatelimitData, err := c.Delete(ctx, c.workspacePrincipalAssignmentURL(workspaceId, principalId))
 	if deleteRatelimitData != nil {
 		ratelimitData = deleteRatelimitData
 	}
@@ -724,21 +734,24 @@ func (c *Client) RemoveWorkspaceMember(
 	return false, ratelimitData, err
 }
 
-// currentWorkspacePermissions lists every assignment on the workspace and
-// matches by principal ID: there's no API to fetch a single assignment directly.
+// currentWorkspacePermissions reports whether the principal holds any
+// permission on the workspace. It lists every assignment and matches by
+// principal ID: there's no API to fetch a single assignment directly. An entry
+// for the principal carrying an error is returned as an error, so callers
+// never write on top of an assignment that couldn't be read properly.
 func (c *Client) currentWorkspacePermissions(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
 ) (
-	[]string,
+	bool,
 	*v2.RateLimitDescription,
 	error,
 ) {
 	// Read-before-write: a cached list would miss earlier PUTs/DELETEs.
 	assignments, ratelimitData, err := c.listWorkspaceAssignments(ctx, workspaceId, true)
 	if err != nil {
-		return nil, ratelimitData, err
+		return false, ratelimitData, err
 	}
 
 	for _, assignment := range assignments {
@@ -748,11 +761,17 @@ func (c *Client) currentWorkspacePermissions(
 		if strconv.Itoa(assignment.Principal.ID) != principalId {
 			continue
 		}
+		if assignment.Error != "" {
+			return false, ratelimitData, uhttp.WrapErrors(
+				codes.Internal,
+				fmt.Sprintf("databricks: workspace %s assignment for principal %s has an error: %s", workspaceId, principalId, assignment.Error),
+			)
+		}
 
-		return assignment.Permissions, ratelimitData, nil
+		return len(assignment.Permissions) > 0, ratelimitData, nil
 	}
 
-	return nil, ratelimitData, nil
+	return false, ratelimitData, nil
 }
 
 func (c *Client) ListRuleSets(

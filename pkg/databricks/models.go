@@ -137,17 +137,8 @@ const (
 type WorkspaceAssignment struct {
 	Principal   *WorkspacePrincipal `json:"principal"`
 	Permissions []string            `json:"permissions"`
-}
-
-// HasAdmin reports whether this assignment includes workspace ADMIN-level access.
-func (w WorkspaceAssignment) HasAdmin() bool {
-	for _, p := range w.Permissions {
-		if p == WorkspaceAdminPermission {
-			return true
-		}
-	}
-
-	return false
+	// Error is the error response associated with this assignment, if any.
+	Error string `json:"error"`
 }
 
 type Role struct {

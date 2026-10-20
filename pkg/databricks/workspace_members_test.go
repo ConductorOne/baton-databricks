@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -27,68 +28,6 @@ func (h *workspaceMembersHostRewriter) RoundTrip(req *http.Request) (*http.Respo
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-// recordedRequest captures what the client actually sent, so tests can assert
-// on HTTP method and request body rather than just the final return value.
-type recordedRequest struct {
-	method string
-	path   string
-	body   map[string]interface{}
-}
-
-// newWorkspaceMembersTestClient starts a mock server that answers the list
-// (GET) endpoint with currentAssignments and records every PUT and DELETE it
-// receives into *writes, so the test can assert the exact method/body sent.
-func newWorkspaceMembersTestClient(
-	t *testing.T,
-	currentAssignments []WorkspaceAssignment,
-	writes *[]recordedRequest,
-) *Client {
-	t.Helper()
-
-	listPath := fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, testAccountId, testWorkspaceId)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == listPath:
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(struct {
-				Assignments []WorkspaceAssignment `json:"permission_assignments"`
-			}{Assignments: currentAssignments})
-			return
-		case r.Method == http.MethodPut:
-			var body map[string]interface{}
-			if r.Body != nil {
-				_ = json.NewDecoder(r.Body).Decode(&body)
-			}
-			*writes = append(*writes, recordedRequest{method: r.Method, path: r.URL.Path, body: body})
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{}`))
-			return
-		case r.Method == http.MethodDelete:
-			*writes = append(*writes, recordedRequest{method: r.Method, path: r.URL.Path})
-			w.WriteHeader(http.StatusOK)
-			return
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
-
-	httpClient := &http.Client{Transport: &workspaceMembersHostRewriter{target: target}}
-	c, err := NewClient(context.Background(), httpClient, testHostnameForWorkspaceMembers, testAccountHostForWorkspaceMembers, testAccountId, "", &NoAuth{}, nil)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	return c
-}
-
 const (
 	testAccountId                      = "acc-1"
 	testWorkspaceId                    = "ws1"
@@ -99,163 +38,24 @@ const (
 
 var testPrincipalPath = fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, testAccountId, testWorkspaceId) + "/principals/" + testPrincipalId
 
-func permissionsFromBody(t *testing.T, body map[string]interface{}) []string {
-	t.Helper()
-	raw, ok := body["permissions"]
-	if !ok {
-		t.Fatalf("request body has no \"permissions\" field: %v", body)
-	}
-	rawSlice, ok := raw.([]interface{})
-	if !ok {
-		t.Fatalf("\"permissions\" field is not an array: %v", raw)
-	}
-	out := make([]string, 0, len(rawSlice))
-	for _, v := range rawSlice {
-		s, ok := v.(string)
-		if !ok {
-			t.Fatalf("permissions entry is not a string: %v", v)
-		}
-		out = append(out, s)
-	}
-	return out
-}
-
-// TestCreateOrUpdateWorkspaceMember_NoExistingAssignment: a principal with no
-// assignment at all gets exactly one PUT with [USER].
-func TestCreateOrUpdateWorkspaceMember_NoExistingAssignment(t *testing.T) {
-	var writes []recordedRequest
-	c := newWorkspaceMembersTestClient(t, nil, &writes)
-
-	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
-	if err != nil {
-		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
-	}
-	if alreadyGranted {
-		t.Errorf("alreadyGranted = true, want false (no prior assignment)")
-	}
-
-	if len(writes) != 1 {
-		t.Fatalf("expected exactly 1 write request, got %d: %+v", len(writes), writes)
-	}
-	got := writes[0]
-	if got.method != http.MethodPut {
-		t.Errorf("method = %s, want PUT", got.method)
-	}
-	if got.path != testPrincipalPath {
-		t.Errorf("path = %s, want %s", got.path, testPrincipalPath)
-	}
-	permissions := permissionsFromBody(t, got.body)
-	if len(permissions) != 1 || permissions[0] != "USER" {
-		t.Errorf("permissions sent = %v, want exactly [USER]", permissions)
-	}
-}
-
-// TestCreateOrUpdateWorkspaceMember_ExistingAssignment: any existing
-// assignment already grants workspace access, so nothing is written and an
-// existing ADMIN is left untouched.
-func TestCreateOrUpdateWorkspaceMember_ExistingAssignment(t *testing.T) {
-	tests := []struct {
-		name        string
-		permissions []string
-	}{
-		{"user only", []string{"USER"}},
-		{"admin only", []string{"ADMIN"}},
-		{"user and admin", []string{"USER", "ADMIN"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var writes []recordedRequest
-			c := newWorkspaceMembersTestClient(t, []WorkspaceAssignment{
-				{
-					Principal:   &WorkspacePrincipal{ID: 100, UserName: "user@example.com"},
-					Permissions: tt.permissions,
-				},
-			}, &writes)
-
-			alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
-			if err != nil {
-				t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
-			}
-			if !alreadyGranted {
-				t.Errorf("alreadyGranted = false, want true (principal already holds %v)", tt.permissions)
-			}
-			if len(writes) != 0 {
-				t.Fatalf("expected no write requests, got %d: %+v", len(writes), writes)
-			}
-		})
-	}
-}
-
-// TestRemoveWorkspaceMember_ExistingAssignment: revoke deletes the whole
-// assignment, whatever it holds.
-func TestRemoveWorkspaceMember_ExistingAssignment(t *testing.T) {
-	tests := []struct {
-		name        string
-		permissions []string
-	}{
-		{"user only", []string{"USER"}},
-		{"admin only", []string{"ADMIN"}},
-		{"user and admin", []string{"USER", "ADMIN"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var writes []recordedRequest
-			c := newWorkspaceMembersTestClient(t, []WorkspaceAssignment{
-				{
-					Principal:   &WorkspacePrincipal{ID: 100, UserName: "user@example.com"},
-					Permissions: tt.permissions,
-				},
-			}, &writes)
-
-			alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
-			if err != nil {
-				t.Fatalf("RemoveWorkspaceMember: %v", err)
-			}
-			if alreadyRevoked {
-				t.Errorf("alreadyRevoked = true, want false (a DELETE was needed)")
-			}
-
-			if len(writes) != 1 {
-				t.Fatalf("expected exactly 1 write request, got %d: %+v", len(writes), writes)
-			}
-			got := writes[0]
-			if got.method != http.MethodDelete {
-				t.Errorf("method = %s, want DELETE", got.method)
-			}
-			if got.path != testPrincipalPath {
-				t.Errorf("path = %s, want %s", got.path, testPrincipalPath)
-			}
-		})
-	}
-}
-
-// TestRemoveWorkspaceMember_AlreadyRevoked: a principal who holds nothing at
-// all needs no request; the revoke reports GrantAlreadyRevoked upstream.
-func TestRemoveWorkspaceMember_AlreadyRevoked(t *testing.T) {
-	var writes []recordedRequest
-	c := newWorkspaceMembersTestClient(t, nil, &writes)
-
-	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
-	if err != nil {
-		t.Fatalf("RemoveWorkspaceMember: %v", err)
-	}
-	if !alreadyRevoked {
-		t.Errorf("alreadyRevoked = false, want true (principal holds nothing)")
-	}
-	if len(writes) != 0 {
-		t.Fatalf("expected no write requests, got %d: %+v", len(writes), writes)
-	}
+// recordedRequest captures what the client actually sent, so tests can assert
+// on HTTP method, headers and request body rather than just the final return value.
+type recordedRequest struct {
+	method string
+	path   string
+	header http.Header
+	body   map[string]interface{}
 }
 
 // workspaceAssignmentsMock is a mutex-guarded mock of the assignments API. It
-// records the headers of every list GET and the method of every write, and can
-// answer DELETE with a configurable status.
+// records every list GET and every write, and answers DELETE with a
+// configurable status.
 type workspaceAssignmentsMock struct {
 	mu           sync.Mutex
 	assignments  []WorkspaceAssignment
 	deleteStatus int // 0 means 200 OK
 	listGets     []http.Header
-	writes       []string
+	writes       []recordedRequest
 }
 
 func (m *workspaceAssignmentsMock) setAssignments(assignments []WorkspaceAssignment) {
@@ -264,10 +64,19 @@ func (m *workspaceAssignmentsMock) setAssignments(assignments []WorkspaceAssignm
 	m.assignments = assignments
 }
 
-func (m *workspaceAssignmentsMock) snapshot() ([]http.Header, []string) {
+func (m *workspaceAssignmentsMock) snapshot() ([]http.Header, []recordedRequest) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]http.Header(nil), m.listGets...), append([]string(nil), m.writes...)
+	return append([]http.Header(nil), m.listGets...), append([]recordedRequest(nil), m.writes...)
+}
+
+func (m *workspaceAssignmentsMock) writeMethods() []string {
+	_, writes := m.snapshot()
+	methods := make([]string, 0, len(writes))
+	for _, w := range writes {
+		methods = append(methods, w.method)
+	}
+	return methods
 }
 
 func newWorkspaceAssignmentsMockClient(t *testing.T, m *workspaceAssignmentsMock) *Client {
@@ -286,11 +95,13 @@ func newWorkspaceAssignmentsMockClient(t *testing.T, m *workspaceAssignmentsMock
 				Assignments []WorkspaceAssignment `json:"permission_assignments"`
 			}{Assignments: m.assignments})
 		case r.Method == http.MethodPut && r.URL.Path == testPrincipalPath:
-			m.writes = append(m.writes, r.Method)
+			var reqBody map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&reqBody)
+			m.writes = append(m.writes, recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: reqBody})
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 		case r.Method == http.MethodDelete && r.URL.Path == testPrincipalPath:
-			m.writes = append(m.writes, r.Method)
+			m.writes = append(m.writes, recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone()})
 			if m.deleteStatus != 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(m.deleteStatus)
@@ -317,11 +128,254 @@ func newWorkspaceAssignmentsMockClient(t *testing.T, m *workspaceAssignmentsMock
 	return c
 }
 
-var testUserAssignment = []WorkspaceAssignment{
-	{
+// testAssignment returns a fresh assignment for the target principal (ID 100).
+func testAssignment(permissions ...string) WorkspaceAssignment {
+	return WorkspaceAssignment{
 		Principal:   &WorkspacePrincipal{ID: 100, UserName: "user@example.com"},
-		Permissions: []string{"USER"},
-	},
+		Permissions: permissions,
+	}
+}
+
+// testUserAssignment returns a fresh list holding a USER assignment for the target principal.
+func testUserAssignment() []WorkspaceAssignment {
+	return []WorkspaceAssignment{testAssignment("USER")}
+}
+
+// otherPrincipalAssignmentWithError is an unreadable entry for a principal other than the target.
+func otherPrincipalAssignmentWithError() WorkspaceAssignment {
+	return WorkspaceAssignment{
+		Principal: &WorkspacePrincipal{ID: 200, UserName: "other@example.com"},
+		Error:     "failed to resolve principal 200",
+	}
+}
+
+func permissionsFromBody(t *testing.T, body map[string]interface{}) []string {
+	t.Helper()
+	raw, ok := body["permissions"]
+	if !ok {
+		t.Fatalf("request body has no \"permissions\" field: %v", body)
+	}
+	rawSlice, ok := raw.([]interface{})
+	if !ok {
+		t.Fatalf("\"permissions\" field is not an array: %v", raw)
+	}
+	out := make([]string, 0, len(rawSlice))
+	for _, v := range rawSlice {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("permissions entry is not a string: %v", v)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// assertNoRequests fails if the mock saw any read or write.
+func assertNoRequests(t *testing.T, m *workspaceAssignmentsMock) {
+	t.Helper()
+	listGets, writes := m.snapshot()
+	if len(listGets) != 0 || len(writes) != 0 {
+		t.Fatalf("expected no requests, got %d list GETs and %d writes: %+v", len(listGets), len(writes), writes)
+	}
+}
+
+// assertNoWrites fails if the mock saw any PUT or DELETE.
+func assertNoWrites(t *testing.T, m *workspaceAssignmentsMock) {
+	t.Helper()
+	if _, writes := m.snapshot(); len(writes) != 0 {
+		t.Fatalf("expected no write requests, got %d: %+v", len(writes), writes)
+	}
+}
+
+// TestAddWorkspaceMember_NoExistingAssignment: a principal with no
+// assignment at all gets exactly one PUT with [USER].
+func TestAddWorkspaceMember_NoExistingAssignment(t *testing.T) {
+	m := &workspaceAssignmentsMock{}
+	c := newWorkspaceAssignmentsMockClient(t, m)
+
+	alreadyGranted, _, err := c.AddWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("AddWorkspaceMember: %v", err)
+	}
+	if alreadyGranted {
+		t.Errorf("alreadyGranted = true, want false (no prior assignment)")
+	}
+
+	_, writes := m.snapshot()
+	if len(writes) != 1 {
+		t.Fatalf("expected exactly 1 write request, got %d: %+v", len(writes), writes)
+	}
+	got := writes[0]
+	if got.method != http.MethodPut {
+		t.Errorf("method = %s, want PUT", got.method)
+	}
+	if got.path != testPrincipalPath {
+		t.Errorf("path = %s, want %s", got.path, testPrincipalPath)
+	}
+	permissions := permissionsFromBody(t, got.body)
+	if len(permissions) != 1 || permissions[0] != "USER" {
+		t.Errorf("permissions sent = %v, want exactly [USER]", permissions)
+	}
+}
+
+// TestAddWorkspaceMember_ExistingAssignment: any existing
+// assignment already grants workspace access, so nothing is written and an
+// existing ADMIN is left untouched.
+func TestAddWorkspaceMember_ExistingAssignment(t *testing.T) {
+	tests := []struct {
+		name        string
+		permissions []string
+	}{
+		{"user only", []string{"USER"}},
+		{"admin only", []string{"ADMIN"}},
+		{"user and admin", []string{"USER", "ADMIN"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &workspaceAssignmentsMock{assignments: []WorkspaceAssignment{testAssignment(tt.permissions...)}}
+			c := newWorkspaceAssignmentsMockClient(t, m)
+
+			alreadyGranted, _, err := c.AddWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+			if err != nil {
+				t.Fatalf("AddWorkspaceMember: %v", err)
+			}
+			if !alreadyGranted {
+				t.Errorf("alreadyGranted = false, want true (principal already holds %v)", tt.permissions)
+			}
+			assertNoWrites(t, m)
+		})
+	}
+}
+
+// TestRemoveWorkspaceMember_ExistingAssignment: revoke deletes the whole
+// assignment, whatever it holds.
+func TestRemoveWorkspaceMember_ExistingAssignment(t *testing.T) {
+	tests := []struct {
+		name        string
+		permissions []string
+	}{
+		{"user only", []string{"USER"}},
+		{"admin only", []string{"ADMIN"}},
+		{"user and admin", []string{"USER", "ADMIN"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &workspaceAssignmentsMock{assignments: []WorkspaceAssignment{testAssignment(tt.permissions...)}}
+			c := newWorkspaceAssignmentsMockClient(t, m)
+
+			alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+			if err != nil {
+				t.Fatalf("RemoveWorkspaceMember: %v", err)
+			}
+			if alreadyRevoked {
+				t.Errorf("alreadyRevoked = true, want false (a DELETE was needed)")
+			}
+
+			_, writes := m.snapshot()
+			if len(writes) != 1 {
+				t.Fatalf("expected exactly 1 write request, got %d: %+v", len(writes), writes)
+			}
+			got := writes[0]
+			if got.method != http.MethodDelete {
+				t.Errorf("method = %s, want DELETE", got.method)
+			}
+			if got.path != testPrincipalPath {
+				t.Errorf("path = %s, want %s", got.path, testPrincipalPath)
+			}
+		})
+	}
+}
+
+// TestRemoveWorkspaceMember_AlreadyRevoked: a principal who holds nothing at
+// all needs no request; the revoke reports GrantAlreadyRevoked upstream.
+func TestRemoveWorkspaceMember_AlreadyRevoked(t *testing.T) {
+	m := &workspaceAssignmentsMock{}
+	c := newWorkspaceAssignmentsMockClient(t, m)
+
+	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	if err != nil {
+		t.Fatalf("RemoveWorkspaceMember: %v", err)
+	}
+	if !alreadyRevoked {
+		t.Errorf("alreadyRevoked = false, want true (principal holds nothing)")
+	}
+	assertNoWrites(t, m)
+}
+
+// TestWorkspaceMember_AssignmentError: an entry for the target principal that
+// carries an error could not be read properly, so neither grant nor revoke may
+// write on top of it.
+func TestWorkspaceMember_AssignmentError(t *testing.T) {
+	errAssignment := func() []WorkspaceAssignment {
+		a := testAssignment("USER")
+		a.Error = "principal lookup failed"
+		return []WorkspaceAssignment{a}
+	}
+	tests := []struct {
+		name string
+		call func(c *Client) error
+	}{
+		{"grant", func(c *Client) error {
+			_, _, err := c.AddWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+			return err
+		}},
+		{"revoke", func(c *Client) error {
+			_, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &workspaceAssignmentsMock{assignments: errAssignment()}
+			c := newWorkspaceAssignmentsMockClient(t, m)
+
+			err := tt.call(c)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			for _, want := range []string{testWorkspaceId, testPrincipalId, "principal lookup failed"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			assertNoWrites(t, m)
+		})
+	}
+}
+
+// TestWorkspaceMember_OtherPrincipalAssignmentErrorDoesNotBlock: an error on
+// another principal's entry must not affect the target.
+func TestWorkspaceMember_OtherPrincipalAssignmentErrorDoesNotBlock(t *testing.T) {
+	t.Run("grant", func(t *testing.T) {
+		m := &workspaceAssignmentsMock{assignments: []WorkspaceAssignment{otherPrincipalAssignmentWithError()}}
+		c := newWorkspaceAssignmentsMockClient(t, m)
+
+		alreadyGranted, _, err := c.AddWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+		if err != nil {
+			t.Fatalf("AddWorkspaceMember: %v", err)
+		}
+		if alreadyGranted {
+			t.Errorf("alreadyGranted = true, want false")
+		}
+		if got := m.writeMethods(); len(got) != 1 || got[0] != http.MethodPut {
+			t.Errorf("writes = %v, want [PUT]", got)
+		}
+	})
+	t.Run("revoke", func(t *testing.T) {
+		m := &workspaceAssignmentsMock{assignments: append(testUserAssignment(), otherPrincipalAssignmentWithError())}
+		c := newWorkspaceAssignmentsMockClient(t, m)
+
+		alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+		if err != nil {
+			t.Fatalf("RemoveWorkspaceMember: %v", err)
+		}
+		if alreadyRevoked {
+			t.Errorf("alreadyRevoked = true, want false")
+		}
+		if got := m.writeMethods(); len(got) != 1 || got[0] != http.MethodDelete {
+			t.Errorf("writes = %v, want [DELETE]", got)
+		}
+	})
 }
 
 // TestWorkspaceMember_ReadsAreNotCached: grant then revoke on the same client
@@ -331,15 +385,15 @@ func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
 	m := &workspaceAssignmentsMock{}
 	c := newWorkspaceAssignmentsMockClient(t, m)
 
-	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
+	alreadyGranted, _, err := c.AddWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
-		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
+		t.Fatalf("AddWorkspaceMember: %v", err)
 	}
 	if alreadyGranted {
 		t.Errorf("alreadyGranted = true, want false (empty list)")
 	}
 
-	m.setAssignments(testUserAssignment)
+	m.setAssignments(testUserAssignment())
 
 	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
 	if err != nil {
@@ -349,7 +403,7 @@ func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
 		t.Errorf("alreadyRevoked = true, want false (stale cached list)")
 	}
 
-	listGets, writes := m.snapshot()
+	listGets, _ := m.snapshot()
 	if len(listGets) != 2 {
 		t.Fatalf("list GETs = %d, want 2", len(listGets))
 	}
@@ -358,15 +412,15 @@ func TestWorkspaceMember_ReadsAreNotCached(t *testing.T) {
 			t.Errorf("list GET %d Cache-Control = %q, want \"no-cache\"", i, got)
 		}
 	}
-	if len(writes) != 2 || writes[0] != http.MethodPut || writes[1] != http.MethodDelete {
-		t.Errorf("writes = %v, want [PUT DELETE]", writes)
+	if got := m.writeMethods(); len(got) != 2 || got[0] != http.MethodPut || got[1] != http.MethodDelete {
+		t.Errorf("writes = %v, want [PUT DELETE]", got)
 	}
 }
 
 // TestRemoveWorkspaceMember_DeleteNotFound: an assignment removed between the
 // read and the DELETE is already revoked, not an error.
 func TestRemoveWorkspaceMember_DeleteNotFound(t *testing.T) {
-	m := &workspaceAssignmentsMock{assignments: testUserAssignment, deleteStatus: http.StatusNotFound}
+	m := &workspaceAssignmentsMock{assignments: testUserAssignment(), deleteStatus: http.StatusNotFound}
 	c := newWorkspaceAssignmentsMockClient(t, m)
 
 	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
@@ -376,15 +430,15 @@ func TestRemoveWorkspaceMember_DeleteNotFound(t *testing.T) {
 	if !alreadyRevoked {
 		t.Errorf("alreadyRevoked = false, want true (DELETE returned 404)")
 	}
-	if _, writes := m.snapshot(); len(writes) != 1 || writes[0] != http.MethodDelete {
-		t.Errorf("writes = %v, want exactly [DELETE]", writes)
+	if got := m.writeMethods(); len(got) != 1 || got[0] != http.MethodDelete {
+		t.Errorf("writes = %v, want exactly [DELETE]", got)
 	}
 }
 
 // TestRemoveWorkspaceMember_DeleteServerError: any other DELETE failure is
 // returned, not swallowed.
 func TestRemoveWorkspaceMember_DeleteServerError(t *testing.T) {
-	m := &workspaceAssignmentsMock{assignments: testUserAssignment, deleteStatus: http.StatusInternalServerError}
+	m := &workspaceAssignmentsMock{assignments: testUserAssignment(), deleteStatus: http.StatusInternalServerError}
 	c := newWorkspaceAssignmentsMockClient(t, m)
 
 	alreadyRevoked, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, testPrincipalId)
@@ -414,10 +468,10 @@ func TestWorkspaceMember_NoCacheReadDoesNotOverwriteSyncCache(t *testing.T) {
 	}
 
 	// State B: the no-cache read must see it.
-	m.setAssignments(testUserAssignment)
-	alreadyGranted, _, err := c.CreateOrUpdateWorkspaceMember(ctx, testWorkspaceId, testPrincipalId)
+	m.setAssignments(testUserAssignment())
+	alreadyGranted, _, err := c.AddWorkspaceMember(ctx, testWorkspaceId, testPrincipalId)
 	if err != nil {
-		t.Fatalf("CreateOrUpdateWorkspaceMember: %v", err)
+		t.Fatalf("AddWorkspaceMember: %v", err)
 	}
 	if !alreadyGranted {
 		t.Errorf("alreadyGranted = false, want true (read-before-write saw stale state)")
@@ -441,75 +495,36 @@ func TestWorkspaceMember_NoCacheReadDoesNotOverwriteSyncCache(t *testing.T) {
 	}
 }
 
-// newNoRequestsTestClient fails the test if any HTTP request reaches the
-// server, so callers can assert a validation error short-circuits before I/O.
-func newNoRequestsTestClient(t *testing.T) *Client {
-	t.Helper()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
-
-	httpClient := &http.Client{Transport: &workspaceMembersHostRewriter{target: target}}
-	c, err := NewClient(context.Background(), httpClient, testHostnameForWorkspaceMembers, testAccountHostForWorkspaceMembers, testAccountId, "", &NoAuth{}, nil)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	return c
-}
-
-// TestCreateOrUpdateWorkspaceMember_RejectsCompositePrincipalID: a group's
-// composite resource ID must never reach the permission-assignments API.
-func TestCreateOrUpdateWorkspaceMember_RejectsCompositePrincipalID(t *testing.T) {
-	c := newNoRequestsTestClient(t)
-
-	_, _, err := c.CreateOrUpdateWorkspaceMember(context.Background(), testWorkspaceId, "account/abc/group/100")
-	if err == nil {
-		t.Fatal("CreateOrUpdateWorkspaceMember: expected error, got nil")
-	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("status code = %v, want InvalidArgument", code)
-	}
-}
-
-// TestRemoveWorkspaceMember_RejectsCompositePrincipalID: same validation on
-// revoke, so a compound group ID can't be silently read as "already revoked".
-func TestRemoveWorkspaceMember_RejectsCompositePrincipalID(t *testing.T) {
-	c := newNoRequestsTestClient(t)
-
-	_, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, "account/abc/group/100")
-	if err == nil {
-		t.Fatal("RemoveWorkspaceMember: expected error, got nil")
-	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("status code = %v, want InvalidArgument", code)
-	}
-}
-
-func TestWorkspaceAssignmentHasAdmin(t *testing.T) {
+// TestWorkspaceMember_RejectsCompositePrincipalID: a group's composite
+// resource ID must never reach the permission-assignments API, on grant or
+// revoke (so it can't be silently read as "already revoked").
+func TestWorkspaceMember_RejectsCompositePrincipalID(t *testing.T) {
 	tests := []struct {
-		name        string
-		permissions []string
-		want        bool
+		name string
+		call func(c *Client) error
 	}{
-		{"nil permissions", nil, false},
-		{"user only", []string{"USER"}, false},
-		{"admin only", []string{"ADMIN"}, true},
-		{"user and admin", []string{"USER", "ADMIN"}, true},
+		{"grant", func(c *Client) error {
+			_, _, err := c.AddWorkspaceMember(context.Background(), testWorkspaceId, "account/abc/group/100")
+			return err
+		}},
+		{"revoke", func(c *Client) error {
+			_, _, err := c.RemoveWorkspaceMember(context.Background(), testWorkspaceId, "account/abc/group/100")
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := WorkspaceAssignment{Permissions: tt.permissions}
-			if got := a.HasAdmin(); got != tt.want {
-				t.Errorf("HasAdmin() with permissions %v = %v, want %v", tt.permissions, got, tt.want)
+			m := &workspaceAssignmentsMock{}
+			c := newWorkspaceAssignmentsMockClient(t, m)
+
+			err := tt.call(c)
+			if err == nil {
+				t.Fatal("expected error, got nil")
 			}
+			if code := status.Code(err); code != codes.InvalidArgument {
+				t.Errorf("status code = %v, want InvalidArgument", code)
+			}
+			assertNoRequests(t, m)
 		})
 	}
 }

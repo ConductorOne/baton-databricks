@@ -223,15 +223,6 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource ID: %w", err)
 		}
 
-		// ADMIN isn't its own entitlement; log it so it's visible in sync output.
-		if assignment.HasAdmin() {
-			l.Debug("grants: workspace assignment includes ADMIN permission",
-				zap.String("workspace_id", workspace),
-				zap.Int("principal_id", assignment.Principal.ID),
-				zap.Strings("permissions", assignment.Permissions),
-			)
-		}
-
 		var annotations []protoreflect.ProtoMessage
 		if resourceType == groupResourceType {
 			rid, expandAnnotation, err := groupGrantExpansion(ctx, resourceID.Resource, resource.ParentResourceId)
@@ -269,9 +260,9 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	alreadyGranted, _, err := w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	alreadyGranted, _, err := w.client.AddWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to add workspace member: %w", err)
 	}
 	if alreadyGranted {
 		return annotations.New(&v2.GrantAlreadyExists{}), nil
