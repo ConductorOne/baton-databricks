@@ -198,18 +198,141 @@ func TestWorkspaceRevokeNoAssignment(t *testing.T) {
 	}
 }
 
-func TestWorkspaceGrantGroupPrincipalRejected(t *testing.T) {
+func existingGroupAssignment() []map[string]any {
+	return []map[string]any{{
+		"principal":   map[string]any{"principal_id": 100, "display_name": "admins"},
+		"permissions": []string{"USER"},
+	}}
+}
+
+func testGroupPrincipal(t *testing.T, resourceID string) *v2.Resource {
+	t.Helper()
+	return &v2.Resource{Id: &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: resourceID}}
+}
+
+func TestWorkspaceGrantGroupNoAssignment(t *testing.T) {
 	m := &workspaceAssignmentsServer{}
 	w := newWorkspaceBuilderWithMock(t, m)
 
-	_, err := w.Grant(context.Background(), testProvisioningGroup(t), testWorkspaceMemberEntitlement(t))
-	if err == nil {
-		t.Fatal("Grant: expected error for a group principal, got nil")
+	annos, err := w.Grant(context.Background(), testProvisioningGroup(t), testWorkspaceMemberEntitlement(t))
+	if err != nil {
+		t.Fatalf("Grant: %v", err)
 	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("status code = %v, want InvalidArgument (err: %v)", code, err)
+	if len(annos) != 0 {
+		t.Errorf("annotations = %v, want none", annos)
 	}
-	if requests, _ := m.snapshot(); len(requests) != 0 {
-		t.Errorf("requests = %v, want none", requests)
+
+	requests, putBodies := m.snapshot()
+	want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
+	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+	perms, _ := putBodies[0]["permissions"].([]any)
+	if len(perms) != 1 || perms[0] != "USER" {
+		t.Errorf("PUT permissions = %v, want [USER]", perms)
+	}
+}
+
+func TestWorkspaceGrantGroupExistingAssignment(t *testing.T) {
+	m := &workspaceAssignmentsServer{assignments: existingGroupAssignment()}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	annos, err := w.Grant(context.Background(), testProvisioningGroup(t), testWorkspaceMemberEntitlement(t))
+	if err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if !annos.Contains(&v2.GrantAlreadyExists{}) {
+		t.Errorf("annotations = %v, want GrantAlreadyExists", annos)
+	}
+
+	requests, _ := m.snapshot()
+	if len(requests) != 1 || requests[0] != "GET "+testAssignmentsPath {
+		t.Errorf("requests = %v, want only the read", requests)
+	}
+}
+
+func TestWorkspaceRevokeGroupWithAssignment(t *testing.T) {
+	m := &workspaceAssignmentsServer{assignments: existingGroupAssignment()}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	annos, err := w.Revoke(context.Background(), &v2.Grant{Principal: testProvisioningGroup(t), Entitlement: testWorkspaceMemberEntitlement(t)})
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if len(annos) != 0 {
+		t.Errorf("annotations = %v, want none", annos)
+	}
+
+	requests, _ := m.snapshot()
+	want := []string{"GET " + testAssignmentsPath, "DELETE " + testMemberPath}
+	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+}
+
+func TestWorkspaceRevokeGroupNoAssignment(t *testing.T) {
+	m := &workspaceAssignmentsServer{}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	annos, err := w.Revoke(context.Background(), &v2.Grant{Principal: testProvisioningGroup(t), Entitlement: testWorkspaceMemberEntitlement(t)})
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Errorf("annotations = %v, want GrantAlreadyRevoked", annos)
+	}
+
+	requests, _ := m.snapshot()
+	if len(requests) != 1 || requests[0] != "GET "+testAssignmentsPath {
+		t.Errorf("requests = %v, want only the read", requests)
+	}
+}
+
+func TestWorkspaceGroupPrincipalInvalidIDRejected(t *testing.T) {
+	for name, id := range map[string]string{
+		"bare group id":         "group/100",
+		"bare numeric":          "100",
+		"non-numeric group id":  "account/" + testAccountId + "/group/abc",
+		"workspace parent":      "workspace/ws-deploy/group/100",
+		"wrong child type":      "account/" + testAccountId + "/user/100",
+		"too many segments":     "account/" + testAccountId + "/group/100/extra",
+		"empty":                 "",
+		"empty numeric segment": "account/" + testAccountId + "/group/",
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &workspaceAssignmentsServer{}
+			w := newWorkspaceBuilderWithMock(t, m)
+			principal := testGroupPrincipal(t, id)
+
+			_, err := w.Grant(context.Background(), principal, testWorkspaceMemberEntitlement(t))
+			if code := status.Code(err); code != codes.InvalidArgument {
+				t.Errorf("Grant status code = %v, want InvalidArgument (err: %v)", code, err)
+			}
+			_, err = w.Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: testWorkspaceMemberEntitlement(t)})
+			if code := status.Code(err); code != codes.InvalidArgument {
+				t.Errorf("Revoke status code = %v, want InvalidArgument (err: %v)", code, err)
+			}
+			if requests, _ := m.snapshot(); len(requests) != 0 {
+				t.Errorf("requests = %v, want none", requests)
+			}
+		})
+	}
+}
+
+func TestWorkspaceGrantServicePrincipal(t *testing.T) {
+	m := &workspaceAssignmentsServer{}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	sp, err := rs.NewResource("sp", servicePrincipalResourceType, testProvisioningPrincipalID)
+	if err != nil {
+		t.Fatalf("NewResource: %v", err)
+	}
+	if _, err := w.Grant(context.Background(), sp, testWorkspaceMemberEntitlement(t)); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	requests, _ := m.snapshot()
+	want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
+	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 }

@@ -14,8 +14,10 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -239,6 +241,35 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	return rv, nil, nil
 }
 
+// workspacePrincipalID returns the numeric principal ID the permission assignments API expects.
+// Users and service principals already use it as their resource ID. Groups use a compound
+// "account/<account>/group/<id>" resource ID, and only account-level groups can be assigned
+// to a workspace through the account API.
+func workspacePrincipalID(principal *v2.ResourceId) (string, error) {
+	if principal.ResourceType != groupResourceType.Id {
+		return principal.Resource, nil
+	}
+
+	parent, group, err := parseResourceId(principal.Resource)
+	if err != nil {
+		return "", uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: failed to parse group principal resource id: %v", err))
+	}
+	if parent == nil || parent.ResourceType != accountResourceType.Id {
+		return "", uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("databricks-connector: only account-level groups can be assigned to a workspace: %q", principal.Resource),
+		)
+	}
+	if group.ResourceType != groupResourceType.Id {
+		return "", uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: invalid group principal resource id: %q", principal.Resource))
+	}
+	if _, err := strconv.Atoi(group.Resource); err != nil {
+		return "", uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: group ID must be numeric: %q", group.Resource))
+	}
+
+	return group.Resource, nil
+}
+
 func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
@@ -260,7 +291,12 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	alreadyGranted, _, err := w.client.AddWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	principalID, err := workspacePrincipalID(principal.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyGranted, _, err := w.client.AddWorkspaceMember(ctx, workspace, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to add workspace member: %w", err)
 	}
@@ -295,7 +331,12 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	alreadyRevoked, _, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	principalID, err := workspacePrincipalID(principal.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyRevoked, _, err := w.client.RemoveWorkspaceMember(ctx, workspace, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to remove workspace member: %w", err)
 	}
