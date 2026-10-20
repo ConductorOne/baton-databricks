@@ -207,10 +207,10 @@ func (c *Client) abandonStatement(ctx context.Context, workspaceId, warehouseId 
 	)
 
 	msg := fmt.Sprintf("statement %s did not finish within %s (state=%s)", res.StatementID, statementPollMaxWait, res.Status.State)
-	switch {
-	case res.Status.State == StatementStateRunning:
+	switch res.Status.State {
+	case StatementStateRunning:
 		msg += ": the query was still running"
-	case res.Status.State == StatementStatePending:
+	case StatementStatePending:
 		// PENDING means waiting for compute, so the warehouse state says why.
 		state, err := c.warehouseState(ctx, workspaceId, warehouseId)
 		switch {
