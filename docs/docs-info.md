@@ -133,7 +133,7 @@ access.
   service principals and workspaces. A name that is also in
   `databricks-exclude-workspaces` is reported as excluded; a name Databricks
   does not have is reported as not on the account. A workspace that is
-  `PROVISIONING` or `NOT_PROVISIONED` keeps its metastore, and that metastore's
+  `PROVISIONING`, `NOT_PROVISIONED` or `CANCELLING` keeps its metastore, and that metastore's
   grants fail until it is `RUNNING`. A workspace that is `FAILED` or `BANNED`
   does not: when it is the only one attached, the metastore is left out of the
   sync. While a metastore's workspace assignments cannot be read, nothing is

@@ -332,6 +332,33 @@ func TestANotRunningInScopeWorkspaceStopsTheMetastoreFromBeingPruned(t *testing.
 	}
 }
 
+// CANCELLING is in the documented workspace status set and means the cancellation
+// is still running. Pruning it would delete the metastore before that finishes.
+func TestACancellingWorkspaceStopsTheMetastoreFromBeingPruned(t *testing.T) {
+	probed := map[string]int{}
+	client, _ := newWorkspaceRoutedClient(t, routingHandlerWith(t,
+		map[string]any{"1": "ms-a", "2": "ms-b"}, probed, []map[string]any{
+			{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+			{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "CANCELLING"},
+		}))
+
+	uc := newUnityCatalog(client, "app-1", configuredWorkspaceSet([]string{"prod", "dev"}))
+	snap, _, err := uc.buildRouting(context.Background())
+	if err != nil {
+		t.Fatalf("buildRouting: %v", err)
+	}
+
+	if !slices.Equal(snap.pending["ms-b"], []string{"wsb (CANCELLING)"}) {
+		t.Fatalf("pending[ms-b] = %v, want [wsb (CANCELLING)]", snap.pending["ms-b"])
+	}
+	if _, ok := snap.metastores["ms-b"]; !ok {
+		t.Fatal("ms-b was pruned while its only in-scope workspace was CANCELLING, so C1 would delete it and its grants")
+	}
+	if _, _, err := usableWorkspaces(snap, "ms-b"); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "CANCELLING") {
+		t.Errorf("resolving ms-b = %v, want FailedPrecondition naming CANCELLING", err)
+	}
+}
+
 // An allowlist that names no workspace on the account is a configuration error,
 // not an account with no metastores: pruning would delete every metastore in C1.
 func TestAnAllowlistMatchingNoWorkspaceFailsInsteadOfPruningEverything(t *testing.T) {

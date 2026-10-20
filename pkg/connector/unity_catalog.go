@@ -19,6 +19,7 @@ const (
 	workspaceStatusRunning        = "RUNNING"
 	workspaceStatusProvisioning   = "PROVISIONING"
 	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
+	workspaceStatusCancelling     = "CANCELLING"
 )
 
 // routingSnapshot is the account's Unity Catalog access paths for the call that
@@ -80,11 +81,14 @@ func newUnityCatalog(client *databricks.Client, ownPrincipal string, workspaces 
 	}
 }
 
-// workspaceIsPending is a status that can still become RUNNING. FAILED and BANNED
-// are terminal, so they are not pending: a pending workspace fails the sync.
+// workspaceIsPending is a status that can still change. PROVISIONING and
+// NOT_PROVISIONED can become RUNNING. CANCELLING is in process, so pruning
+// during it would delete the metastore and its grants. FAILED and BANNED are
+// the terminal set. A status Databricks has not listed takes that path too:
+// treating it as pending would fail the sync on every run.
 func workspaceIsPending(status string) bool {
 	switch strings.ToUpper(status) {
-	case workspaceStatusProvisioning, workspaceStatusNotProvisioned:
+	case workspaceStatusProvisioning, workspaceStatusNotProvisioned, workspaceStatusCancelling:
 		return true
 	default:
 		return false
@@ -180,7 +184,7 @@ func (u *unityCatalog) buildRouting(ctx context.Context) (routingSnapshot, *v2.R
 
 	// A metastore with no usable workspace would fail its Grants with
 	// FailedPrecondition, which fails the whole sync, so it is pruned. An unknown
-	// answer (unreadable list, or a workspace still provisioning) blocks the prune:
+	// answer (unreadable list, or a workspace still provisioning or cancelling) blocks the prune:
 	// dropping it would read as a deletion in C1. A FAILED or BANNED workspace
 	// does not: it will not become RUNNING. Pruned is recorded apart from deleted
 	// because the metastore still holds its privileges.
@@ -243,9 +247,9 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			}
 		}
 		if workspace.Status != "" && !strings.EqualFold(workspace.Status, workspaceStatusRunning) {
-			// PROVISIONING and NOT_PROVISIONED can still become RUNNING.
-			// FAILED, BANNED and anything else do not, so they must not
-			// fail the sync on every run.
+			// PROVISIONING, NOT_PROVISIONED and CANCELLING can still change.
+			// FAILED, BANNED and a status Databricks has not listed do not,
+			// so they must not fail the sync on every run.
 			if workspaceIsPending(workspace.Status) {
 				notRunning[accountID] = fmt.Sprintf("%s (%s)", workspace.DeploymentName, workspace.Status)
 			} else {
