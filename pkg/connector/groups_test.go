@@ -14,6 +14,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // newGroupBuilderWithHandler returns a group builder whose Databricks API is a test server
@@ -365,5 +367,141 @@ func TestGroupRuleSetCompoundGroupPrincipal(t *testing.T) {
 					put.RuleSet.GrantRules, groupManagerEntitlement, tc.wantPrincipals)
 			}
 		})
+	}
+}
+
+// TestGroupRuleSetPrincipalLookup covers rule-set grants for every principal type: a principal
+// the SCIM lookup cannot find must fail with NotFound before any rule-set PUT (instead of
+// writing an empty "users/", "groups/" or "servicePrincipals/" principal), and a found one must
+// be written with its type prefix.
+func TestGroupRuleSetPrincipalLookup(t *testing.T) {
+	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
+
+	tests := []struct {
+		name          string
+		scimPath      string
+		nativeID      string
+		found         string
+		principal     func(t *testing.T) *v2.Resource
+		wantPrincipal string
+	}{
+		{
+			name:     "user",
+			scimPath: "/api/2.0/accounts/acc-1/scim/v2/Users",
+			nativeID: "u-1",
+			found:    `{"id":"u-1","userName":"alice@example.com"}`,
+			principal: func(t *testing.T) *v2.Resource {
+				return testUserPrincipal(t, "u-1")
+			},
+			wantPrincipal: "users/alice@example.com",
+		},
+		{
+			name:     "group",
+			scimPath: "/api/2.0/accounts/acc-1/scim/v2/Groups",
+			nativeID: "g-member-native",
+			found:    `{"id":"g-member-native","displayName":"Member Group"}`,
+			principal: func(t *testing.T) *v2.Resource {
+				r, err := rs.NewGroupResource("Member Group", groupResourceType,
+					groupResourceId(context.Background(), "g-member-native", parent), nil,
+					rs.WithParentResourceID(parent),
+				)
+				if err != nil {
+					t.Fatalf("NewGroupResource: %v", err)
+				}
+				return r
+			},
+			wantPrincipal: "groups/Member Group",
+		},
+		{
+			name:     "service principal",
+			scimPath: "/api/2.0/accounts/acc-1/scim/v2/ServicePrincipals",
+			nativeID: "sp-1",
+			found:    `{"id":"sp-1","applicationId":"app-1"}`,
+			principal: func(t *testing.T) *v2.Resource {
+				r, err := rs.NewResource("Service Principal", servicePrincipalResourceType, "sp-1")
+				if err != nil {
+					t.Fatalf("NewResource: %v", err)
+				}
+				return r
+			},
+			wantPrincipal: "servicePrincipals/app-1",
+		},
+	}
+
+	for _, tc := range tests {
+		for _, exists := range []bool{false, true} {
+			name := tc.name + "/missing"
+			if exists {
+				name = tc.name + "/found"
+			}
+			t.Run(name, func(t *testing.T) {
+				var capturedPutBody []byte
+				putCount := 0
+
+				g := newGroupBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+					switch {
+					case req.Method == http.MethodGet && req.URL.Path == tc.scimPath:
+						w.Header().Set("Content-Type", "application/json")
+						if exists && req.URL.Query().Get("filter") == "id eq '"+tc.nativeID+"'" {
+							_, _ = w.Write([]byte(`{"Resources":[` + tc.found + `],"totalResults":1}`))
+							return
+						}
+						_, _ = w.Write([]byte(`{"Resources":[],"totalResults":0}`))
+					case req.Method == http.MethodGet && req.URL.Path == "/api/2.0/preview/accounts/acc-1/access-control/rule-sets":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(`{"grant_rules":[],"etag":"etag-1"}`))
+					case req.Method == http.MethodPut && req.URL.Path == "/api/2.0/preview/accounts/acc-1/access-control/rule-sets":
+						putCount++
+						body, err := io.ReadAll(req.Body)
+						if err != nil {
+							http.Error(w, err.Error(), http.StatusInternalServerError)
+							return
+						}
+						capturedPutBody = body
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(`{}`))
+					default:
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = w.Write([]byte(`{"detail":"not found"}`))
+					}
+				})
+
+				targetGroup := testTargetGroupResource(t, "g-target")
+				entitlement := ent.NewAssignmentEntitlement(targetGroup, groupManagerEntitlement)
+
+				_, err := g.Grant(context.Background(), tc.principal(t), entitlement)
+
+				if !exists {
+					if status.Code(err) != codes.NotFound {
+						t.Fatalf("Grant error = %v (code %s), want code %s", err, status.Code(err), codes.NotFound)
+					}
+					if putCount != 0 {
+						t.Fatalf("expected no rule-set PUT for a missing principal, got %d (last body %s)", putCount, capturedPutBody)
+					}
+					return
+				}
+
+				if err != nil {
+					t.Fatalf("Grant returned error: %v", err)
+				}
+				if putCount != 1 {
+					t.Fatalf("expected one rule-set PUT, got %d", putCount)
+				}
+
+				var put struct {
+					RuleSet struct {
+						GrantRules []databricks.RuleSet `json:"grant_rules"`
+					} `json:"rule_set"`
+				}
+				if err := json.Unmarshal(capturedPutBody, &put); err != nil {
+					t.Fatalf("unmarshal PUT body: %v", err)
+				}
+
+				if len(put.RuleSet.GrantRules) != 1 ||
+					!slices.Equal(put.RuleSet.GrantRules[0].Principals, []string{tc.wantPrincipal}) {
+					t.Errorf("PUT body grant_rules = %+v, want principals [%s]", put.RuleSet.GrantRules, tc.wantPrincipal)
+				}
+			})
+		}
 	}
 }

@@ -12,6 +12,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -123,6 +125,9 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 		if err != nil {
 			return "", fmt.Errorf("failed to find user %s/%s: %w", workspaceId, principalId, err)
 		}
+		if username == "" {
+			return "", principalNotFoundError("user", workspaceId, principalId)
+		}
 
 		result = fmt.Sprintf("%s/%s", UsersType, username)
 	case groupResourceType.Id:
@@ -139,12 +144,18 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 		if err != nil {
 			return "", fmt.Errorf("failed to find group %s/%s: %w", workspaceId, principalId, err)
 		}
+		if displayName == "" {
+			return "", principalNotFoundError("group", workspaceId, principalId)
+		}
 
 		result = fmt.Sprintf("%s/%s", GroupsType, displayName)
 	case servicePrincipalResourceType.Id:
 		appID, _, err := c.FindServicePrincipalAppID(ctx, workspaceId, principalId)
 		if err != nil {
 			return "", fmt.Errorf("failed to find service principal %s/%s: %w", workspaceId, principalId, err)
+		}
+		if appID == "" {
+			return "", principalNotFoundError("service principal", workspaceId, principalId)
 		}
 
 		result = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)
@@ -153,6 +164,15 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	}
 
 	return result, nil
+}
+
+// principalNotFoundError reports a principal lookup that matched nothing, so callers never
+// write an empty "users/", "groups/" or "servicePrincipals/" principal into a rule set.
+func principalNotFoundError(principalLabel, workspaceId, principalId string) error {
+	return uhttp.WrapErrors(
+		codes.NotFound,
+		fmt.Sprintf("databricks-connector: %s %s/%s not found", principalLabel, workspaceId, principalId),
+	)
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {
