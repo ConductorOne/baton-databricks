@@ -105,6 +105,19 @@ func NewGroupMembersAttrVars() *AttrVars {
 func NewGroupRolesAttrVars() *AttrVars {
 	return &AttrVars{
 		Attrs: []string{
+			"roles",
+			"entitlements",
+			"meta",
+		},
+	}
+}
+
+// NewGroupUpdateAttrVars requests every attribute UpdateGroup writes back. UpdateGroup is a
+// full-replacement PUT, so a group fetched for a read-modify-write must carry all of them or
+// the omitted ones are wiped.
+func NewGroupUpdateAttrVars() *AttrVars {
+	return &AttrVars{
+		Attrs: []string{
 			"id",
 			"displayName",
 			"members",

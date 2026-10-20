@@ -343,7 +343,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupRolesAttrVars())
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
@@ -424,7 +424,7 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupRolesAttrVars())
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}

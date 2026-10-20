@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/grpc/codes"
@@ -168,7 +170,7 @@ func TestRoleGrantAccountPrincipalNotFound(t *testing.T) {
 // native group id before calling GetGroup/UpdateGroup (the mock server here only answers
 // requests for the native id "g-native"; sending the unparsed compound id 404s). It also
 // asserts the outgoing PUT body never drops the group's existing members or displayName,
-// which is what NewGroupRolesAttrVars requesting "members"/"displayName" guards against.
+// which is what NewGroupUpdateAttrVars requesting "members"/"displayName" guards against.
 func TestRoleGrantGroupPrincipalParsesCompoundID(t *testing.T) {
 	var capturedPutBody []byte
 
@@ -292,5 +294,123 @@ func TestRoleGrantUserPrincipalStillWorks(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("PUT body missing the granted role for user principal, roles = %+v", put.Roles)
+	}
+}
+
+// TestRoleGroupPrincipalRequestsUpdateAttributes checks role Grant and Revoke to a group read
+// the group with every attribute the full-replacement PUT writes back, so the PUT keeps the
+// group's members and displayName.
+func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error
+	}{
+		{
+			name: "grant",
+			run: func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
+				_, err := r.Grant(context.Background(), principal, entitlement)
+				return err
+			},
+		},
+		{
+			name: "revoke",
+			run: func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
+				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAttrs []string
+			var capturedPutBody []byte
+
+			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
+					gotAttrs = req.URL.Query()["attributes"]
+					writeSCIMGroup(t, w, req, map[string]any{
+						"id":          "g-native",
+						"displayName": "Native Group",
+						"members":     []map[string]any{{"value": "existing-member-1"}},
+						"roles":       []map[string]any{{"value": AccountAdminRole}},
+						"meta":        map[string]any{"resourceType": "Group"},
+					})
+				case req.Method == http.MethodPut && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
+					body, err := io.ReadAll(req.Body)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					capturedPutBody = body
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(body)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"detail":"not found"}`))
+				}
+			})
+
+			if err := tc.run(r, testGroupPrincipal(t, "g-native"), testRoleEntitlement(t, false)); err != nil {
+				t.Fatalf("%s returned error: %v", tc.name, err)
+			}
+
+			if want := databricks.NewGroupUpdateAttrVars().Attrs; !slices.Equal(gotAttrs, want) {
+				t.Errorf("GetGroup attributes = %v, want %v", gotAttrs, want)
+			}
+
+			if capturedPutBody == nil {
+				t.Fatal("expected a PUT request updating the group, got none")
+			}
+
+			var put capturedGroupPut
+			if err := json.Unmarshal(capturedPutBody, &put); err != nil {
+				t.Fatalf("unmarshal PUT body: %v", err)
+			}
+			if put.DisplayName != "Native Group" {
+				t.Errorf("PUT body displayName = %q, want %q", put.DisplayName, "Native Group")
+			}
+			if len(put.Members) != 1 || put.Members[0].Value != "existing-member-1" {
+				t.Errorf("PUT body members = %+v, want the group's existing member", put.Members)
+			}
+		})
+	}
+}
+
+// TestRoleGrantsSyncRequestsOnlyRoleAttributes guards the sync path: listing groups for role
+// grants must not request members, which would download every group's member list per page.
+func TestRoleGrantsSyncRequestsOnlyRoleAttributes(t *testing.T) {
+	var groupListAttrs [][]string
+
+	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"not found"}`))
+			return
+		}
+		if req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups" {
+			groupListAttrs = append(groupListAttrs, req.URL.Query()["attributes"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Resources":[],"totalResults":0}`))
+	})
+
+	role := testRoleEntitlement(t, false).Resource
+	token := ""
+	for i := 0; i < 10; i++ {
+		_, res, err := r.Grants(context.Background(), role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		if err != nil {
+			t.Fatalf("Grants returned error: %v", err)
+		}
+		token = res.NextPageToken
+		if token == "" {
+			break
+		}
+	}
+
+	want := []string{"roles", "entitlements", "meta"}
+	if len(groupListAttrs) != 1 || !slices.Equal(groupListAttrs[0], want) {
+		t.Errorf("group list attributes = %v, want a single request with %v", groupListAttrs, want)
 	}
 }

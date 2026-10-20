@@ -126,6 +126,15 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 
 		result = fmt.Sprintf("%s/%s", UsersType, username)
 	case groupResourceType.Id:
+		// group resource ids are compound ("[<parent type>/<parent id>/]group/<id>"), the API needs the native id
+		if strings.Contains(principalId, "/") {
+			_, groupId, err := parseResourceId(principalId)
+			if err != nil {
+				return "", fmt.Errorf("failed to parse group principal id: %w", err)
+			}
+			principalId = groupId.Resource
+		}
+
 		displayName, _, err := c.FindGroupDisplayName(ctx, workspaceId, principalId)
 		if err != nil {
 			return "", fmt.Errorf("failed to find group %s/%s: %w", workspaceId, principalId, err)
