@@ -242,31 +242,19 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 }
 
 // workspacePrincipalID returns the numeric principal ID the permission assignments API expects.
-// Users and service principals already use it as their resource ID. Groups use a compound
-// "account/<account>/group/<id>" resource ID, and only account-level groups can be assigned
-// to a workspace through the account API.
+// Users and service principals already use it as their resource ID. Groups carry a compound
+// "account/<account>/group/<id>" resource ID; only account-level groups are accepted, and
+// workspace-scoped "workspace/<ws>/group/<n>" IDs are rejected on purpose because the account
+// permission assignments API is keyed on account groups.
 func workspacePrincipalID(principal *v2.ResourceId) (string, error) {
 	if principal.ResourceType != groupResourceType.Id {
 		return principal.Resource, nil
 	}
-
 	parent, group, err := parseResourceId(principal.Resource)
-	if err != nil {
-		return "", uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: failed to parse group principal resource id: %v", err))
+	if err != nil || parent == nil || parent.ResourceType != accountResourceType.Id || group.ResourceType != groupResourceType.Id {
+		return "", uhttp.WrapErrors(codes.InvalidArgument,
+			fmt.Sprintf("databricks-connector: only account-level group IDs can be assigned to a workspace: %q", principal.Resource))
 	}
-	if parent == nil || parent.ResourceType != accountResourceType.Id {
-		return "", uhttp.WrapErrors(
-			codes.InvalidArgument,
-			fmt.Sprintf("databricks-connector: only account-level groups can be assigned to a workspace: %q", principal.Resource),
-		)
-	}
-	if group.ResourceType != groupResourceType.Id {
-		return "", uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: invalid group principal resource id: %q", principal.Resource))
-	}
-	if _, err := strconv.Atoi(group.Resource); err != nil {
-		return "", uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: group ID must be numeric: %q", group.Resource))
-	}
-
 	return group.Resource, nil
 }
 

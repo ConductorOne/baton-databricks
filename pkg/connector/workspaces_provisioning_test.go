@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sync"
 	"testing"
 
@@ -134,7 +135,7 @@ func TestWorkspaceGrantNoAssignment(t *testing.T) {
 
 	requests, putBodies := m.snapshot()
 	want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
-	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+	if !slices.Equal(requests, want) {
 		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 	perms, _ := putBodies[0]["permissions"].([]any)
@@ -175,7 +176,7 @@ func TestWorkspaceRevokeWithAssignment(t *testing.T) {
 
 	requests, _ := m.snapshot()
 	want := []string{"GET " + testAssignmentsPath, "DELETE " + testMemberPath}
-	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+	if !slices.Equal(requests, want) {
 		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 }
@@ -224,7 +225,7 @@ func TestWorkspaceGrantGroupNoAssignment(t *testing.T) {
 
 	requests, putBodies := m.snapshot()
 	want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
-	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+	if !slices.Equal(requests, want) {
 		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 	perms, _ := putBodies[0]["permissions"].([]any)
@@ -265,9 +266,69 @@ func TestWorkspaceRevokeGroupWithAssignment(t *testing.T) {
 
 	requests, _ := m.snapshot()
 	want := []string{"GET " + testAssignmentsPath, "DELETE " + testMemberPath}
-	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+	if !slices.Equal(requests, want) {
 		t.Fatalf("requests = %v, want %v", requests, want)
 	}
+}
+
+func TestWorkspaceRevokeGroupAdminAssignment(t *testing.T) {
+	m := &workspaceAssignmentsServer{assignments: []map[string]any{{
+		"principal":   map[string]any{"principal_id": 100, "display_name": "admins"},
+		"permissions": []string{"ADMIN"},
+	}}}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	annos, err := w.Revoke(context.Background(), &v2.Grant{Principal: testProvisioningGroup(t), Entitlement: testWorkspaceMemberEntitlement(t)})
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if len(annos) != 0 {
+		t.Errorf("annotations = %v, want none", annos)
+	}
+
+	requests, _ := m.snapshot()
+	want := []string{"GET " + testAssignmentsPath, "DELETE " + testMemberPath}
+	if !slices.Equal(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+}
+
+// The principal is built the way Grants() emits group principals, so a change to the
+// compound ID format must keep Grant/Revoke hitting the numeric principal path.
+func TestWorkspaceGroupPrincipalRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
+	groupID, _, err := groupGrantExpansion(ctx, testProvisioningPrincipalID, parent)
+	if err != nil {
+		t.Fatalf("groupGrantExpansion: %v", err)
+	}
+	principal := &v2.Resource{Id: groupID}
+
+	t.Run("grant", func(t *testing.T) {
+		m := &workspaceAssignmentsServer{}
+		w := newWorkspaceBuilderWithMock(t, m)
+		if _, err := w.Grant(ctx, principal, testWorkspaceMemberEntitlement(t)); err != nil {
+			t.Fatalf("Grant(%q): %v", groupID.Resource, err)
+		}
+		requests, _ := m.snapshot()
+		want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
+		if !slices.Equal(requests, want) {
+			t.Fatalf("requests = %v, want %v", requests, want)
+		}
+	})
+
+	t.Run("revoke", func(t *testing.T) {
+		m := &workspaceAssignmentsServer{assignments: existingGroupAssignment()}
+		w := newWorkspaceBuilderWithMock(t, m)
+		if _, err := w.Revoke(ctx, &v2.Grant{Principal: principal, Entitlement: testWorkspaceMemberEntitlement(t)}); err != nil {
+			t.Fatalf("Revoke(%q): %v", groupID.Resource, err)
+		}
+		requests, _ := m.snapshot()
+		want := []string{"GET " + testAssignmentsPath, "DELETE " + testMemberPath}
+		if !slices.Equal(requests, want) {
+			t.Fatalf("requests = %v, want %v", requests, want)
+		}
+	})
 }
 
 func TestWorkspaceRevokeGroupNoAssignment(t *testing.T) {
@@ -332,7 +393,7 @@ func TestWorkspaceGrantServicePrincipal(t *testing.T) {
 	}
 	requests, _ := m.snapshot()
 	want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
-	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+	if !slices.Equal(requests, want) {
 		t.Fatalf("requests = %v, want %v", requests, want)
 	}
 }
