@@ -224,6 +224,8 @@ func (c *Client) abandonStatement(ctx context.Context, workspaceId, warehouseId 
 		default:
 			msg += fmt.Sprintf(": SQL warehouse %s is %s and has not started; check its Monitoring tab for start failures", warehouseId, state)
 		}
+	default:
+		// Terminal states never reach here: polling only times out while PENDING or RUNNING.
 	}
 
 	return uhttp.WrapErrors(codes.DeadlineExceeded, msg)
