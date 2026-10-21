@@ -3,12 +3,15 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type userBuilder struct {
@@ -175,32 +178,39 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	body := &databricks.CreateUserBody{Active: true}
 
 	// Use email as userName since Databricks API expects email in userName field
-	if email, ok := pMap["email"]; ok {
-		if email == "" {
-			return nil, nil, nil, fmt.Errorf("baton-databricks: email is required to create a user")
-		}
-		body.UserName = email.(string)
-	} else {
+	email, ok, err := profileString(pMap, "email")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !ok {
 		return nil, nil, nil, fmt.Errorf("baton-databricks: email field is required in profile")
 	}
+	if email == "" {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: email is required to create a user")
+	}
+	body.UserName = email
 
-	if displayName, ok := pMap["displayName"]; ok {
+	displayName, ok, err := profileString(pMap, "displayName")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if ok {
 		if displayName == "" {
 			return nil, nil, nil, fmt.Errorf("baton-databricks: displayName is required to create a user")
 		}
-		body.DisplayName = displayName.(string)
+		body.DisplayName = displayName
 	}
 
-	if name, ok := pMap["familyName"]; ok {
-		body.Name.FamilyName = name.(string)
+	if body.Name.FamilyName, _, err = profileString(pMap, "familyName"); err != nil {
+		return nil, nil, nil, err
 	}
 
-	if name, ok := pMap["givenName"]; ok {
-		body.Name.GivenName = name.(string)
+	if body.Name.GivenName, _, err = profileString(pMap, "givenName"); err != nil {
+		return nil, nil, nil, err
 	}
 
-	if id, ok := pMap["id"]; ok {
-		body.Id = id.(string)
+	if body.Id, _, err = profileString(pMap, "id"); err != nil {
+		return nil, nil, nil, err
 	}
 
 	if active, ok := pMap["active"]; ok {
@@ -211,9 +221,39 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		body.Active = activeBool
 	}
 
+	parentResourceId, err := rs.NewResourceID(accountResourceType, o.client.GetAccountId())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create resource ID for account: %w", err)
+	}
+
 	res, _, err := o.client.CreateUser(ctx, "", body)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user: %w", err)
+		createErr := fmt.Errorf("baton-databricks: failed to create user: %w", err)
+		// Databricks answers 409 for a userName that already exists. Any other
+		// 409 finds no user by that userName and keeps the original error.
+		if status.Code(err) != codes.AlreadyExists {
+			return nil, nil, nil, createErr
+		}
+		users, _, _, lookupErr := o.client.ListUsers(
+			ctx,
+			"",
+			&databricks.PaginationVars{Count: 1},
+			databricks.NewFilterVars(fmt.Sprintf("userName eq '%s'", body.UserName)),
+			databricks.NewUserAttrVars(),
+		)
+		// The filter is not escaped, so accept only the user whose userName
+		// matches; Databricks compares userNames case-insensitively.
+		if lookupErr != nil || len(users) == 0 || !strings.EqualFold(users[0].UserName, body.UserName) {
+			return nil, nil, nil, createErr
+		}
+		resource, err := o.userResource(ctx, &users[0], parentResourceId)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user resource: %w", err)
+		}
+		return &v2.CreateAccountResponse_AlreadyExistsResult{
+			Resource:              resource,
+			IsCreateAccountResult: true,
+		}, nil, nil, nil
 	}
 
 	user, _, err := o.client.GetUser(ctx, "", res.Id)
@@ -221,10 +261,6 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to get user after creation: %w", err)
 	}
 
-	parentResourceId, err := rs.NewResourceID(accountResourceType, o.client.GetAccountId())
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create resource ID for account: %w", err)
-	}
 	resource, err := o.userResource(ctx, user, parentResourceId)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user resource: %w", err)
@@ -242,6 +278,20 @@ func (o *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 		return nil, fmt.Errorf("baton-databricks: failed to delete user: %w", err)
 	}
 	return nil, nil
+}
+
+// profileString returns the string profile value for key and whether the key
+// is present. A present value of any other type, null included, is an error.
+func profileString(pMap map[string]interface{}, key string) (string, bool, error) {
+	v, ok := pMap[key]
+	if !ok {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", true, fmt.Errorf("baton-databricks: %s field must be a string", key)
+	}
+	return s, true, nil
 }
 
 func newUserBuilder(client *databricks.Client) *userBuilder {
