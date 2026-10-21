@@ -243,6 +243,23 @@ func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, enti
 	}
 }
 
+// addValueOp and removeValueOp build SCIM PATCH operations that touch a single value of a
+// multi-valued group attribute (members, roles, entitlements) and leave the rest of the group as is.
+func addValueOp(attribute, value string) databricks.PatchOperation {
+	return databricks.PatchOperation{
+		Op:    "add",
+		Path:  attribute,
+		Value: []databricks.PermissionValue{{Value: value}},
+	}
+}
+
+func removeValueOp(attribute, value string) databricks.PatchOperation {
+	return databricks.PatchOperation{
+		Op:   "remove",
+		Path: fmt.Sprintf("%s[value eq %q]", attribute, value),
+	}
+}
+
 func isNotFoundError(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound

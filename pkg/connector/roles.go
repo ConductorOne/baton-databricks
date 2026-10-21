@@ -348,9 +348,14 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
-		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
-
-		_, err = r.client.UpdateGroup(ctx, workspaceId, g)
+		// Account roles are patched onto the group; workspace entitlements keep the PUT because
+		// workspace-level SCIM PATCH has not been verified against a live workspace.
+		if isWorkspaceRole {
+			addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
+			_, err = r.client.UpdateGroup(ctx, workspaceId, g)
+		} else {
+			_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, addValueOp("roles", permissionName))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
@@ -429,9 +434,14 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
-		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
-
-		_, err = r.client.UpdateGroup(ctx, workspaceId, g)
+		// Account roles are patched onto the group; workspace entitlements keep the PUT because
+		// workspace-level SCIM PATCH has not been verified against a live workspace.
+		if isWorkspaceRole {
+			removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
+			_, err = r.client.UpdateGroup(ctx, workspaceId, g)
+		} else {
+			_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, removeValueOp("roles", permissionName))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}

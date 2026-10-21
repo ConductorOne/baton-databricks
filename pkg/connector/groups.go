@@ -322,12 +322,16 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 			}
 		}
 
-		// add the member to the group
-		group.Members = append(group.Members, databricks.Member{
-			ID: principalId.Resource,
-		})
-
-		_, err = g.client.UpdateGroup(ctx, workspaceId, group)
+		// Account groups are patched so only the new member is written; workspace groups keep the PUT
+		// because workspace-level SCIM PATCH has not been verified against a live workspace.
+		if workspaceId == "" {
+			_, err = g.client.PatchGroup(ctx, workspaceId, groupId.Resource, addValueOp("members", principalId.Resource))
+		} else {
+			group.Members = append(group.Members, databricks.Member{
+				ID: principalId.Resource,
+			})
+			_, err = g.client.UpdateGroup(ctx, workspaceId, group)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupId.Resource, err)
 		}
@@ -453,19 +457,23 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
-		indexToDelete := -1
-		for i, member := range group.Members {
-			if member.ID == principalId {
-				indexToDelete = i
-				break
+		if workspaceId == "" {
+			_, err = g.client.PatchGroup(ctx, workspaceId, groupId.Resource, removeValueOp("members", principalId))
+		} else {
+			indexToDelete := -1
+			for i, member := range group.Members {
+				if member.ID == principalId {
+					indexToDelete = i
+					break
+				}
 			}
-		}
 
-		if indexToDelete != -1 {
-			group.Members = slices.Delete(group.Members, indexToDelete, indexToDelete+1)
-		}
+			if indexToDelete != -1 {
+				group.Members = slices.Delete(group.Members, indexToDelete, indexToDelete+1)
+			}
 
-		_, err = g.client.UpdateGroup(ctx, workspaceId, group)
+			_, err = g.client.UpdateGroup(ctx, workspaceId, group)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupId.Resource, err)
 		}

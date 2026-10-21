@@ -366,6 +366,24 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	return res, ratelimitData, nil
 }
 
+// PatchGroup applies SCIM PATCH operations to a group, changing only the attributes the
+// operations target.
+func (c *Client) PatchGroup(ctx context.Context, workspaceId, groupId string, operations ...PatchOperation) (*v2.RateLimitDescription, error) {
+	var u *url.URL
+	if workspaceId == "" {
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), groupId)
+	} else {
+		u = c.workspaceUrl(workspaceId).JoinPath(groupsEndpoint, groupId)
+	}
+
+	body := PatchRequest{
+		Schemas:    []string{PatchOpSchema},
+		Operations: operations,
+	}
+
+	return c.Patch(ctx, u, body, nil)
+}
+
 // UpdateGroup replaces a group's full SCIM representation via PUT. Because this is a
 // full-replacement write, a group fetched without displayName (e.g. an AttrVars that
 // requests only a subset of attributes) would silently wipe it; refuse rather than
