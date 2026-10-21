@@ -25,6 +25,8 @@ type fakeSCIMGroup struct {
 	state  map[string]any
 	puts   int
 	writes []databricks.PatchRequest
+	// echo answers a PATCH with 200 and the patched group, as the workspace-level API does.
+	echo bool
 }
 
 var removeFilterPath = regexp.MustCompile(`^(\w+)\[value eq "([^"]*)"\]$`)
@@ -69,6 +71,10 @@ func (f *fakeSCIMGroup) handler(w http.ResponseWriter, req *http.Request) {
 		f.writes = append(f.writes, patch)
 		for _, op := range patch.Operations {
 			f.apply(op)
+		}
+		if f.echo {
+			writeSCIMGroup(f.t, w, req, f.state)
+			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodPut:
@@ -282,114 +288,192 @@ func TestAccountGroupMembershipGrantAlreadyMemberSkipsWrite(t *testing.T) {
 	}
 }
 
-// TestWorkspaceGroupWritesKeepPut pins the workspace-scoped paths to the full-replacement PUT:
-// workspace-level SCIM PATCH is not verified against a live workspace, so these keep the PR 76
-// behavior of writing back the full group fetched with every modeled attribute.
-func TestWorkspaceGroupWritesKeepPut(t *testing.T) {
+func testWorkspaceGroup(t *testing.T) *v2.Resource {
+	t.Helper()
+	parent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: testWorkspaceId}
+	r, err := groupResource(context.Background(), &databricks.Group{
+		BaseResponse: databricks.BaseResponse{ID: "g-target"},
+		DisplayName:  "Target Group",
+	}, parent)
+	if err != nil {
+		t.Fatalf("groupResource: %v", err)
+	}
+	return r
+}
+
+// TestWorkspaceGroupWritesArePatches covers the workspace-scoped paths: membership and workspace
+// entitlement writes send a single SCIM PATCH operation to the workspace API, never a PUT, and
+// leave the rest of the group as is.
+func TestWorkspaceGroupWritesArePatches(t *testing.T) {
 	const groupPath = "/api/2.0/preview/scim/v2/Groups/g-target"
 
-	workspaceGroup := func(t *testing.T) *v2.Resource {
-		t.Helper()
-		parent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: testWorkspaceId}
-		r, err := groupResource(context.Background(), &databricks.Group{
-			BaseResponse: databricks.BaseResponse{ID: "g-target"},
-			DisplayName:  "Target Group",
-		}, parent)
-		if err != nil {
-			t.Fatalf("groupResource: %v", err)
-		}
-		return r
-	}
-
 	tests := []struct {
-		name  string
-		run   func(t *testing.T, handler http.HandlerFunc) error
-		check func(t *testing.T, put capturedGroupPut)
+		name      string
+		run       func(t *testing.T, srv *fakeSCIMGroup) error
+		wantOp    databricks.PatchOperation
+		attribute string
+		want      []string
 	}{
 		{
 			name: "workspace group membership grant",
-			run: func(t *testing.T, handler http.HandlerFunc) error {
-				g := newGroupBuilderWithHandler(t, handler)
+			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+				g := newGroupBuilderWithHandler(t, srv.handler)
 				_, err := g.Grant(context.Background(), testUserPrincipal(t, "u-added"),
-					ent.NewAssignmentEntitlement(workspaceGroup(t), groupMemberEntitlement))
+					ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement))
 				return err
 			},
-			check: func(t *testing.T, put capturedGroupPut) {
-				var members []string
-				for _, m := range put.Members {
-					members = append(members, m.Value)
-				}
-				if want := []string{"existing-member-1", "u-new", "u-added"}; !slices.Equal(members, want) {
-					t.Errorf("PUT body members = %v, want %v", members, want)
-				}
-			},
+			wantOp:    databricks.PatchOperation{Op: "add", Path: "members", Value: []any{map[string]any{"value": "u-added"}}},
+			attribute: "members",
+			want:      []string{"existing-member-1", "u-new", "u-added"},
 		},
 		{
 			name: "workspace group membership revoke",
-			run: func(t *testing.T, handler http.HandlerFunc) error {
-				g := newGroupBuilderWithHandler(t, handler)
+			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+				g := newGroupBuilderWithHandler(t, srv.handler)
 				_, err := g.Revoke(context.Background(), &v2.Grant{
 					Principal:   testUserPrincipal(t, "u-new"),
-					Entitlement: ent.NewAssignmentEntitlement(workspaceGroup(t), groupMemberEntitlement),
+					Entitlement: ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement),
 				})
 				return err
 			},
-			check: func(t *testing.T, put capturedGroupPut) {
-				if len(put.Members) != 1 || put.Members[0].Value != "existing-member-1" {
-					t.Errorf("PUT body members = %+v, want only existing-member-1", put.Members)
-				}
-			},
+			wantOp:    databricks.PatchOperation{Op: "remove", Path: `members[value eq "u-new"]`},
+			attribute: "members",
+			want:      []string{"existing-member-1"},
 		},
 		{
 			name: "workspace entitlement grant",
-			run: func(t *testing.T, handler http.HandlerFunc) error {
-				r := newRoleBuilderWithHandler(t, handler)
+			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+				srv.state["entitlements"] = []any{}
+				r := newRoleBuilderWithHandler(t, srv.handler)
 				_, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, true))
 				return err
 			},
-			check: func(t *testing.T, put capturedGroupPut) {
-				if len(put.Members) != 2 {
-					t.Errorf("PUT body members = %+v, want the group's existing members", put.Members)
-				}
+			wantOp:    databricks.PatchOperation{Op: "add", Path: "entitlements", Value: []any{map[string]any{"value": WorkspaceAccessRole}}},
+			attribute: "entitlements",
+			want:      []string{WorkspaceAccessRole},
+		},
+		{
+			name: "workspace entitlement revoke",
+			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+				r := newRoleBuilderWithHandler(t, srv.handler)
+				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, true)})
+				return err
 			},
+			wantOp:    databricks.PatchOperation{Op: "remove", Path: `entitlements[value eq "workspace-access"]`},
+			attribute: "entitlements",
+			want:      nil,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newFakeSCIMGroup(t, groupPath)
-			var capturedPutBody []byte
-			handler := func(w http.ResponseWriter, req *http.Request) {
-				if req.Method == http.MethodPut && req.URL.Path == groupPath {
-					capturedPutBody, _ = io.ReadAll(req.Body)
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write(capturedPutBody)
-					return
-				}
-				srv.handler(w, req)
+			srv.echo = true
+			before := map[string][]string{}
+			for _, a := range []string{"members", "roles", "entitlements"} {
+				before[a] = srv.values(a)
 			}
 
-			if err := tc.run(t, handler); err != nil {
+			if err := tc.run(t, srv); err != nil {
 				t.Fatalf("%s returned error: %v", tc.name, err)
 			}
-			if len(srv.writes) != 0 {
-				t.Errorf("sent %d PATCH requests to a workspace group, want none", len(srv.writes))
+
+			if srv.puts != 0 {
+				t.Errorf("sent %d full-replacement PUTs, want none", srv.puts)
 			}
-			if capturedPutBody == nil {
-				t.Fatal("expected a PUT request updating the group, got none")
+			if len(srv.writes) != 1 {
+				t.Fatalf("sent %d PATCH requests, want exactly 1", len(srv.writes))
+			}
+			if len(srv.writes[0].Operations) != 1 {
+				t.Fatalf("PATCH operations = %+v, want exactly one", srv.writes[0].Operations)
+			}
+			gotOp, _ := json.Marshal(srv.writes[0].Operations[0])
+			wantOp, _ := json.Marshal(tc.wantOp)
+			if string(gotOp) != string(wantOp) {
+				t.Errorf("PATCH operation = %s, want %s", gotOp, wantOp)
 			}
 
-			var put capturedGroupPut
-			if err := json.Unmarshal(capturedPutBody, &put); err != nil {
-				t.Fatalf("unmarshal PUT body: %v", err)
+			if got := srv.values(tc.attribute); !slices.Equal(got, tc.want) {
+				t.Errorf("group %s after write = %v, want %v", tc.attribute, got, tc.want)
 			}
-			if put.DisplayName != "Target Group" {
-				t.Errorf("PUT body displayName = %q, want %q", put.DisplayName, "Target Group")
+			for a, v := range before {
+				if a == tc.attribute {
+					continue
+				}
+				if got := srv.values(a); !slices.Equal(got, v) {
+					t.Errorf("group %s changed from %v to %v by a write that targets %s", a, v, got, tc.attribute)
+				}
 			}
-			if len(put.Roles) != 1 || put.Roles[0].Value != AccountAdminRole {
-				t.Errorf("PUT body roles = %+v, want the group's existing role", put.Roles)
+			if srv.state["displayName"] != "Target Group" || srv.state["externalId"] != "ext-1" {
+				t.Errorf("group displayName/externalId changed: %v / %v", srv.state["displayName"], srv.state["externalId"])
 			}
-			tc.check(t, put)
 		})
+	}
+}
+
+// TestWorkspaceGroupRevokeAbsentValueSkipsWrite: the workspace API answers 400 to a remove on an
+// empty attribute, so revoking a member or entitlement the group does not have must not write.
+func TestWorkspaceGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, srv *fakeSCIMGroup) error
+	}{
+		{
+			name: "membership",
+			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+				srv.state["members"] = []any{}
+				g := newGroupBuilderWithHandler(t, srv.handler)
+				_, err := g.Revoke(context.Background(), &v2.Grant{
+					Principal:   testUserPrincipal(t, "u-absent"),
+					Entitlement: ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement),
+				})
+				return err
+			},
+		},
+		{
+			name: "entitlement",
+			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+				srv.state["entitlements"] = []any{}
+				r := newRoleBuilderWithHandler(t, srv.handler)
+				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, true)})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeSCIMGroup(t, "/api/2.0/preview/scim/v2/Groups/g-target")
+			if err := tc.run(t, srv); err != nil {
+				t.Fatalf("Revoke returned error: %v", err)
+			}
+			if len(srv.writes) != 0 || srv.puts != 0 {
+				t.Errorf("Revoke wrote to the group (%d PATCH, %d PUT), want no write", len(srv.writes), srv.puts)
+			}
+		})
+	}
+}
+
+// TestGroupWriteReadsSkipHTTPCache: the HTTP client caches GETs, so a membership check served from
+// the cache after an earlier write would skip a needed write. A revoke followed by a grant of the
+// same member on one builder must send both PATCHes.
+func TestGroupWriteReadsSkipHTTPCache(t *testing.T) {
+	srv := newFakeSCIMGroup(t, "/api/2.0/preview/scim/v2/Groups/g-target")
+	srv.echo = true
+	g := newGroupBuilderWithHandler(t, srv.handler)
+	entitlement := ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement)
+
+	if _, err := g.Revoke(context.Background(), &v2.Grant{Principal: testUserPrincipal(t, "u-new"), Entitlement: entitlement}); err != nil {
+		t.Fatalf("Revoke returned error: %v", err)
+	}
+	if _, err := g.Grant(context.Background(), testUserPrincipal(t, "u-new"), entitlement); err != nil {
+		t.Fatalf("Grant returned error: %v", err)
+	}
+
+	if len(srv.writes) != 2 {
+		t.Fatalf("sent %d PATCH requests, want 2 (revoke then grant)", len(srv.writes))
+	}
+	if got := srv.values("members"); !slices.Equal(got, []string{"existing-member-1", "u-new"}) {
+		t.Errorf("group members = %v, want [existing-member-1 u-new]", got)
 	}
 }

@@ -260,6 +260,15 @@ func removeValueOp(attribute, value string) databricks.PatchOperation {
 	}
 }
 
+// groupPermissionAttribute is the group attribute a role lives in: workspace roles are
+// entitlements, account roles are roles.
+func groupPermissionAttribute(isWorkspaceRole bool) string {
+	if isWorkspaceRole {
+		return "entitlements"
+	}
+	return "roles"
+}
+
 func isNotFoundError(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound

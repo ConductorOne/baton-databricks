@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -343,19 +344,13 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
+		_, _, err = r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
-		// Account roles are patched onto the group; workspace entitlements keep the PUT because
-		// workspace-level SCIM PATCH has not been verified against a live workspace.
-		if isWorkspaceRole {
-			addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
-			_, err = r.client.UpdateGroup(ctx, workspaceId, g)
-		} else {
-			_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, addValueOp("roles", permissionName))
-		}
+		// Account roles and workspace entitlements are patched onto the group, so only the new value is written.
+		_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, addValueOp(groupPermissionAttribute(isWorkspaceRole), permissionName))
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
@@ -429,19 +424,22 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
-		// Account roles are patched onto the group; workspace entitlements keep the PUT because
-		// workspace-level SCIM PATCH has not been verified against a live workspace.
+		// The workspace SCIM API answers 400 to a remove on an empty attribute, so a role or
+		// entitlement the group does not have is left as is instead of being patched.
+		current := g.Roles
 		if isWorkspaceRole {
-			removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
-			_, err = r.client.UpdateGroup(ctx, workspaceId, g)
-		} else {
-			_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, removeValueOp("roles", permissionName))
+			current = g.Entitlements
 		}
+		if !slices.ContainsFunc(current, func(p databricks.PermissionValue) bool { return p.Value == permissionName }) {
+			return nil, nil
+		}
+
+		_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, removeValueOp(groupPermissionAttribute(isWorkspaceRole), permissionName))
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}

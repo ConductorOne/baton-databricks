@@ -236,6 +236,11 @@ func (c *Client) doRequestWithOptions(
 		options = append(options, uhttp.WithJSONBody(body))
 	}
 	options = append(options, extraOptions...)
+	for _, param := range params {
+		if _, ok := param.(NoCacheVars); ok {
+			options = append(options, uhttp.WithNoCache())
+		}
+	}
 
 	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)
 	if err != nil {

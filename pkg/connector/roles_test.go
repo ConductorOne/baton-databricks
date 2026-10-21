@@ -167,10 +167,9 @@ func TestRoleGrantAccountPrincipalNotFound(t *testing.T) {
 
 // TestRoleGrantGroupPrincipalParsesCompoundID is the regression test for CXH-2347 symptom B:
 // granting a role to a group principal must parse the compound resource id down to the
-// native group id before calling GetGroup/UpdateGroup (the mock server here only answers
+// native group id before calling GetGroup/PatchGroup (the mock server here only answers
 // requests for the native id "g-native"; sending the unparsed compound id 404s). It also
-// asserts the outgoing PUT body never drops the group's existing members or displayName,
-// which is what NewGroupUpdateAttrVars requesting "members"/"displayName" guards against.
+// asserts the outgoing PATCH adds only the granted role.
 func TestRoleGrantGroupPrincipalParsesCompoundID(t *testing.T) {
 	var capturedPatch *databricks.PatchRequest
 
