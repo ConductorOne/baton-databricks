@@ -242,16 +242,14 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 }
 
 // workspacePrincipalID returns the numeric principal ID the permission assignments API expects.
-// Users and service principals already use it as their resource ID. Groups carry a compound
-// "account/<account>/group/<id>" resource ID; only account-level groups are accepted, and
-// workspace-scoped "workspace/<ws>/group/<n>" IDs are rejected on purpose because the account
-// permission assignments API is keyed on account groups.
-func workspacePrincipalID(principal *v2.ResourceId) (string, error) {
+// Groups are only synced under the account, so only "account/<account>/group/<n>" group IDs of
+// the given account are accepted; anything else is rejected.
+func workspacePrincipalID(principal *v2.ResourceId, accountID string) (string, error) {
 	if principal.ResourceType != groupResourceType.Id {
 		return principal.Resource, nil
 	}
 	parent, group, err := parseResourceId(principal.Resource)
-	if err != nil || parent == nil || parent.ResourceType != accountResourceType.Id || group.ResourceType != groupResourceType.Id {
+	if err != nil || parent == nil || parent.ResourceType != accountResourceType.Id || parent.Resource != accountID || group.ResourceType != groupResourceType.Id {
 		return "", uhttp.WrapErrors(codes.InvalidArgument,
 			fmt.Sprintf("databricks-connector: only account-level group IDs can be assigned to a workspace: %q", principal.Resource))
 	}
@@ -279,7 +277,7 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	principalID, err := workspacePrincipalID(principal.Id)
+	principalID, err := workspacePrincipalID(principal.Id, w.client.GetAccountId())
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +317,7 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	principalID, err := workspacePrincipalID(principal.Id)
+	principalID, err := workspacePrincipalID(principal.Id, w.client.GetAccountId())
 	if err != nil {
 		return nil, err
 	}

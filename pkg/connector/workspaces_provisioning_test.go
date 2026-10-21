@@ -355,6 +355,7 @@ func TestWorkspaceGroupPrincipalInvalidIDRejected(t *testing.T) {
 		"bare numeric":          "100",
 		"non-numeric group id":  "account/" + testAccountId + "/group/abc",
 		"workspace parent":      "workspace/ws-deploy/group/100",
+		"other account":         "account/other-" + testAccountId + "/group/100",
 		"wrong child type":      "account/" + testAccountId + "/user/100",
 		"too many segments":     "account/" + testAccountId + "/group/100/extra",
 		"empty":                 "",

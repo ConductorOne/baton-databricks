@@ -120,7 +120,7 @@ assignment, so a principal that is also a workspace admin loses admin access
 to that workspace too. This also applies to groups: revoking workspace
 membership from a group removes the group's entire workspace assignment,
 including admin access if the group is a workspace admin, so its members lose
-it. Only account-level groups are supported for workspace membership.
+it.
 
 # Contributing, Support and Issues
 
