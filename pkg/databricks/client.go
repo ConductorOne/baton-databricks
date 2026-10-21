@@ -35,8 +35,9 @@ const (
 	accountRolesEndpoint             = "/api/2.0/preview/accounts/%s/access-control/assignable-roles"
 	accountRuleSetsEndpoint          = "/api/2.0/preview/accounts/%s/access-control/rule-sets"
 
-	accountWorkspacesEndpoint           = "/api/2.0/accounts/%s/workspaces"
-	accountWorkspaceAssignmentsEndpoint = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
+	accountWorkspacesEndpoint                   = "/api/2.0/accounts/%s/workspaces"
+	accountWorkspaceAssignmentsEndpoint         = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
+	accountWorkspacePrincipalAssignmentEndpoint = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments/principals/%s"
 )
 
 type Client struct {
@@ -646,7 +647,7 @@ func validatePrincipalID(principalID string) error {
 	if _, err := strconv.Atoi(principalID); err != nil {
 		return uhttp.WrapErrors(
 			codes.InvalidArgument,
-			fmt.Sprintf("databricks: principal ID must be numeric; compound group IDs are not supported here: %q", principalID),
+			fmt.Sprintf("principal ID must be numeric; compound group IDs are not supported here: %q", principalID),
 		)
 	}
 
@@ -656,7 +657,7 @@ func validatePrincipalID(principalID string) error {
 // workspacePrincipalAssignmentURL is the URL of a single principal's assignment
 // on a workspace.
 func (c *Client) workspacePrincipalAssignmentURL(workspaceId, principalId string) *url.URL {
-	return c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
+	return c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspacePrincipalAssignmentEndpoint, c.accountId, workspaceId, principalId))
 }
 
 // AddWorkspaceMember grants the "USER" workspace permission to a principal.
@@ -664,6 +665,9 @@ func (c *Client) workspacePrincipalAssignmentURL(workspaceId, principalId string
 // The assignments endpoint is full-replacement, not PATCH. An existing
 // assignment of any kind (USER and/or ADMIN) already grants workspace access,
 // so nothing is written and an existing ADMIN is never touched.
+//
+// GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments, then
+// PUT /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments/principals/{principal_id}.
 func (c *Client) AddWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
@@ -675,7 +679,7 @@ func (c *Client) AddWorkspaceMember(
 
 	hasAssignment, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
 	if err != nil {
-		return false, ratelimitData, fmt.Errorf("databricks: failed to read current workspace permission assignment: %w", err)
+		return false, ratelimitData, fmt.Errorf("failed to read current workspace permission assignment: %w", err)
 	}
 
 	if hasAssignment {
@@ -713,7 +717,7 @@ func (c *Client) RemoveWorkspaceMember(
 
 	hasAssignment, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
 	if err != nil {
-		return false, ratelimitData, fmt.Errorf("databricks: failed to read current workspace permission assignment: %w", err)
+		return false, ratelimitData, fmt.Errorf("failed to read current workspace permission assignment: %w", err)
 	}
 
 	if !hasAssignment {
@@ -739,6 +743,8 @@ func (c *Client) RemoveWorkspaceMember(
 // principal ID: there's no API to fetch a single assignment directly. An entry
 // for the principal carrying an error is returned as an error, so callers
 // never write on top of an assignment that couldn't be read properly.
+//
+// GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments.
 func (c *Client) currentWorkspacePermissions(
 	ctx context.Context,
 	workspaceId string,
@@ -764,7 +770,7 @@ func (c *Client) currentWorkspacePermissions(
 		if assignment.Error != "" {
 			return false, ratelimitData, uhttp.WrapErrors(
 				codes.Internal,
-				fmt.Sprintf("databricks: workspace %s assignment for principal %s has an error: %s", workspaceId, principalId, assignment.Error),
+				fmt.Sprintf("workspace %s assignment for principal %s has an error: %s", workspaceId, principalId, assignment.Error),
 			)
 		}
 
