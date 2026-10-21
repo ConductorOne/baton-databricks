@@ -60,7 +60,7 @@ Configuring the connector requires you to pass in credentials generated in Datab
 A user with the **Account admin** role in each Databricks workspace you want to sync must perform this task.
 </Warning>
 
-Every step below happens in the Databricks **account console**. On AWS that is [https://accounts.cloud.databricks.com](https://accounts.cloud.databricks.com). Azure Databricks and Google Cloud Platform customers use their own account console host. When they configure the connector they only need the workspace **Hostname**; Account Hostname is optional.
+Every step below happens in the Databricks **account console**. On AWS that is [https://accounts.cloud.databricks.com](https://accounts.cloud.databricks.com). Azure Databricks and Google Cloud Platform customers use their own account console host. When they configure the connector they only need their Databricks domain in **Hostname**; Account Hostname is optional.
 
 ### Look up your Databricks account ID
 
@@ -175,9 +175,9 @@ To complete this task, you'll need:
   Fill in **Workspaces** or **Exclude Workspaces**, not both.
   </Step>
   <Step>
-  **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks workspace hostname in the **Hostname** field. Account Hostname is optional: the connector derives it from Hostname when unset.
+  **Google Cloud Platform and Azure Databricks customers only:** Enter your Databricks domain in the **Hostname** field, for example `gcp.databricks.com` or `azuredatabricks.net`. This is the domain your workspace URLs end with, not the URL of one workspace. Account Hostname is optional: the connector derives it from Hostname when unset.
     - For more on how to look up these values for GCP, see the GCP Databricks [REST API reference](https://docs.databricks.com/api/gcp/account/introduction) and [identifiers for workspace objects](https://docs.gcp.databricks.com/en/workspace/workspace-details.html) documentation.
-    - For more on how to look up these values for Azure Databricks, see the the Azure Databricks [REST API reference](https://docs.databricks.com/api/azure/account/introduction) and [identifiers for workspace objects](https://learn.microsoft.com/en-us/azure/databricks/workspace/workspace-details) documentation.
+    - For more on how to look up these values for Azure Databricks, see the Azure Databricks [REST API reference](https://docs.databricks.com/api/azure/account/introduction) and [identifiers for workspace objects](https://learn.microsoft.com/en-us/azure/databricks/workspace/workspace-details) documentation.
   </Step>
 
   <Step>

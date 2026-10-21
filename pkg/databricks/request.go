@@ -48,9 +48,11 @@ func wrapTransportAuthError(err error) error {
 	return uhttp.WrapErrors(code, "databricks-connector: authentication failed", err)
 }
 
-// Databricks error_code values that mean the named securable is gone.
-// A route-level 404 (workspace does not serve this metastore) uses a
-// different code, so status-only matching cannot tell the two apart.
+// Databricks error_code values for a named securable that is not there.
+// The code narrows a 404 to the named securable, but it does not prove the
+// securable is gone: METASTORE_DOES_NOT_EXIST also answers a workspace that
+// serves no metastore. Only the account list separates absence from a route
+// that does not reach it.
 const (
 	ErrorCodeMetastoreDoesNotExist = "METASTORE_DOES_NOT_EXIST"
 	ErrorCodeCatalogDoesNotExist   = "CATALOG_DOES_NOT_EXIST"

@@ -92,8 +92,7 @@ deployment name, or numeric workspace ID, matched case-insensitively.
 listed workspace is synced, so narrowing the list removes the other metastores
 and their grants from ConductorOne. A list that matches no workspace on the
 account fails the whole sync, including users, groups, service principals and
-workspaces. A name that is also in `databricks-exclude-workspaces` is reported
-as excluded.
+workspaces, once the `metastore` resource type is enabled.
 
 Metastores are Unity Catalog securables and are opt-in: the type stays off until
 it is enabled for the connector in ConductorOne.
@@ -156,8 +155,33 @@ members as holders.
 `MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
 metastore level.
 
-The endpoints, the permission model, principal resolution and the connector's
-limitations are in [docs/docs-info.md](./docs/docs-info.md).
+A metastore lives on the account plane, but its privileges are read through a
+workspace host assigned to it.
+
+| Level | Endpoint |
+|-------|----------|
+| Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
+| Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
+| Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
+
+HTTP cache keys include the request Host. Two workspaces share paths such as
+`/unity-catalog/permissions/...`, and without the host in the key one
+workspace's response would be served for another.
+
+A metastore is synced only while a workspace this sync can use is attached to
+it. The connector never guesses when the answer is unknown:
+
+| Attached workspace | Result |
+|--------------------|--------|
+| `RUNNING` and in scope | the metastore syncs through it |
+| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and its grants fail with `FailedPrecondition` until the state settles |
+| `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
+| assignment list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming the assignment list |
+
+A metastore is left out of the sync only when the answer is known: every
+attached workspace is out of scope or unusable. Leaving it out is what makes
+ConductorOne remove it and its grants, so an unknown answer must not take that
+path.
 
 ## Unity Catalog provisioning
 
@@ -167,11 +191,39 @@ fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions
 
-The same OAuth service principal must own the metastore or be assigned
-**Admin** directly on a workspace attached to it (Admin inherited only through
-a group is not enough). When neither holds, the sync fails with a
-`PermissionDenied` error naming the metastore rather than reporting a partial
-read. Details are in [docs/docs-info.md](./docs/docs-info.md).
+Three independent layers have to line up, and granting one does not imply the
+others:
+
+1. **OAuth scopes** decide which API surfaces the credential may touch at all.
+2. **The service principal's roles** decide what it sees on those surfaces.
+3. **Unity Catalog privileges** apply on the securable itself.
+
+The scopes:
+
+| Scope | Covers |
+|-------|--------|
+| `unity-catalog` | Metastores, metastore workspace assignments, and the permissions endpoint |
+| `scim` | Account users, groups and service principals |
+| `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
+| `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
+
+The connector requests `all-apis`, which covers all four. Each resource type
+declares its own scopes, roles and privileges, so `./baton-databricks
+capabilities` reports them per type.
+
+A privilege read is only trustworthy when the service principal owns the
+metastore, or is assigned **Admin** directly on a workspace the metastore is
+assigned to (Admin inherited only through a group is not enough). Holding a
+privilege is not an option at this level: Databricks rejects `MANAGE` and
+`ALL_PRIVILEGES` on a metastore, so there is no privilege whose presence would
+prove the read is complete.
+
+When neither holds, the sync fails with a `PermissionDenied` error naming the
+metastore rather than reporting a partial read. Databricks answers an
+under-permissioned privilege read with HTTP 200 and a partial list of privilege
+assignments, which is byte-indistinguishable from an object that genuinely has
+no grants on it. Reporting that partial list would make ConductorOne read every
+privilege the principal cannot see as revoked access.
 
 # Contributing, Support and Issues
 

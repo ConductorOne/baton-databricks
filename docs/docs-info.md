@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a metastore privilege for a user, group or service principal. The `owner` entitlement is read-only; granting or revoking it returns `InvalidArgument`.
+   > - **Unity Catalog privileges**: grant and revoke a metastore privilege for a user, group or service principal. The `owner` entitlement is read-only and cannot be granted or revoked.
 
 ## Connector credentials
 
@@ -24,7 +24,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **OAuth**: a service principal OAuth client ID and client secret. Syncs the account and every workspace the service principal can access. This is the connector's only authentication method.
    >
-   > Google Cloud Platform and Azure Databricks customers also provide the workspace hostname. Account Hostname is optional: the connector derives it from Hostname when unset.
+   > Google Cloud Platform and Azure Databricks customers also provide their Databricks domain, such as `gcp.databricks.com` or `azuredatabricks.net`. Account Hostname is optional: the connector derives it from Hostname when unset.
 
 2. For each item in the list above:
 
@@ -50,61 +50,6 @@ While developing the connector, please fill out this form. This information is n
 
      > Account admin access to the Databricks account console (to create the service principal and OAuth secret), and workspace admin on each workspace being synced.
 
-## Unity Catalog API
-
-A metastore lives on the account plane, but its privileges are read through a
-workspace host assigned to it.
-
-| Level | Endpoint |
-|-------|----------|
-| Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
-| Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
-| Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
-
-- **HTTP cache keys include the request Host.** Two workspaces share paths such
-  as `/unity-catalog/permissions/...`, and without the host in the key one
-  workspace's response would be served for another.
-
-## Permission model
-
-Three independent layers have to line up, and granting one does not imply the
-others:
-
-1. **OAuth scopes** decide which API surfaces the credential may touch at all.
-2. **The service principal's roles** decide what it sees on those surfaces.
-3. **Unity Catalog privileges** apply on the securable itself.
-
-The scopes:
-
-| Scope | Covers |
-|-------|--------|
-| `unity-catalog` | Metastores, metastore workspace assignments, and the permissions endpoint |
-| `scim` | Account users, groups and service principals |
-| `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
-| `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
-
-The connector requests `all-apis`, which covers all four. Each resource type
-declares its own scopes, roles and privileges, so `./baton-databricks
-capabilities` reports them per type.
-
-A privilege read is only trustworthy when the service principal satisfies at
-least one of these per metastore:
-
-- it is the owner of the metastore, or
-- it is assigned Admin directly on a workspace the metastore is assigned to
-  (Admin inherited only through a group is not enough).
-
-Holding a privilege is not an option at this level: Databricks rejects `MANAGE`
-and `ALL_PRIVILEGES` on a metastore, so there is no privilege whose presence
-would prove the read is complete.
-
-When neither holds, the connector fails the sync rather than reporting what
-it can see. Databricks answers an under-permissioned privilege read with HTTP
-200 and a partial list of privilege assignments, which is byte-indistinguishable
-from an object that genuinely has no grants on it. Reporting that partial list
-would make ConductorOne read every privilege the principal cannot see as revoked
-access.
-
 ## Limitations
 
 - **Direct grants only.** Unity Catalog privileges inherit downward —
@@ -122,23 +67,19 @@ access.
   resolve, and no owner grant is emitted for it.
 - **`MANAGE` and `ALL_PRIVILEGES` do not exist at the metastore level** —
   Databricks rejects them there, so neither is offered as an entitlement.
-- **A metastore needs a usable workspace.** Its privileges are not served on the
-  account plane, only through a `RUNNING` workspace attached to it. A metastore
-  with no workspace attached, or whose attached workspaces are all left out by
-  `workspaces` or `databricks-exclude-workspaces`, is not synced, and
+- **A metastore needs a running workspace.** Its privileges are not served on
+  the account plane, only through a running workspace attached to it. A
+  metastore that no running workspace in the sync reaches is not synced, and
   ConductorOne removes it and its grants. Granting or revoking a privilege on
-  such a metastore fails with `FailedPrecondition` and changes nothing in
-  Databricks. An allowlist that matches no
-  workspace on the account fails the whole sync, including users, groups,
-  service principals and workspaces. A name that is also in
-  `databricks-exclude-workspaces` is reported as excluded; a name Databricks
-  does not have is reported as not on the account. A workspace that is
-  `PROVISIONING`, `NOT_PROVISIONED` or `CANCELLING` keeps its metastore, and that metastore's
-  grants fail until it is `RUNNING`. A workspace that is `FAILED` or `BANNED`
-  does not: when it is the only one attached, the metastore is left out of the
-  sync. While a metastore's workspace assignments cannot be read, nothing is
-  removed: that metastore fails the sync, and the error says the assignment
-  list could not be read.
+  such a metastore fails and changes nothing in Databricks.
+- **Narrowing `workspaces` narrows the metastores.** Only a metastore attached
+  to a listed workspace is synced. When the Metastores resource type is enabled,
+  a list that matches no workspace on the account fails the whole sync,
+  including users, groups, service principals and workspaces.
+- **The workspace shown on a metastore is an access path, not an authority.**
+  It names a workspace the metastore is assigned to. The connector confirms its
+  access before every read and uses another attached workspace when that one
+  does not serve the metastore, so the grants may have been read elsewhere.
 - **Admin on any attached workspace is enough.** The connector tries each
   attached workspace in turn and reads through the first one where it holds
   Admin directly.

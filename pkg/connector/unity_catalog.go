@@ -29,7 +29,6 @@ type routingSnapshot struct {
 	workspaces     map[string][]string
 	workspaceIDs   map[string]string
 	workspaceNames map[string]string
-	asked          int
 
 	// unreadable names the metastores whose workspace assignment list answered
 	// 401, 403 or 404, so which workspaces serve them is unknown rather than none.
@@ -95,37 +94,21 @@ func workspaceIsPending(status string) bool {
 	}
 }
 
-// allowlistMiss distinguishes a name Databricks does not have from one the
-// exclude list already dropped. Either way the failure is the whole sync,
-// because metastore List is what returns it.
+// allowlistMiss names an allowlist that matches no workspace on the account.
+// The failure is the whole sync, because metastore List is what returns it.
+// The allowlist cannot hold an excluded name: the two fields are declared
+// mutually exclusive in pkg/config.
 func allowlistMiss(u *unityCatalog) error {
-	var excluded, missing []string
+	missing := make([]string, 0, len(u.workspaces))
 	for name := range u.workspaces {
-		if u.client.IsWorkspaceNameExcluded(name) {
-			excluded = append(excluded, name)
-		} else {
-			missing = append(missing, name)
-		}
+		missing = append(missing, name)
 	}
-	slices.Sort(excluded)
 	slices.Sort(missing)
 
-	switch {
-	case len(missing) == 0:
-		return status.Errorf(codes.FailedPrecondition,
-			"every workspace in the workspaces allowlist (%s) is also named in databricks-exclude-workspaces, "+
-				"so no metastore can be scoped to it; this fails the whole sync",
-			strings.Join(excluded, ", "))
-	case len(excluded) == 0:
-		return status.Errorf(codes.FailedPrecondition,
-			"none of the workspaces in the workspaces allowlist (%s) matches a workspace on the account by deployment name, name or id, "+
-				"so no metastore can be scoped to it; this fails the whole sync",
-			strings.Join(missing, ", "))
-	default:
-		return status.Errorf(codes.FailedPrecondition,
-			"the workspaces allowlist matches nothing this sync can use: %s is not on the account, and %s is also named in databricks-exclude-workspaces; this fails the whole sync",
-			strings.Join(missing, ", "), strings.Join(excluded, ", "))
-	}
+	return status.Errorf(codes.FailedPrecondition,
+		"none of the workspaces in the workspaces allowlist (%s) matches a workspace on the account by deployment name, name or id, "+
+			"so no metastore can be scoped to it; this fails the whole sync",
+		strings.Join(missing, ", "))
 }
 
 // usableWorkspaces returns workspaces only for an in-scope metastore. One that is
@@ -140,22 +123,26 @@ func usableWorkspaces(snap routingSnapshot, metastoreID string) ([]string, metas
 	if _, ok := snap.metastores[metastoreID]; !ok {
 		return nil, metastoreGone, nil
 	}
+	// The sync fails rather than reporting an empty metastore, so the message has
+	// to name what the operator can act on instead of listing every reason a
+	// metastore can lack a workspace.
 	if slices.Contains(snap.unreadable, metastoreID) {
 		return nil, metastoreInScope, status.Errorf(codes.FailedPrecondition,
-			"metastore %s exists on the account but its workspace assignment list could not be read, so the sync cannot tell which workspaces serve it",
+			"metastore %s exists on the account but its workspace assignment list answered 401, 403 or 404, so the sync cannot tell which workspaces serve it; "+
+				"grant the connector's service principal account admin, or scope the metastore out by narrowing workspaces",
 			metastoreID)
 	}
-
-	pending := ""
 	if waiting := snap.pending[metastoreID]; len(waiting) > 0 {
-		pending = fmt.Sprintf("; %d attached workspace(s) are not RUNNING: %s", len(waiting), strings.Join(waiting, ", "))
+		return nil, metastoreInScope, status.Errorf(codes.FailedPrecondition,
+			"metastore %s is attached only to workspaces that are not RUNNING (%s), so its grants cannot be read; "+
+				"the sync fails until Databricks settles their state, because reporting no grants would remove the access ConductorOne already holds",
+			metastoreID, strings.Join(waiting, ", "))
 	}
 
 	return nil, metastoreInScope, status.Errorf(codes.FailedPrecondition,
-		"metastore %s exists on the account but no workspace this sync can use is attached to it, so its securables cannot be read: "+
-			"every attached workspace is either left out of workspaces, named in databricks-exclude-workspaces, not RUNNING, "+
-			"or reports no metastore assignment%s",
-		metastoreID, pending)
+		"metastore %s exists on the account but reports no workspace assignment, so its securables cannot be read; "+
+			"assign a running workspace to it in the Databricks account console",
+		metastoreID)
 }
 
 // buildRouting lists metastores and the workspaces each one is reachable through.
@@ -288,7 +275,7 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 			// unknown rather than as a deletion: pruning on it would make C1 delete
 			// the metastore and its grants. A metastore that really is gone stops
 			// appearing in ListMetastores on the next sync.
-			if isUnreadableWorkspaceError(err) || isNotFoundError(err) {
+			if isUnreadableWorkspaceError(err) {
 				ctxzap.Extract(ctx).Debug("databricks-connector: could not read the workspace assignment list",
 					zap.String("metastore", metastoreID),
 					zap.Error(err),
@@ -314,7 +301,6 @@ func (u *unityCatalog) fillWorkspaces(ctx context.Context, snap *routingSnapshot
 	}
 
 	snap.unreadable = unreadable
-	snap.asked = asked
 
 	return rateLimit, nil
 }
