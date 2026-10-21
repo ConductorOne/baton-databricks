@@ -34,11 +34,15 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 		)
 	}
 
+	// Both statuses come from user.Active so the resource and the user trait agree.
 	var status v2.Status_ResourceStatus
+	var traitStatus v2.UserTrait_Status_Status
 	if user.Active {
 		status = v2.Status_RESOURCE_STATUS_ENABLED
+		traitStatus = v2.UserTrait_Status_STATUS_ENABLED
 	} else {
 		status = v2.Status_RESOURCE_STATUS_DISABLED
+		traitStatus = v2.UserTrait_Status_STATUS_DISABLED
 	}
 
 	firstName, lastName := rs.SplitFullName(user.DisplayName)
@@ -53,6 +57,7 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 	userTraitOptions := []rs.UserTraitOption{
 		rs.WithUserLogin(user.UserName),
 		rs.WithEmail(primaryEmail, true),
+		rs.WithStatus(traitStatus), //nolint:staticcheck // the SDK still emits the deprecated trait status, defaulting it to enabled
 	}
 
 	userTraitOptions = append(userTraitOptions, emailOptions...)

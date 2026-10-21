@@ -12,6 +12,7 @@ import (
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -155,5 +156,100 @@ func TestCreateAccountActiveNonBoolProfileValue(t *testing.T) {
 	_, _, _, err = b.CreateAccount(context.Background(), &v2.AccountInfo{Profile: profile}, nil)
 	if err == nil {
 		t.Fatal("CreateAccount succeeded with a non-bool active profile value, want error")
+	}
+}
+
+// assertUserStatusesAgree checks that the user-trait status matches the
+// resource status and that both reflect wantActive.
+func assertUserStatusesAgree(t *testing.T, resource *v2.Resource, wantActive bool) {
+	t.Helper()
+	wantResource := v2.Status_RESOURCE_STATUS_DISABLED
+	wantTrait := v2.UserTrait_Status_STATUS_DISABLED
+	if wantActive {
+		wantResource = v2.Status_RESOURCE_STATUS_ENABLED
+		wantTrait = v2.UserTrait_Status_STATUS_ENABLED
+	}
+
+	ut, err := rs.GetUserTrait(resource)
+	if err != nil {
+		t.Fatalf("GetUserTrait: %v", err)
+	}
+	if got := resource.GetStatus().GetStatus(); got != wantResource {
+		t.Errorf("resource status = %v, want %v", got, wantResource)
+	}
+	if got := ut.GetStatus().GetStatus(); got != wantTrait { //nolint:staticcheck // asserting the deprecated trait status is the point of this test
+		t.Errorf("user trait status = %v, want %v", got, wantTrait)
+	}
+}
+
+// The user-trait status must follow the Databricks active flag, matching the
+// resource status, instead of the SDK default STATUS_ENABLED.
+func TestUserResourceStatusFromActive(t *testing.T) {
+	tests := []struct {
+		name       string
+		json       string
+		wantActive bool
+	}{
+		{
+			name:       "active true",
+			json:       `{"id":"u1","userName":"alice@example.com","displayName":"Alice","active":true}`,
+			wantActive: true,
+		},
+		{
+			name:       "active false",
+			json:       `{"id":"u1","userName":"alice@example.com","displayName":"Alice","active":false}`,
+			wantActive: false,
+		},
+		{
+			name:       "active missing decodes as false",
+			json:       `{"id":"u1","userName":"alice@example.com","displayName":"Alice"}`,
+			wantActive: false,
+		},
+	}
+
+	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var user databricks.User
+			if err := json.Unmarshal([]byte(tc.json), &user); err != nil {
+				t.Fatalf("unmarshal user: %v", err)
+			}
+
+			resource, err := newUserBuilder(nil).userResource(context.Background(), &user, parent)
+			if err != nil {
+				t.Fatalf("userResource: %v", err)
+			}
+			assertUserStatusesAgree(t, resource, tc.wantActive)
+		})
+	}
+}
+
+// CreateAccount returns the created user through the same builder, so its
+// resource must carry matching statuses too.
+func TestCreateAccountUserStatusFromActive(t *testing.T) {
+	for _, active := range []bool{true, false} {
+		t.Run(fmt.Sprintf("active %t", active), func(t *testing.T) {
+			var captured capturedCreate
+			b := newCapturingUserBuilder(t, &captured)
+
+			profile, err := structpb.NewStruct(map[string]interface{}{
+				"email":       "alice@example.com",
+				"displayName": "Alice",
+				"active":      active,
+			})
+			if err != nil {
+				t.Fatalf("structpb.NewStruct: %v", err)
+			}
+
+			resp, _, _, err := b.CreateAccount(context.Background(), &v2.AccountInfo{Profile: profile}, nil)
+			if err != nil {
+				t.Fatalf("CreateAccount: %v", err)
+			}
+			success, ok := resp.(*v2.CreateAccountResponse_SuccessResult)
+			if !ok {
+				t.Fatalf("CreateAccount response type = %T, want *v2.CreateAccountResponse_SuccessResult", resp)
+			}
+			assertUserStatusesAgree(t, success.GetResource(), active)
+		})
 	}
 }
