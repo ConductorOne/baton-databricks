@@ -387,15 +387,7 @@ func ownPrincipalScimID(
 // https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
 var managePrivilege = []string{privilegeManage}
 
-// holdsPrivilegeOn asks the permissions endpoint for the connector's own
-// effective privileges on a securable and reports whether it holds any of wanted.
-// The principal filter is effective, not literal: a row can be the privilege a
-// group holds and this principal inherits, so only the privileges are read and
-// never the principal field. The read bypasses the cache, because a remembered
-// page would decide this call with the access of an earlier one.
-//
-// A read the connector may not make leaves the privilege unproven, which is the
-// same answer as not holding it: the caller can then try another workspace.
+// holdsPrivilegeOn reports whether the connector holds one of wanted. A refusal leaves it unproven. The read is not cached.
 func holdsPrivilegeOn(
 	ctx context.Context,
 	client *databricks.Client,
