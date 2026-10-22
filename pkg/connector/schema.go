@@ -270,10 +270,7 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	// An assignment list that cannot be read, including a 404, leaves which
-	// workspaces serve the metastore unknown. Listing no schemas here would make
-	// ConductorOne delete every schema of the catalog, so the sync fails and keeps
-	// what it already holds.
+	// A 404 here does not mean the metastore is gone. Listing nothing would make ConductorOne delete the schemas.
 	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
 		return fmt.Errorf(
@@ -432,14 +429,7 @@ func schemaListingError(catalogName, workspace string, err error) error {
 		catalogName, workspace, err)
 }
 
-// schemaListingIsComplete reports whether ListSchemas returns every schema in the
-// catalog. Databricks answers a caller without catalog-wide visibility with the
-// schemas it owns or holds USE_SCHEMA on, at 200, which is indistinguishable from
-// a catalog with that many schemas. Measured on a workspace Admin that does not
-// own the metastore: the system catalog came back with 2 schemas instead of 15,
-// and a catalog grant of MANAGE alone did list a schema owned by someone else.
-// Workspace Admin is therefore not an authority here; owning the catalog is.
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+// schemaListingIsComplete is true when ListSchemas returns every schema. USE_SCHEMA and ALL_PRIVILEGES count here. They do not make a privilege read complete.
 func schemaListingIsComplete(
 	ctx context.Context,
 	client *databricks.Client,
@@ -462,14 +452,7 @@ func schemaListingIsComplete(
 	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, schemaListingPrivileges, annos)
 }
 
-// schemaGrantsAreTrustworthy reports whether the connector reads every privilege
-// assignment on a schema. Databricks shows the full list to the metastore admin,
-// to the owner of the schema or of the catalog above it, and to a holder of
-// MANAGE on either; a direct workspace Admin also sees it when the catalog is
-// owned by that workspace's admins group. Anyone else reads only their own rows,
-// with a 200. See ensureGrantsAreTrustworthy.
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+// schemaGrantsAreTrustworthy is true for an owner of the schema, catalog, or metastore, a holder of MANAGE on the schema or catalog, or a direct Admin when the workspace admins group owns the catalog.
 func schemaGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,

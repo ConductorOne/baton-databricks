@@ -265,10 +265,7 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 		return err
 	}
 
-	// An assignment list that cannot be read, including a 404, leaves which
-	// workspaces serve the metastore unknown. Listing no catalogs here would make
-	// ConductorOne delete every catalog of the metastore and its whole subtree, so
-	// the sync fails and keeps what it already holds.
+	// A 404 here does not mean the metastore is gone. Listing nothing would make ConductorOne delete its catalogs.
 	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
 		return fmt.Errorf(
@@ -369,13 +366,7 @@ func (b *catalogBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAt
 	return nil, nil, nil
 }
 
-// catalogGrantsAreTrustworthy reports whether the connector reads every privilege
-// assignment on a catalog. Databricks shows the full list to the metastore admin,
-// the owner and a holder of MANAGE; a direct workspace Admin also sees it when the
-// catalog is owned by that workspace's admins group. Anyone else reads only their
-// own rows, with a 200. See ensureGrantsAreTrustworthy.
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+// catalogGrantsAreTrustworthy is true for the metastore owner, the catalog owner, a holder of MANAGE, or a direct Admin when the workspace admins group owns the catalog.
 func catalogGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
