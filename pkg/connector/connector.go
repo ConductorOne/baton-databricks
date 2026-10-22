@@ -18,8 +18,6 @@ import (
 
 type Databricks struct {
 	client *databricks.Client
-	// clientID is the applicationId of the service principal the connector
-	// authenticates as. Grant visibility is decided against it.
 	clientID   string
 	workspaces []string
 	opts       *cli.ConnectorOpts
