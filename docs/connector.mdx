@@ -111,7 +111,7 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
 </Steps>
 
 <Warning>
-Without this, the metastore sync fails with a permission error naming the metastore, and ConductorOne keeps the grants it already has. Databricks would otherwise return HTTP 200 with only the privileges the caller can see.
+Without this, the metastore sync fails with a permission error naming the metastore. Databricks returns a partial privilege list rather than an error, and C1 would treat the missing grants as revoked.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
@@ -334,3 +334,7 @@ spec:
 
 </Tab>
 </Tabs>
+
+<Tip>
+Stable binaries and container images for the Databricks connector are available from the [official download center](https://dist.conductorone.com/ConductorOne/baton-databricks).
+</Tip>
