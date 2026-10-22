@@ -108,8 +108,6 @@ var anyTablePrivileges = append(slices.Clone(tablePrivileges), privilegeRefresh)
 
 type tableBuilder struct {
 	client *databricks.Client
-	// clientID is the applicationId of the service principal the connector
-	// authenticates as, which is what grant visibility is decided against.
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
