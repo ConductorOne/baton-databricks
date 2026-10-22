@@ -264,18 +264,7 @@ func (m *metastoreBuilder) routeMetastore(
 	return nil, inScope, nil
 }
 
-// metastoreGrantsAreTrustworthy reports whether the connector reads every
-// privilege assignment on a metastore. Databricks answers an under-permissioned
-// read of the permissions endpoint with 200 and only the rows the caller may
-// see, which is byte-identical to a securable that has no grants. Reporting
-// that subset would make ConductorOne revoke every privilege it cannot see, so
-// the sync refuses to report grants it cannot fully read.
-//
-// MANAGE and ALL_PRIVILEGES are rejected at the metastore level, so a privilege
-// read cannot settle this. The two authorities are owning the metastore and
-// being assigned Admin directly on the workspace the read goes through.
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+// metastoreGrantsAreTrustworthy is true when the connector owns the metastore or is a direct Admin of the routed workspace. MANAGE is not a metastore privilege.
 func metastoreGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
@@ -326,12 +315,7 @@ func isWorkspaceAdmin(
 	return holdsWorkspaceAdmin(ctx, client, ownPrincipal, assignments, annos)
 }
 
-// holdsWorkspaceAdmin matches the connector's own principal against a
-// workspace's ADMIN assignments. A service principal is named by its
-// applicationId, so most accounts settle without the SCIM lookup.
-// Admin inherited only through a group is ignored: the connector principal must
-// hold ADMIN itself. Walking every admin group's membership on every call is
-// the cost that would close this gap.
+// holdsWorkspaceAdmin is true only when the connector principal itself holds ADMIN. Admin inherited through a group does not count.
 func holdsWorkspaceAdmin(
 	ctx context.Context,
 	client *databricks.Client,
@@ -365,10 +349,7 @@ func holdsWorkspaceAdmin(
 	return ownID != "" && slices.Contains(adminIDs, ownID), nil
 }
 
-// ownPrincipalScimID resolves the connector's own service principal. An
-// applicationId filter on the service principal endpoint can only match a
-// service principal, which is why this asks for the one record instead of
-// walking account SCIM, where the same name field is shared by three namespaces.
+// ownPrincipalScimID looks up the connector's service principal by application id.
 func ownPrincipalScimID(
 	ctx context.Context,
 	client *databricks.Client,
@@ -395,11 +376,7 @@ func deniesTrust(err error) bool {
 	}
 }
 
-// ensureGrantsAreTrustworthy settles whether the privilege list this call is
-// about to read, or write to, is the whole one. It runs per call and keeps no
-// answer: ConductorOne can hand back a profile from an earlier sync, so a
-// remembered verdict would outlive the access that earned it. The probe costs
-// one account call, and none at all when the connector owns the metastore.
+// ensureGrantsAreTrustworthy refuses the call unless the privilege list is complete. Databricks returns HTTP 200 with only the rows the caller may see, and reporting that subset would make ConductorOne revoke the rest. The check is not cached.
 func (m *metastoreBuilder) ensureGrantsAreTrustworthy(
 	ctx context.Context,
 	resource *v2.Resource,
@@ -431,10 +408,7 @@ func untrustedMetastoreError(metastoreID, workspace string) error {
 		metastoreID, workspace)
 }
 
-// principalResolver maps a privilege assignment's principal to a C1 resource id.
-// One field carries a userName, a displayName or an applicationId with no type,
-// so lookups go through account SCIM in a fixed order. Results are cached for
-// one Grants call.
+// principalResolver maps a privilege assignment to a C1 resource id. The id is used when present; the name is only the fallback.
 type principalResolver struct {
 	client *databricks.Client
 	annos  *annotations.Annotations
