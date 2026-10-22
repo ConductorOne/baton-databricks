@@ -5,7 +5,7 @@
 `baton-databricks` is a connector for Databricks built using the
 [Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
 Databricks API, to sync data about Databricks identities (users, groups and
-service principals), roles, workspaces and Unity Catalog metastores, catalogs and schemas.
+service principals), roles, workspaces and Unity Catalog metastores.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
@@ -31,8 +31,7 @@ workspaces that service principal has access to. This requires admin access to
 the Databricks account and each workspace you want to sync.
 
 Syncing Unity Catalog needs more than account admin on its own: the service
-principal also has to be able to read the privileges recorded on each metastore
-and catalog.
+principal also has to be able to read the privileges recorded on each metastore.
 See [Unity Catalog permissions](#unity-catalog-permissions) for the exact
 requirement.
 
@@ -83,21 +82,19 @@ baton resources
 - Users
 - Roles
 - Metastores
-- Catalogs
-- Schemas
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
 workspaces to the `--workspaces` flag. Each entry can be a workspace name,
 deployment name, or numeric workspace ID, matched case-insensitively.
 
-`--workspaces` also scopes which metastores and catalogs sync: only those a
-listed workspace reaches are synced, so narrowing the list removes the others
-and their grants from ConductorOne. A list that matches no workspace on the
-account fails the metastore sync.
+`--workspaces` also scopes which metastores sync: only a metastore attached to a
+listed workspace is synced, so narrowing the list removes the other metastores
+and their grants from ConductorOne. A list that names no workspace on the
+account is rejected during credential validation, before any sync runs.
 
-Metastores, catalogs and schemas are Unity Catalog securables and are opt-in:
-each type stays off until it is enabled for the connector in ConductorOne.
+Metastores are Unity Catalog securables and are opt-in: the type stays off until
+it is enabled for the connector in ConductorOne.
 
 ## Authentication
 
@@ -114,9 +111,9 @@ To instead exclude specific workspaces from the sync, pass them to the
 `--databricks-exclude-workspaces` flag (or the
 `BATON_DATABRICKS_EXCLUDE_WORKSPACES` environment variable) as a comma-separated
 list. Each entry can be a workspace name, deployment name, or numeric workspace
-ID. Excluded workspaces and their roles are skipped entirely. A metastore or
-catalog that only excluded workspaces reach is not synced, and its grants are
-removed from ConductorOne.
+ID. Excluded workspaces and their roles are skipped entirely. A metastore
+attached only to excluded workspaces is not synced, and its grants are removed
+from ConductorOne.
 
 ## Group provisioning
 
@@ -136,8 +133,8 @@ assigned to that workspace. Otherwise the grant fails with a
 
 ## Unity Catalog
 
-Metastores, catalogs and schemas cover Databricks Unity Catalog. The
-resource tree the connector syncs is:
+A metastore is the top of the Databricks Unity Catalog hierarchy. The resource
+tree the connector syncs is:
 
 ```
 account
@@ -147,44 +144,52 @@ account
 ├── group
 ├── service principal
 └── metastore
-    └── catalog
-        └── schema
 ```
 
-Each level exposes its privileges as entitlements (`CREATE_CATALOG` on a
-metastore, `USE_CATALOG` or `SELECT` on a catalog, `USE_SCHEMA` on a schema,
-and so on) plus a non-grantable `owner`. A privilege held by a group is
-expandable, so ConductorOne resolves the group's members as holders.
+A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
+`READ_METADATA`, `USE_SHARE` and so on) plus a non-grantable `owner`. A
+privilege held by a group is expandable, so ConductorOne resolves the group's
+members as holders.
 
-`MANAGE` and `ALL_PRIVILEGES` are not offered on a metastore: Databricks rejects
-both at that level.
+`MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
+metastore level.
 
-A catalog is synced when a workspace in the sync lists it. A schema is synced
-when the service principal can list every schema in its catalog: it owns the
-metastore or the catalog, or it holds `MANAGE`, `USE_SCHEMA` or
-`ALL_PRIVILEGES` on the catalog. Workspace Admin alone is not enough, and a
-short listing fails that catalog's schema sync with `PermissionDenied`.
-`information_schema` is skipped. Tables and volumes are not synced yet.
+A metastore lives on the account plane, but its privileges are read through a
+workspace attached to it.
 
-The endpoints, the permission model, principal resolution and the connector's
-limitations are in [docs/docs-info.md](./docs/docs-info.md).
+A metastore is synced only while a workspace this sync can use is attached to
+it. The connector never guesses when the answer is unknown:
+
+| Attached workspace | Result |
+|--------------------|--------|
+| `RUNNING` and in scope | the metastore syncs through it |
+| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and its grants fail with `FailedPrecondition` until the state settles |
+| `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
+| assignment list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming the assignment list |
+
+A metastore is left out of the sync only when the answer is known: every
+attached workspace is out of scope or unusable. Leaving it out is what makes
+ConductorOne remove it and its grants, so an unknown answer must not take that
+path.
 
 ## Unity Catalog provisioning
 
-A privilege can be granted to and revoked from a user, group or service
-principal at each level. The `owner` entitlement is read-only: granting or
-revoking it fails with an `InvalidArgument` error.
+A metastore privilege can be granted to and revoked from a user, group or
+service principal. The `owner` entitlement is read-only: granting or revoking it
+fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions
 
-The same OAuth service principal must own the metastore or be assigned
-**Admin** directly on a workspace attached to it (Admin inherited only through
-a group is not enough). A catalog is synced when the service principal owns
-the metastore, owns the catalog, holds `MANAGE` on the catalog, or is a direct
-Admin of the workspace whose admins group owns it. A catalog that meets none
-of these is left out of the sync. A metastore that fails its check fails the
-sync with `PermissionDenied` rather than reporting a partial read. Details are
-in [docs/docs-info.md](./docs/docs-info.md).
+The service principal must own the metastore, or be assigned **Admin** directly
+on a workspace the metastore is attached to. Admin inherited only through a
+group is not enough. Databricks answers an under-permissioned privilege read
+with HTTP 200 and the subset the caller may see, which is indistinguishable
+from an object with no grants, so a principal without that standing makes
+ConductorOne read the privileges it cannot see as revoked access.
+
+The connector requests the `all-apis` OAuth scope. Each resource type declares
+the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
+reports them per type.
 
 # Contributing, Support and Issues
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -12,7 +15,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
-	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
@@ -23,127 +25,215 @@ import (
 
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*schemaBuilder)(nil)
 
-type schemaBuilder struct {
-	securableDeps
+const (
+	securableTypeSchema = "SCHEMA"
+
+	// informationSchema is the read-only schema Databricks puts in every catalog.
+	// Its privileges are not grantable, so it is left out of the sync.
+	informationSchema = "information_schema"
+
+	// schemaNameSeparator joins the catalog and the schema into the dotted full
+	// name the permissions endpoint addresses a schema by. Databricks rejects a
+	// name holding a period, so splitting on it is unambiguous.
+	schemaNameSeparator = "."
+
+	profileKeySchemaName = "schema_name"
+
+	// profileKeyCatalogOwner carries the owner of the parent catalog. Owning the
+	// catalog is one of the things that makes a schema's privilege read complete,
+	// and Grants is handed only the schema, so List writes the owner down instead
+	// of listing the catalogs again on every call.
+	profileKeyCatalogOwner = "catalog_owner"
+
+	// schemaWriteRemedy is what a 403 on the PATCH tells the operator.
+	schemaWriteRemedy = "the connector must own the metastore, the parent catalog or the schema, or hold MANAGE on the schema or the parent catalog"
+
+	// schemaTrustRemedy is what a refusal to report a partial privilege list
+	// tells the operator.
+	schemaTrustRemedy = "the connector's service principal must own the metastore, the parent catalog or the schema, hold MANAGE on the schema or " +
+		"on the parent catalog, or be assigned Admin directly on the workspace whose admins group owns the parent catalog"
+
+	// schemaListRemedy is what a refusal to sync a catalog whose schema listing
+	// would be partial tells the operator.
+	schemaListRemedy = "the connector's service principal must own the metastore or the catalog, or hold MANAGE, USE_SCHEMA or ALL_PRIVILEGES on the catalog"
+)
+
+// schemaPrivileges is the catalog set minus the three that stop at the catalog.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+var schemaPrivileges = slices.DeleteFunc(slices.Clone(catalogPrivileges), func(privilege string) bool {
+	return slices.Contains([]string{"BROWSE", "CREATE_SCHEMA", "USE_CATALOG"}, privilege)
+})
+
+// schemaListingPrivileges each make ListSchemas return every schema in the
+// catalog. Unlike a privilege read, a complete listing does not need MANAGE:
+// USE_SCHEMA and ALL_PRIVILEGES carry it too, which was measured on a tenant
+// where neither made the privilege list complete.
+var schemaListingPrivileges = []string{privilegeManage, "USE_SCHEMA", "ALL_PRIVILEGES"}
+
+var schemaLevel = securableLevel{
+	securableType:   databricks.SecurableSchema,
+	noun:            "schema",
+	privileges:      schemaPrivileges,
+	writeRemedy:     schemaWriteRemedy,
+	trustRemedy:     schemaTrustRemedy,
+	permissionsName: schemaPermissionsName,
+	trusts:          schemaGrantsAreTrustworthy,
 }
 
-func newSchemaBuilder(client *databricks.Client, uc *unityCatalog, sync syncPrincipals) *schemaBuilder {
-	return &schemaBuilder{securableDeps{client: client, uc: uc, sync: sync}}
+type schemaBuilder struct {
+	client *databricks.Client
+	// clientID is the applicationId of the service principal the connector
+	// authenticates as, which is what grant visibility is decided against.
+	clientID string
+	// workspaces is the configured allowlist, empty when none was given.
+	workspaces map[string]struct{}
+	sync       syncPrincipals
+}
+
+func newSchemaBuilder(client *databricks.Client, clientID string, workspaces map[string]struct{}, sync syncPrincipals) *schemaBuilder {
+	return &schemaBuilder{client: client, clientID: clientID, workspaces: workspaces, sync: sync}
 }
 
 func (b *schemaBuilder) ResourceType(_ context.Context) *v2.ResourceType {
 	return schemaResourceType
 }
 
-var schemaKind = securableKind{
-	name:        databricks.SecurableSchema,
-	parse:       parseSecurableRef,
-	privileges:  schemaPrivileges,
-	writeRemedy: catalogTrustRemedy,
-	goneCodes:   []string{databricks.ErrorCodeSchemaDoesNotExist},
-	access: func(ctx context.Context, d *securableDeps, resource *v2.Resource, ref securableRef) (string, accessState, *v2.RateLimitDescription, error) {
-		return d.catalogAccess(ctx, resource, ref, true)
-	},
+// schemaResourceID keys a schema by its metastore and its dotted full name, which
+// extends the catalog's "{metastore_id}::{catalog_name}".
+func schemaResourceID(metastoreID, catalogName, name string) string {
+	return metastoreID + securableKeySeparator + catalogName + schemaNameSeparator + name
 }
 
-// schemaPageState is the workspace a catalog's schemas are read through, carried
-// in the page token so later pages do not rebuild the routing.
-type schemaPageState struct {
-	Workspace      string `json:"w"`
-	WorkspaceID    string `json:"i"`
-	WorkspaceName  string `json:"n"`
+// parseSchemaID reads a schema resource id, "{metastore_id}::{catalog}.{schema}".
+func parseSchemaID(resourceID string) (string, string, string, error) {
+	metastoreID, fullName, ok := strings.Cut(resourceID, securableKeySeparator)
+	if !ok {
+		return "", "", "", status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema resource id %q", resourceID)
+	}
+
+	catalogName, name, ok := strings.Cut(fullName, schemaNameSeparator)
+	if !ok || metastoreID == "" || catalogName == "" || name == "" {
+		return "", "", "", status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema resource id %q", resourceID)
+	}
+
+	return metastoreID, catalogName, name, nil
+}
+
+// schemaPermissionsName: the permissions endpoint addresses a schema by its
+// dotted full name. The metastore is carried by the host.
+func schemaPermissionsName(resourceID string) (string, error) {
+	_, catalogName, name, err := parseSchemaID(resourceID)
+	if err != nil {
+		return "", err
+	}
+
+	return catalogName + schemaNameSeparator + name, nil
+}
+
+func schemaResource(
+	schema *databricks.Schema,
+	metastoreID, catalogName string,
+	parent *v2.ResourceId,
+	route schemaRoute,
+) (*v2.Resource, error) {
+	fullName := catalogName + schemaNameSeparator + schema.Name
+	profile := map[string]any{
+		profileKeyMetastoreID:    metastoreID,
+		profileKeyMetastoreOwner: route.MetastoreOwner,
+		profileKeyFullName:       fullName,
+		profileKeyCatalogName:    catalogName,
+		profileKeyCatalogOwner:   route.CatalogOwner,
+		profileKeySchemaName:     schema.Name,
+		profileKeyOwner:          schema.Owner,
+		profileKeySecurableType:  securableTypeSchema,
+		profileKeyWorkspace:      route.Workspace,
+		profileKeyWorkspaceID:    route.WorkspaceID,
+		profileKeyWorkspaceName:  route.WorkspaceName,
+	}
+
+	resourceID := schemaResourceID(metastoreID, catalogName, schema.Name)
+
+	// The display name is the full name rather than the leaf: main.sales and
+	// finance.sales would otherwise be two rows both reading "sales" in C1.
+	return rs.NewAppResource(
+		fullName,
+		schemaResourceType,
+		resourceID,
+		nil,
+		rs.WithResourceProfile(profile),
+		rs.WithParentResourceID(parent),
+		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+	)
+}
+
+// schemaRoute is the workspace a catalog's schemas are listed through, carried in
+// the page token so later pages neither re-resolve the route nor prove again that
+// the listing is complete.
+type schemaRoute struct {
+	Workspace     string `json:"w"`
+	WorkspaceID   string `json:"i"`
+	WorkspaceName string `json:"n"`
+	// MetastoreOwner and CatalogOwner ride along so each schema's profile can
+	// carry them. See profileKeyCatalogOwner.
 	MetastoreOwner string `json:"o"`
+	CatalogOwner   string `json:"c"`
 }
 
+// List pages a catalog's schemas through one workspace whose listing is proven
+// complete. Unlike catalogs, a schema is listed by every workspace bound to its
+// catalog, so one workspace is enough — but it has to be a workspace that sees
+// all of them: Databricks answers a caller without catalog-wide visibility with
+// only the schemas it owns or can use, at 200.
 func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != catalogResourceType.Id {
 		return nil, nil, nil
 	}
 
-	parent, err := parseSecurableRef(parentResourceID.GetResource())
+	metastoreID, catalogName, err := parseCatalogID(parentResourceID.GetResource())
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to parse schema parent %q: %w", parentResourceID.GetResource(), err)
+		return nil, nil, err
 	}
 
 	annos := annotations.Annotations{}
 	bag := &pagination.Bag{}
 	if err := bag.Unmarshal(attr.PageToken.Token); err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema page token: %v", err)
+		return nil, nil, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema page token: %v", err)
 	}
 
-	var rateLimit *v2.RateLimitDescription
 	if bag.Current() == nil {
-		current, openRateLimit, err := b.openSchemaListing(ctx, parent)
-		rateLimit = openRateLimit
-		noteRateLimit(&annos, rateLimit)
-		if err != nil {
+		if err := b.pushRoute(ctx, metastoreID, catalogName, bag, &annos); err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
-		if current == nil {
-			ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed; skipping its schemas",
-				zap.String("catalog", parent.catalog()),
-			)
+		if bag.Current() == nil {
+			ctxzap.Extract(ctx).Debug("databricks-connector: no workspace in sync scope lists the catalog; listing no schemas",
+				zap.String("metastore", metastoreID),
+				zap.String("catalog", catalogName))
 
 			return nil, &rs.SyncOpResults{Annotations: annos}, nil
 		}
-
-		encoded, err := json.Marshal(current)
-		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, err
-		}
-		bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
 	}
 
-	var current schemaPageState
-	if err := json.Unmarshal([]byte(bag.ResourceID()), &current); err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema page token: %v", err)
+	var route schemaRoute
+	if err := json.Unmarshal([]byte(bag.ResourceID()), &route); err != nil {
+		return nil, nil, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid schema page token: %v", err)
 	}
 
-	schemas, next, listRateLimit, err := b.client.ListSchemas(ctx, current.Workspace, parent.catalog(), bag.PageToken(), ResourcesPageSize)
-	if listRateLimit != nil {
-		rateLimit = listRateLimit
-	}
+	schemas, next, rateLimit, err := b.client.ListSchemas(ctx, route.Workspace, catalogName, bag.PageToken(), ResourcesPageSize)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		// access already confirmed the catalog. A NotFound here is not "this
-		// catalog has no schemas": the SDK would skip it as a warning and C1
-		// would drop the schemas it already has.
-		if isNotFoundError(err) {
-			return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.Unavailable,
-				fmt.Sprintf("databricks-connector: catalog %s is listed, but its schemas could not be read through workspace %s",
-					parent.catalog(), current.Workspace),
-				err)
-		}
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list schemas under %s: %w", parent.resourceKey(), err)
+		return nil, &rs.SyncOpResults{Annotations: annos}, schemaListingError(catalogName, route.Workspace, err)
 	}
 
 	var rv []*v2.Resource
 	for _, schema := range schemas {
-		if schema.Name == "" {
-			continue
-		}
-		childRef := parent.child(schema.Name)
-		if isUnderInformationSchema(childRef) {
+		if schema.Name == "" || schema.Name == informationSchema {
 			continue
 		}
 
-		built, err := newSecurableResource(schemaResourceType, securableTypeSchema, nil, securable{
-			name:  schema.Name,
-			owner: schema.Owner,
-			profile: map[string]any{
-				profileKeyCatalogName:    parent.catalog(),
-				profileKeySchemaName:     schema.Name,
-				profileKeyMetastoreOwner: current.MetastoreOwner,
-				profileKeyWorkspace:      current.Workspace,
-				profileKeyWorkspaceID:    current.WorkspaceID,
-				profileKeyWorkspaceName:  current.WorkspaceName,
-			},
-		}, childRef, parentResourceID)
+		built, err := schemaResource(&schema, metastoreID, catalogName, parentResourceID, route)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to build %s resource %s: %w", schemaResourceType.Id, childRef.resourceKey(), err)
+				"databricks-connector: failed to build the resource for schema %s.%s: %w", catalogName, schema.Name, err)
 		}
 		rv = append(rv, built)
 	}
@@ -156,51 +246,236 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// openSchemaListing picks a workspace whose schema listing is complete. nil
-// means the parent catalog is not listed by this sync.
-func (b *schemaBuilder) openSchemaListing(ctx context.Context, parent securableRef) (*schemaPageState, *v2.RateLimitDescription, error) {
-	snap, rateLimit, err := b.uc.buildRouting(ctx)
+// pushRoute stacks the one workspace that both lists the catalog and sees every
+// schema in it. An empty stack means no workspace this sync can use lists the
+// catalog, which catalog List already settled by not emitting it. A catalog that
+// is listed but whose schemas cannot all be read fails instead: a short listing
+// would make ConductorOne delete the schemas it hides, and their whole subtree.
+func (b *schemaBuilder) pushRoute(
+	ctx context.Context,
+	metastoreID, catalogName string,
+	bag *pagination.Bag,
+	annos *annotations.Annotations,
+) error {
+	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
 	if err != nil {
-		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists schemas under %s: %w", parent.resourceKey(), err)
+		return err
 	}
 
-	catalogs, state, catalogRateLimit, err := b.uc.catalogsOf(ctx, snap, parent.metastoreID)
-	if catalogRateLimit != nil {
-		rateLimit = catalogRateLimit
-	}
+	// An assignment list that cannot be read, including a 404, leaves which
+	// workspaces serve the metastore unknown. Listing no schemas here would make
+	// ConductorOne delete every schema of the catalog, so the sync fails and keeps
+	// what it already holds.
+	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
-		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve the workspace that lists schemas under %s: %w", parent.resourceKey(), err)
+		return fmt.Errorf(
+			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
+			metastoreID, err)
 	}
-	if state != securableInScope {
-		return nil, rateLimit, nil
+	if len(usable) == 0 {
+		if inScope {
+			return status.Errorf(codes.FailedPrecondition,
+				"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+		}
+
+		return nil
 	}
 
-	facts, ok := catalogs[parent.catalog()]
-	if !ok {
-		return nil, rateLimit, nil
-	}
-
-	metastoreOwner := snap.metastores[parent.metastoreID].Owner
-	workspace, probeRateLimit, err := firstTrustedWorkspace(ctx, parent, facts.workspaces, func(ctx context.Context, workspace string) (bool, *v2.RateLimitDescription, error) {
-		return b.uc.schemaListingIsComplete(ctx, snap, metastoreOwner, facts.owner, parent.catalog(), workspace)
-	})
-	if probeRateLimit != nil {
-		rateLimit = probeRateLimit
-	}
+	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
 	if err != nil {
-		return nil, rateLimit, fmt.Errorf("databricks-connector: failed to confirm schema listing visibility for catalog %s: %w", parent.catalog(), err)
-	}
-	if workspace == "" {
-		return nil, rateLimit, status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot list every schema in catalog %s: %s", parent.catalog(), schemaListRemedy)
+		return err
 	}
 
-	return &schemaPageState{
-		Workspace:      workspace,
-		WorkspaceID:    snap.workspaceIDs[workspace],
-		WorkspaceName:  snap.workspaceNames[workspace],
-		MetastoreOwner: metastoreOwner,
-	}, rateLimit, nil
+	l := ctxzap.Extract(ctx)
+	listed := false
+	for _, workspace := range usable {
+		// The catalog listing answers both whether this workspace is bound to the
+		// catalog — an ISOLATED catalog is listed only by the workspaces it is
+		// bound to, and the others cannot read its schemas either — and who owns
+		// it, which is what the completeness rule is decided against.
+		catalog, err := b.catalogThrough(ctx, workspace.DeploymentName, metastoreID, catalogName, annos)
+		if err != nil {
+			return err
+		}
+		if catalog == nil {
+			l.Debug("databricks-connector: this workspace does not list the catalog; trying the next one",
+				zap.String("catalog", catalogName),
+				zap.String("workspace", workspace.DeploymentName))
+
+			continue
+		}
+		listed = true
+
+		route := schemaRoute{
+			Workspace:      workspace.DeploymentName,
+			WorkspaceID:    strconv.Itoa(workspace.ID),
+			WorkspaceName:  workspace.Name,
+			MetastoreOwner: owner,
+			CatalogOwner:   catalog.Owner,
+		}
+
+		complete, err := schemaListingIsComplete(ctx, b.client, securableTrust{
+			ownPrincipal:   b.clientID,
+			metastoreOwner: owner,
+			parentOwner:    catalog.Owner,
+			fullName:       catalogName,
+			workspace:      route.Workspace,
+			workspaceID:    route.WorkspaceID,
+		}, annos)
+		if err != nil {
+			return err
+		}
+		if !complete {
+			// A workspace that refuses the probe leaves it unproven, which reads
+			// the same as not holding the access. Another workspace may still see
+			// every schema, so the walk continues before giving up.
+			l.Debug("databricks-connector: this workspace does not list every schema in the catalog; trying the next one",
+				zap.String("catalog", catalogName),
+				zap.String("workspace", route.Workspace))
+
+			continue
+		}
+
+		encoded, err := json.Marshal(route)
+		if err != nil {
+			return err
+		}
+		bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
+
+		return nil
+	}
+
+	if !listed {
+		return nil
+	}
+
+	return status.Errorf(codes.PermissionDenied,
+		"databricks-connector: cannot list every schema in catalog %s, and Databricks answers a partial listing with 200, "+
+			"so syncing it would delete the schemas ConductorOne cannot see along with their grants; %s",
+		catalogName, schemaListRemedy)
+}
+
+// catalogThrough finds one catalog in the listing of workspace, nil when that
+// workspace does not list it.
+func (b *schemaBuilder) catalogThrough(
+	ctx context.Context,
+	workspace, metastoreID, catalogName string,
+	annos *annotations.Annotations,
+) (*databricks.Catalog, error) {
+	pageToken := ""
+	for {
+		catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
+		noteRateLimit(annos, rateLimit)
+		if err != nil {
+			return nil, catalogListingError(metastoreID, workspace, err)
+		}
+
+		for _, catalog := range catalogs {
+			if catalog.Name == catalogName && (catalog.MetastoreID == "" || catalog.MetastoreID == metastoreID) {
+				return &catalog, nil
+			}
+		}
+
+		if next == "" {
+			return nil, nil
+		}
+		// Databricks ignores a page token it cannot deserialize and restarts at
+		// page one, which would walk the same page forever.
+		if next == pageToken {
+			return nil, status.Errorf(codes.Internal,
+				"databricks-connector: the catalogs of metastore %s repeat page token %q through workspace %s",
+				metastoreID, next, workspace)
+		}
+		pageToken = next
+	}
+}
+
+// schemaListingError reads a workspace that refuses the schema listing as
+// unknown, not as listing nothing: a short list would read as deletions in C1,
+// and the SDK reads a NotFound as a securable with no children.
+func schemaListingError(catalogName, workspace string, err error) error {
+	switch apiStatus(err) {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return uhttp.WrapErrors(codes.FailedPrecondition,
+			fmt.Sprintf("databricks-connector: the schemas of catalog %s cannot be listed through workspace %s, "+
+				"so which schemas are in scope is unknown; %s", catalogName, workspace, schemaListRemedy),
+			err)
+	}
+
+	return fmt.Errorf("databricks-connector: failed to list the schemas of catalog %s through workspace %s: %w",
+		catalogName, workspace, err)
+}
+
+// schemaListingIsComplete reports whether ListSchemas returns every schema in the
+// catalog. Databricks answers a caller without catalog-wide visibility with the
+// schemas it owns or holds USE_SCHEMA on, at 200, which is indistinguishable from
+// a catalog with that many schemas. Measured on a workspace Admin that does not
+// own the metastore: the system catalog came back with 2 schemas instead of 15,
+// and a catalog grant of MANAGE alone did list a schema owned by someone else.
+// Workspace Admin is therefore not an authority here; owning the catalog is.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+func schemaListingIsComplete(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	annos *annotations.Annotations,
+) (bool, error) {
+	// An owner sees everything below it, and the metastore's owner is its admin.
+	if ownsPrincipal(trust.ownPrincipal, trust.metastoreOwner) || ownsPrincipal(trust.ownPrincipal, trust.parentOwner) {
+		return true, nil
+	}
+
+	// The workspace admins group acts as the owner for a direct Admin of that workspace.
+	if workspaceAdminsGroupOwns(trust.parentOwner, trust.workspaceID) {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+		if err != nil || admin {
+			return admin, err
+		}
+	}
+
+	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, schemaListingPrivileges, annos)
+}
+
+// schemaGrantsAreTrustworthy reports whether the connector reads every privilege
+// assignment on a schema. Databricks shows the full list to the metastore admin,
+// to the owner of the schema or of the catalog above it, and to a holder of
+// MANAGE on either; a direct workspace Admin also sees it when the catalog is
+// owned by that workspace's admins group. Anyone else reads only their own rows,
+// with a 200. See ensureGrantsAreTrustworthy.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+func schemaGrantsAreTrustworthy(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	annos *annotations.Annotations,
+) (bool, error) {
+	// An owner holds every privilege implicitly, which is not reported as a grant.
+	// On the live tenant the connector owns the metastore, so this settles the
+	// whole rule with no extra call at all.
+	if ownsPrincipal(trust.ownPrincipal, trust.metastoreOwner) ||
+		ownsPrincipal(trust.ownPrincipal, trust.parentOwner) ||
+		ownsPrincipal(trust.ownPrincipal, trust.owner) {
+		return true, nil
+	}
+
+	if workspaceAdminsGroupOwns(trust.parentOwner, trust.workspaceID) {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+		if err != nil || admin {
+			return admin, err
+		}
+	}
+
+	// MANAGE on the schema is the cheaper of the two reads, so it goes first.
+	manages, err := holdsPrivilegeOn(ctx, client, trust, databricks.SecurableSchema, trust.fullName, managePrivilege, annos)
+	if err != nil || manages {
+		return manages, err
+	}
+
+	// MANAGE on the catalog carries down to every schema in it.
+	catalogName, _, _ := strings.Cut(trust.fullName, schemaNameSeparator)
+
+	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, catalogName, managePrivilege, annos)
 }
 
 func (b *schemaBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -225,94 +500,13 @@ func (b *schemaBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 }
 
 func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	ref, err := parseSecurableRef(resource.GetId().GetResource())
-	if err != nil {
-		return nil, nil, err
-	}
-
-	annos := annotations.Annotations{}
-	workspace, state, rateLimit, err := b.catalogAccess(ctx, resource, ref, false)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		if code := status.Code(err); code == codes.PermissionDenied || code == codes.FailedPrecondition {
-			return nil, &rs.SyncOpResults{Annotations: annos}, err
-		}
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if state != securableInScope {
-		ctxzap.Extract(ctx).Debug("databricks-connector: parent catalog is no longer listed; skipping its schema grants",
-			zap.String("schema", ref.resourceKey()),
-			zap.String("catalog", ref.catalog()),
-		)
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, nil
-	}
-
-	l := ctxzap.Extract(ctx)
-	pageToken := attr.PageToken.Token
-	assignments, nextPageToken, rateLimit, err := b.client.ListPermissions(
-		ctx, workspace, databricks.SecurableSchema, ref.permissionsName(), "", pageToken)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableSchema, ref.permissionsName(), err)
-	}
-
-	owner := ""
-	if pageToken == "" {
-		owner = profileString(resource, profileKeyOwner)
-	}
-
-	principals, principalRateLimit, err := b.uc.principalsForGrants(ctx, assignments, owner)
-	noteRateLimit(&annos, principalRateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve account principals: %w", err)
-	}
-
-	var rv []*v2.Grant
-	for _, assignment := range assignments {
-		principalId, ok := principals.lookup(assignment)
-		if !ok {
-			l.Debug("databricks-connector: skipping a grant whose principal does not resolve",
-				zap.String("securable", ref.resourceKey()),
-				zap.String("principal", assignment.Principal),
-				zap.String("principal_id", assignment.PrincipalID.String()),
-			)
-
-			continue
-		}
-		if !emitPrincipal(b.sync, principalId.GetResourceType()) {
-			continue
-		}
-
-		options := groupSecurableGrantOptions(principalId)
-		for _, assigned := range assignment.Privileges {
-			if assigned == "" || !slices.Contains(schemaPrivileges, assigned) {
-				continue
-			}
-			rv = append(rv, grant.NewGrant(resource, assigned, principalId, options...))
-		}
-	}
-
-	if owner != "" {
-		principalId, found := principals.lookupName(owner)
-		if found && emitPrincipal(b.sync, principalId.GetResourceType()) {
-			options := groupSecurableGrantOptions(principalId)
-			options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
-			rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
-		}
-	}
-
-	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextPageToken}, nil
+	return syncSecurableGrants(ctx, b.client, b.clientID, b.sync, schemaLevel, resource, attr)
 }
 
 func (b *schemaBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return b.grantSecurable(ctx, principal, entitlement, schemaKind)
+	return grantSecurable(ctx, b.client, b.clientID, schemaLevel, principal, entitlement)
 }
 
 func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return b.revokeSecurable(ctx, revoked, schemaKind)
+	return revokeSecurable(ctx, b.client, b.clientID, schemaLevel, revoked)
 }

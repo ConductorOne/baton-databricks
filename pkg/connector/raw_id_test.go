@@ -10,26 +10,6 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-func buildSecurable(
-	t *testing.T,
-	resourceType *v2.ResourceType,
-	typeEnum, parentType string,
-	childTypes []*v2.ResourceType,
-	metastoreID string,
-	parentParts []string,
-	item securable,
-) (*v2.Resource, error) {
-	t.Helper()
-
-	parent := securableRef{metastoreID: metastoreID, parts: parentParts}
-	parentResourceID := &v2.ResourceId{
-		ResourceType: parentType,
-		Resource:     parent.resourceKey(),
-	}
-
-	return newSecurableResource(resourceType, typeEnum, childTypes, item, parent.child(item.name), parentResourceID)
-}
-
 // C1 matches Terraform-preloaded resources and entitlements (match_baton_id) against the
 // RawId annotation on the resource, so every resource must carry one equal to its resource ID.
 func TestResourcesHaveRawId(t *testing.T) {
@@ -91,16 +71,17 @@ func TestResourcesHaveRawId(t *testing.T) {
 			"ms1",
 		},
 		{
-			// Keyed by metastore: several workspaces list the same catalog.
+			// Keyed by metastore: catalog names repeat across metastores.
 			"catalog",
-			build(buildSecurable(t, catalogResourceType, securableTypeCatalog, metastoreResourceType.Id,
-				[]*v2.ResourceType{schemaResourceType}, "ms1", nil, securable{name: "cat"})),
+			build(catalogResource(&databricks.Catalog{Name: "cat"}, "ms1",
+				&v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms1"}, catalogRoute{})),
 			"ms1::cat",
 		},
 		{
+			// The schema extends its catalog's id with the dotted full name.
 			"schema",
-			build(buildSecurable(t, schemaResourceType, securableTypeSchema, catalogResourceType.Id,
-				nil, "ms1", []string{"cat"}, securable{name: "sch"})),
+			build(schemaResource(&databricks.Schema{Name: "sch"}, "ms1", "cat",
+				&v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: "ms1::cat"}, schemaRoute{})),
 			"ms1::cat.sch",
 		},
 	}
