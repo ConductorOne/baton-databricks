@@ -144,6 +144,7 @@ account
 ├── group
 ├── service principal
 └── metastore
+    └── catalog
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
