@@ -78,7 +78,9 @@ type securableTrust struct {
 	workspaceID string
 }
 
-// ensureGrantsAreTrustworthy refuses the call unless the privilege list is complete. Databricks returns HTTP 200 with a partial list, and reporting it would make ConductorOne revoke the rest. The check is not cached.
+// ensureGrantsAreTrustworthy refuses the call unless the privilege list is
+// complete. Databricks returns HTTP 200 with a partial list, and reporting it
+// would make ConductorOne revoke the rest. The check is not cached.
 func ensureGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,

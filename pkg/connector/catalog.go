@@ -366,7 +366,9 @@ func (b *catalogBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAt
 	return nil, nil, nil
 }
 
-// catalogGrantsAreTrustworthy is true for the metastore owner, the catalog owner, a holder of MANAGE, or a direct Admin when the workspace admins group owns the catalog.
+// catalogGrantsAreTrustworthy is true for the metastore owner, the catalog
+// owner, a holder of MANAGE, or a direct Admin when the workspace admins group
+// owns the catalog.
 func catalogGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
