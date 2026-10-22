@@ -61,6 +61,14 @@ While developing the connector, please fill out this form. This information is n
   group does not let Databricks return every privilege assignment on a
   metastore, so the sync would report the subset the service principal can see
   as the complete set.
+- **The sync refuses what it cannot read in full.** Databricks answers an
+  under-permissioned privilege read with HTTP 200 and only the part the caller
+  may see, which looks the same as an object with no grants. For a catalog,
+  schema, table or volume the service principal must own the metastore, own the
+  object or one of its parents, or hold `MANAGE` on it or a parent. `ALL
+  PRIVILEGES` does not count, because Databricks leaves `MANAGE` out of it.
+  Without that standing the sync fails naming the object instead of reporting a
+  partial list.
 - **Ownership is read-only.** The owner of a metastore is shown but cannot be
   provisioned. An owner that is not an account identity — `System user`, or a
   workspace admins group such as `_workspace_admins_<workspace_id>` — does not
