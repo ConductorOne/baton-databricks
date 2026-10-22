@@ -410,7 +410,9 @@ func schemaListingIsComplete(
 	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, schemaListingPrivileges, annos)
 }
 
-// schemaGrantsAreTrustworthy is true for an owner of the schema, catalog, or metastore, a holder of MANAGE on the schema or catalog, or a direct Admin when the workspace admins group owns the catalog.
+// schemaGrantsAreTrustworthy is true for an owner of the schema, catalog, or
+// metastore, a holder of MANAGE on the schema or catalog, or a direct Admin
+// when the workspace admins group owns the catalog.
 func schemaGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
