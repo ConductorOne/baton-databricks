@@ -22,13 +22,16 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*metastoreBuilder)(nil)
 
 type metastoreBuilder struct {
 	client *databricks.Client
+	// clientID is the applicationId of the service principal the connector
+	// authenticates as, which is what grant visibility is decided against.
+	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 	sync       syncPrincipals
 }
 
-func newMetastoreBuilder(client *databricks.Client, workspaces map[string]struct{}, sync syncPrincipals) *metastoreBuilder {
-	return &metastoreBuilder{client: client, workspaces: workspaces, sync: sync}
+func newMetastoreBuilder(client *databricks.Client, clientID string, workspaces map[string]struct{}, sync syncPrincipals) *metastoreBuilder {
+	return &metastoreBuilder{client: client, clientID: clientID, workspaces: workspaces, sync: sync}
 }
 
 func (m *metastoreBuilder) ResourceType(_ context.Context) *v2.ResourceType {
@@ -85,7 +88,9 @@ var metastoreLevel = securableLevel{
 	// MANAGE is not assignable on a metastore, so naming it here would send the
 	// operator after a privilege Databricks rejects. The authority is ownership.
 	writeRemedy:     "the connector must own the metastore or be Admin on an attached workspace",
+	trustRemedy:     "the connector's service principal must own the metastore or be assigned Admin directly on the workspace",
 	permissionsName: metastorePermissionsName,
+	trusts:          metastoreGrantsAreTrustworthy,
 }
 
 // List emits each metastore with the workspace its permissions are read through.
@@ -114,15 +119,16 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			continue
 		}
 
+		// An assignment list that cannot be read, including a 404, leaves which
+		// workspaces serve the metastore unknown. Skipping it here would drop the
+		// metastore and make ConductorOne remove its grants, so the sync fails and
+		// keeps what it already holds. A metastore that is really gone stops being
+		// returned by ListMetastores instead.
 		usable, inScope, err := scope.attached(ctx, m.client, metastore.MetastoreID, &annos)
 		if err != nil {
-			if isNotFoundError(err) {
-				l.Debug("databricks-connector: metastore is no longer on the account; skipping it",
-					zap.String("metastore", metastore.MetastoreID))
-				continue
-			}
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to list workspaces for metastore %s: %w", metastore.MetastoreID, err)
+				"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
+				metastore.MetastoreID, err)
 		}
 		if len(usable) == 0 {
 			if inScope {
@@ -167,13 +173,13 @@ func (m *metastoreBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOp
 }
 
 func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	return syncSecurableGrants(ctx, m.client, m.sync, metastoreLevel, resource, attr)
+	return syncSecurableGrants(ctx, m.client, m.clientID, m.sync, metastoreLevel, resource, attr)
 }
 
 func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return grantSecurable(ctx, m.client, metastoreLevel, principal, entitlement)
+	return grantSecurable(ctx, m.client, m.clientID, metastoreLevel, principal, entitlement)
 }
 
 func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return revokeSecurable(ctx, m.client, metastoreLevel, revoked)
+	return revokeSecurable(ctx, m.client, m.clientID, metastoreLevel, revoked)
 }

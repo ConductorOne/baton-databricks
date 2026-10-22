@@ -14,13 +14,25 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 const (
 	securableTypeMetastore = "METASTORE"
-	workspaceStatusRunning = "RUNNING"
+
+	// workspacePermissionAdmin is the workspace-level assignment that makes its
+	// holder a metastore admin for the workspace's Unity Catalog reads.
+	workspacePermissionAdmin = "ADMIN"
+
+	// Statuses the account API documents for a workspace. PROVISIONING,
+	// NOT_PROVISIONED and CANCELLING can still change; FAILED and BANNED cannot.
+	workspaceStatusRunning        = "RUNNING"
+	workspaceStatusProvisioning   = "PROVISIONING"
+	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
+	workspaceStatusCancelling     = "CANCELLING"
 
 	profileKeyMetastoreID   = "metastore_id"
 	profileKeyOwner         = "owner"
@@ -211,11 +223,29 @@ func scopedWorkspaces(
 				continue
 			}
 		}
+		// A workspace that will not become RUNNING is left out of scope entirely,
+		// so a metastore attached only to one is skipped rather than failing every
+		// sync. Only a status that can still change keeps the metastore waiting.
+		if !workspaceIsUsable(workspace.Status) {
+			continue
+		}
 		scope.byID[id] = workspace
 		scope.running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
 	}
 
 	return scope, nil
+}
+
+// workspaceIsUsable reports a status that is RUNNING or can still become it.
+// FAILED and BANNED are terminal, and a status Databricks has not documented
+// takes that path too: treating one as pending would fail the sync on every run.
+func workspaceIsUsable(workspaceStatus string) bool {
+	switch strings.ToUpper(workspaceStatus) {
+	case "", workspaceStatusRunning, workspaceStatusProvisioning, workspaceStatusNotProvisioned, workspaceStatusCancelling:
+		return true
+	default:
+		return false
+	}
 }
 
 // attached lists the running in-scope workspaces the metastore is assigned to,
@@ -248,6 +278,134 @@ func (s workspaceScope) attached(
 	}
 
 	return usable, inScope, nil
+}
+
+// metastoreGrantsAreTrustworthy reports whether the connector reads every
+// privilege assignment on a metastore. See ensureGrantsAreTrustworthy for why
+// an incomplete read has to be refused.
+//
+// MANAGE and ALL_PRIVILEGES are rejected at the metastore level, so a privilege
+// read cannot settle this. The two authorities are owning the metastore and
+// being assigned Admin directly on the workspace the read goes through.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+func metastoreGrantsAreTrustworthy(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	annos *annotations.Annotations,
+) (bool, error) {
+	// An owner holds every privilege implicitly, which is not reported as a grant.
+	if ownsPrincipal(trust.ownPrincipal, trust.owner) {
+		return true, nil
+	}
+
+	return isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+}
+
+// ownsPrincipal reports whether name is the service principal the connector
+// authenticates as. Databricks names a service principal by its applicationId
+// in an owner field, and does not normalise its case.
+func ownsPrincipal(ownPrincipal, name string) bool {
+	return ownPrincipal != "" && strings.EqualFold(name, ownPrincipal)
+}
+
+// isWorkspaceAdmin lists the workspace's permission assignments on every call.
+// An assignment list the connector may not read leaves Admin unproven, which is
+// the same answer as not holding it.
+func isWorkspaceAdmin(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal, workspaceID string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if ownPrincipal == "" || workspaceID == "" {
+		return false, nil
+	}
+
+	assignments, rateLimit, err := client.ListWorkspaceMembers(ctx, workspaceID)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if !deniesTrust(err) {
+			return false, fmt.Errorf("databricks-connector: failed to list the permission assignments of workspace %s: %w", workspaceID, err)
+		}
+		ctxzap.Extract(ctx).Debug("databricks-connector: the permission assignments of the workspace cannot be read, so Admin stays unproven",
+			zap.String("workspace_id", workspaceID),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return holdsWorkspaceAdmin(ctx, client, ownPrincipal, assignments, annos)
+}
+
+// holdsWorkspaceAdmin matches the connector's own principal against a
+// workspace's ADMIN assignments. A service principal is named by its
+// applicationId, so most accounts settle without the SCIM lookup.
+// Admin inherited only through a group is ignored: the connector principal must
+// hold ADMIN itself. Walking every admin group's membership on every call is
+// the cost that would close this gap.
+func holdsWorkspaceAdmin(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal string,
+	assignments []databricks.WorkspaceAssignment,
+	annos *annotations.Annotations,
+) (bool, error) {
+	var adminIDs []string
+	for _, assignment := range assignments {
+		principal := assignment.Principal
+		if principal == nil || !slices.Contains(assignment.Permissions, workspacePermissionAdmin) {
+			continue
+		}
+		if ownsPrincipal(ownPrincipal, principal.ServicePrincipalAppID) {
+			return true, nil
+		}
+		if principal.ID != 0 {
+			adminIDs = append(adminIDs, strconv.Itoa(principal.ID))
+		}
+	}
+
+	if len(adminIDs) == 0 {
+		return false, nil
+	}
+
+	ownID, err := ownPrincipalScimID(ctx, client, ownPrincipal, annos)
+	if err != nil {
+		return false, err
+	}
+
+	return ownID != "" && slices.Contains(adminIDs, ownID), nil
+}
+
+// ownPrincipalScimID resolves the connector's own service principal. An
+// applicationId filter on the service principal endpoint can only match a
+// service principal, which is why this asks for the one record instead of
+// walking account SCIM, where the same name field is shared by three namespaces.
+func ownPrincipalScimID(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal string,
+	annos *annotations.Annotations,
+) (string, error) {
+	id, rateLimit, err := client.FindServicePrincipalID(ctx, "", ownPrincipal)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		return "", fmt.Errorf("databricks-connector: failed to resolve the connector's own service principal: %w", err)
+	}
+
+	return id, nil
+}
+
+// deniesTrust is an answer that withholds what the connector asked for, as
+// opposed to one that says the account plane is unavailable.
+func deniesTrust(err error) bool {
+	switch apiStatus(err) {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 // principalResolver maps a privilege assignment's principal to a C1 resource id.

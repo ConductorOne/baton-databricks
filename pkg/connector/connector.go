@@ -17,7 +17,10 @@ import (
 )
 
 type Databricks struct {
-	client     *databricks.Client
+	client *databricks.Client
+	// clientID is the applicationId of the service principal the connector
+	// authenticates as. Grant visibility is decided against it.
+	clientID   string
 	workspaces []string
 	opts       *cli.ConnectorOpts
 }
@@ -37,8 +40,8 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, workspaces, principals),
-		newCatalogBuilder(d.client, workspaces, principals),
+		newMetastoreBuilder(d.client, d.clientID, workspaces, principals),
+		newCatalogBuilder(d.client, d.clientID, workspaces, principals),
 	}
 }
 
@@ -147,13 +150,15 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	return nil, nil
 }
 
-// New returns a new instance of the connector.
+// New returns a new instance of the connector. clientID is the application id of
+// the service principal the connector authenticates as.
 func New(
 	ctx context.Context,
 	hostname,
 	accountHostname,
 	accountID,
-	baseURL string,
+	baseURL,
+	clientID string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
@@ -171,6 +176,7 @@ func New(
 
 	return &Databricks{
 		client:     client,
+		clientID:   clientID,
 		workspaces: workspaces,
 		opts:       opts,
 	}, nil
@@ -187,6 +193,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		accountHostname,
 		cfg.AccountId,
 		cfg.BaseUrl,
+		cfg.DatabricksClientId,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,

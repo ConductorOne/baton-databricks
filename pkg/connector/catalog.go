@@ -28,13 +28,32 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*catalogBuilder)(nil)
 const (
 	securableTypeCatalog = "CATALOG"
 
+	// privilegeManage is the only privilege that lets its holder read every
+	// privilege assignment on a catalog without owning it.
+	privilegeManage = "MANAGE"
+
+	// workspaceAdminsGroupPrefix starts the name of the system group Databricks
+	// creates for a workspace, _workspace_admins_<workspace>_<workspace id>.
+	workspaceAdminsGroupPrefix = "_workspace_admins_"
+
 	profileKeyFullName      = "full_name"
 	profileKeyCatalogName   = "catalog_name"
 	profileKeyCatalogType   = "catalog_type"
 	profileKeyIsolationMode = "isolation_mode"
 
+	// profileKeyMetastoreOwner carries the owner of the metastore the catalog
+	// belongs to. Owning the metastore is what makes a privilege read complete,
+	// and the catalog syncer is only handed the metastore's id, so List writes
+	// the owner down instead of resolving it again on every Grants call.
+	profileKeyMetastoreOwner = "metastore_owner"
+
 	// catalogWriteRemedy is what a 403 on the PATCH tells the operator.
 	catalogWriteRemedy = "the connector must own the metastore or the catalog, or hold MANAGE on the catalog"
+
+	// catalogTrustRemedy is what a refusal to report a partial privilege list
+	// tells the operator.
+	catalogTrustRemedy = "the connector's service principal must own the metastore or the catalog, hold MANAGE on the catalog, " +
+		"or be assigned Admin directly on the workspace whose admins group owns it"
 )
 
 // catalogPrivileges is the widest privilege set in Unity Catalog: BROWSE,
@@ -80,18 +99,23 @@ var catalogLevel = securableLevel{
 	noun:            "catalog",
 	privileges:      catalogPrivileges,
 	writeRemedy:     catalogWriteRemedy,
+	trustRemedy:     catalogTrustRemedy,
 	permissionsName: catalogPermissionsName,
+	trusts:          catalogGrantsAreTrustworthy,
 }
 
 type catalogBuilder struct {
 	client *databricks.Client
+	// clientID is the applicationId of the service principal the connector
+	// authenticates as, which is what grant visibility is decided against.
+	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 	sync       syncPrincipals
 }
 
-func newCatalogBuilder(client *databricks.Client, workspaces map[string]struct{}, sync syncPrincipals) *catalogBuilder {
-	return &catalogBuilder{client: client, workspaces: workspaces, sync: sync}
+func newCatalogBuilder(client *databricks.Client, clientID string, workspaces map[string]struct{}, sync syncPrincipals) *catalogBuilder {
+	return &catalogBuilder{client: client, clientID: clientID, workspaces: workspaces, sync: sync}
 }
 
 func (b *catalogBuilder) ResourceType(_ context.Context) *v2.ResourceType {
@@ -129,16 +153,17 @@ func catalogResource(
 	route catalogRoute,
 ) (*v2.Resource, error) {
 	profile := map[string]any{
-		profileKeyMetastoreID:   metastoreID,
-		profileKeyFullName:      catalog.Name,
-		profileKeyCatalogName:   catalog.Name,
-		profileKeyCatalogType:   catalog.CatalogType,
-		profileKeyIsolationMode: catalog.IsolationMode,
-		profileKeyOwner:         catalog.Owner,
-		profileKeySecurableType: securableTypeCatalog,
-		profileKeyWorkspace:     route.Workspace,
-		profileKeyWorkspaceID:   route.WorkspaceID,
-		profileKeyWorkspaceName: route.WorkspaceName,
+		profileKeyMetastoreID:    metastoreID,
+		profileKeyMetastoreOwner: route.MetastoreOwner,
+		profileKeyFullName:       catalog.Name,
+		profileKeyCatalogName:    catalog.Name,
+		profileKeyCatalogType:    catalog.CatalogType,
+		profileKeyIsolationMode:  catalog.IsolationMode,
+		profileKeyOwner:          catalog.Owner,
+		profileKeySecurableType:  securableTypeCatalog,
+		profileKeyWorkspace:      route.Workspace,
+		profileKeyWorkspaceID:    route.WorkspaceID,
+		profileKeyWorkspaceName:  route.WorkspaceName,
 	}
 
 	resourceID := catalogResourceID(metastoreID, catalog.Name)
@@ -161,6 +186,9 @@ type catalogRoute struct {
 	Workspace     string `json:"w"`
 	WorkspaceID   string `json:"i"`
 	WorkspaceName string `json:"n"`
+	// MetastoreOwner rides along so each catalog's profile can carry it. See
+	// profileKeyMetastoreOwner.
+	MetastoreOwner string `json:"o"`
 }
 
 // List walks a metastore's catalogs one workspace at a time. A catalog bound to
@@ -233,27 +261,32 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 		return err
 	}
 
+	// An assignment list that cannot be read, including a 404, leaves which
+	// workspaces serve the metastore unknown. Listing no catalogs here would make
+	// ConductorOne delete every catalog of the metastore and its whole subtree, so
+	// the sync fails and keeps what it already holds.
 	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
-		if isNotFoundError(err) {
-			ctxzap.Extract(ctx).Debug("databricks-connector: metastore is no longer on the account; listing no catalogs",
-				zap.String("metastore", metastoreID))
-
-			return nil
-		}
-
-		return fmt.Errorf("databricks-connector: failed to list workspaces for metastore %s: %w", metastoreID, err)
+		return fmt.Errorf(
+			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
+			metastoreID, err)
 	}
 	if len(usable) == 0 && inScope {
 		return status.Errorf(codes.FailedPrecondition,
 			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
 	}
 
+	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
+	if err != nil {
+		return err
+	}
+
 	for _, workspace := range slices.Backward(usable) {
 		encoded, err := json.Marshal(catalogRoute{
-			Workspace:     workspace.DeploymentName,
-			WorkspaceID:   strconv.Itoa(workspace.ID),
-			WorkspaceName: workspace.Name,
+			Workspace:      workspace.DeploymentName,
+			WorkspaceID:    strconv.Itoa(workspace.ID),
+			WorkspaceName:  workspace.Name,
+			MetastoreOwner: owner,
 		})
 		if err != nil {
 			return err
@@ -262,6 +295,34 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 	}
 
 	return nil
+}
+
+// metastoreOwner reads the owner of the metastore the catalogs hang from. It is
+// resolved once per metastore, with the route, because owning the metastore is
+// what makes a catalog's privilege read complete. A metastore the account no
+// longer lists has no owner to compare, which leaves the other rules to settle it.
+func metastoreOwner(
+	ctx context.Context,
+	client *databricks.Client,
+	metastoreID string,
+	annos *annotations.Annotations,
+) (string, error) {
+	metastores, rateLimit, err := client.ListMetastores(ctx)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		return "", fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
+	}
+
+	for _, metastore := range metastores {
+		if metastore.MetastoreID == metastoreID {
+			return metastore.Owner, nil
+		}
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: the account no longer lists the metastore, so its owner is unknown",
+		zap.String("metastore", metastoreID))
+
+	return "", nil
 }
 
 // catalogListingError reads a workspace that refuses the catalog listing as
@@ -301,14 +362,105 @@ func (b *catalogBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAt
 	return nil, nil, nil
 }
 
+// catalogGrantsAreTrustworthy reports whether the connector reads every privilege
+// assignment on a catalog. Databricks shows the full list to the metastore admin,
+// the owner and a holder of MANAGE; a direct workspace Admin also sees it when the
+// catalog is owned by that workspace's admins group. Anyone else reads only their
+// own rows, with a 200. See ensureGrantsAreTrustworthy.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+func catalogGrantsAreTrustworthy(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	annos *annotations.Annotations,
+) (bool, error) {
+	// An owner holds every privilege implicitly, which is not reported as a grant.
+	// The metastore's owner is its admin, and reads every privilege below it.
+	if ownsPrincipal(trust.ownPrincipal, trust.metastoreOwner) || ownsPrincipal(trust.ownPrincipal, trust.owner) {
+		return true, nil
+	}
+
+	// The workspace admins group acts as the owner for a direct Admin of that workspace.
+	if workspaceAdminsGroupOwns(trust.owner, trust.workspaceID) {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+		if err != nil || admin {
+			return admin, err
+		}
+	}
+
+	return holdsCatalogManage(ctx, client, trust, annos)
+}
+
+// workspaceAdminsGroupOwns reports whether owner is the system group Databricks
+// creates for a workspace, named _workspace_admins_<workspace>_<workspace id>.
+// That group is the default owner of the workspace catalog, and an object's owner
+// sees every grant on it. A direct Admin of the workspace is treated as a member
+// of the group; the group's membership itself is not listed.
+func workspaceAdminsGroupOwns(owner, workspaceID string) bool {
+	if owner == "" || workspaceID == "" {
+		return false
+	}
+
+	return strings.HasPrefix(owner, workspaceAdminsGroupPrefix) && strings.HasSuffix(owner, "_"+workspaceID)
+}
+
+// holdsCatalogManage asks the permissions endpoint for the connector's own
+// effective privileges on the catalog. The principal filter is effective, not
+// literal: a row can be the MANAGE a group holds and this principal inherits, so
+// only the privileges are read and never the principal field. The read bypasses
+// the cache, because a remembered page would decide this call with the access of
+// an earlier one.
+//
+// ALL_PRIVILEGES is not enough. Databricks leaves MANAGE out of it, so its holder
+// still reads a partial list.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+func holdsCatalogManage(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if trust.ownPrincipal == "" || trust.workspace == "" {
+		return false, nil
+	}
+
+	var manages bool
+	rateLimit, err := client.ForEachUncachedPermissionsPage(ctx, trust.workspace, databricks.SecurableCatalog, trust.fullName, trust.ownPrincipal,
+		func(page []databricks.PrivilegeAssignment) (bool, error) {
+			for _, assignment := range page {
+				if slices.Contains(assignment.Privileges, privilegeManage) {
+					manages = true
+
+					return true, nil
+				}
+			}
+
+			return false, nil
+		})
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if !deniesTrust(err) {
+			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on catalog %s: %w", trust.fullName, err)
+		}
+		ctxzap.Extract(ctx).Debug("databricks-connector: the connector's own privileges on the catalog cannot be read, so MANAGE stays unproven",
+			zap.String("catalog", trust.fullName),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return manages, nil
+}
+
 func (b *catalogBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	return syncSecurableGrants(ctx, b.client, b.sync, catalogLevel, resource, attr)
+	return syncSecurableGrants(ctx, b.client, b.clientID, b.sync, catalogLevel, resource, attr)
 }
 
 func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return grantSecurable(ctx, b.client, catalogLevel, principal, entitlement)
+	return grantSecurable(ctx, b.client, b.clientID, catalogLevel, principal, entitlement)
 }
 
 func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return revokeSecurable(ctx, b.client, catalogLevel, revoked)
+	return revokeSecurable(ctx, b.client, b.clientID, catalogLevel, revoked)
 }

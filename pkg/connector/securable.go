@@ -38,9 +38,81 @@ type securableLevel struct {
 	// writeRemedy is what a 403 on the PATCH tells the operator.
 	writeRemedy string
 
+	// trustRemedy is what a refusal to report a privilege list the connector
+	// cannot fully read tells the operator.
+	trustRemedy string
+
 	// permissionsName turns a resource id into the name the endpoint addresses
 	// the securable by.
 	permissionsName func(resourceID string) (string, error)
+
+	// trusts reports whether the connector reads every privilege assignment on
+	// the securable. What proves that differs per level, so the rule travels
+	// with the level rather than being decided by the shared path.
+	trusts func(ctx context.Context, client *databricks.Client, trust securableTrust, annos *annotations.Annotations) (bool, error)
+}
+
+// securableTrust is what the per-level rules read to settle a privilege list:
+// who the connector authenticates as, who owns the securable and the metastore
+// above it, and where the read is addressed.
+type securableTrust struct {
+	// ownPrincipal is the applicationId of the connector's service principal.
+	ownPrincipal string
+
+	owner string
+
+	// metastoreOwner is empty on a metastore, whose own owner is in owner.
+	metastoreOwner string
+
+	fullName    string
+	workspace   string
+	workspaceID string
+}
+
+// ensureGrantsAreTrustworthy settles whether the privilege list this call is
+// about to read, or write to, is the whole one. Databricks answers an
+// under-permissioned read of the permissions endpoint with 200 and only the rows
+// the caller may see, which is byte-identical to a securable that has no grants.
+// Reporting that subset would make ConductorOne revoke every privilege it cannot
+// see, and skipping the securable would make it delete the securable itself, so
+// the connector refuses instead.
+//
+// It runs per call and keeps no answer: ConductorOne can hand back a profile
+// from an earlier sync, so a remembered verdict would outlive the access that
+// earned it. Ownership settles it with no extra call at all.
+func ensureGrantsAreTrustworthy(
+	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
+	level securableLevel,
+	resource *v2.Resource,
+	fullName, workspace string,
+	annos *annotations.Annotations,
+) error {
+	profile := rs.GetProfile(resource)
+	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
+	metastoreOwner, _ := rs.GetProfileStringValue(profile, profileKeyMetastoreOwner)
+	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
+
+	trustworthy, err := level.trusts(ctx, client, securableTrust{
+		ownPrincipal:   clientID,
+		owner:          owner,
+		metastoreOwner: metastoreOwner,
+		fullName:       fullName,
+		workspace:      workspace,
+		workspaceID:    workspaceID,
+	}, annos)
+	if err != nil {
+		return err
+	}
+	if !trustworthy {
+		return status.Errorf(codes.PermissionDenied,
+			"databricks-connector: cannot read every privilege on %s %s through workspace %s, and Databricks answers a partial read with 200, "+
+				"so reporting it would revoke the access ConductorOne cannot see; %s",
+			level.noun, fullName, workspace, level.trustRemedy)
+	}
+
+	return nil
 }
 
 // syncSecurableGrants emits the privileges held on one securable, plus its owner.
@@ -50,6 +122,7 @@ type securableLevel struct {
 func syncSecurableGrants(
 	ctx context.Context,
 	client *databricks.Client,
+	clientID string,
 	sync syncPrincipals,
 	level securableLevel,
 	resource *v2.Resource,
@@ -73,6 +146,10 @@ func syncSecurableGrants(
 	}
 
 	annos := annotations.Annotations{}
+	if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
 	pageToken := attr.PageToken.Token
 	assignments, nextPageToken, rateLimit, err := client.ListPermissions(ctx, workspace, level.securableType, fullName, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
@@ -139,10 +216,12 @@ type change struct {
 func resolveChange(
 	ctx context.Context,
 	client *databricks.Client,
+	clientID string,
 	level securableLevel,
 	principalID *v2.ResourceId,
 	entitlement *v2.Entitlement,
 	isGrant bool,
+	annos *annotations.Annotations,
 ) (change, error) {
 	if !isValidPrincipal(principalID) {
 		return change{}, status.Errorf(codes.InvalidArgument,
@@ -176,6 +255,12 @@ func resolveChange(
 	if workspace == "" {
 		return change{}, status.Errorf(codes.FailedPrecondition,
 			"databricks-connector: %s %s has no workspace on its profile", level.noun, fullName)
+	}
+
+	// A privilege list the connector cannot fully read also cannot be safely
+	// written to: the PATCH would be built from the rows it is allowed to see.
+	if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, annos); err != nil {
+		return change{}, err
 	}
 
 	scimID, err := unityPrincipalScimID(principalID)
@@ -223,12 +308,13 @@ func (c change) updateError(verb string, err error) error {
 func grantSecurable(
 	ctx context.Context,
 	client *databricks.Client,
+	clientID string,
 	level securableLevel,
 	principal *v2.Resource,
 	entitlement *v2.Entitlement,
 ) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
-	change, err := resolveChange(ctx, client, level, principal.GetId(), entitlement, true)
+	change, err := resolveChange(ctx, client, clientID, level, principal.GetId(), entitlement, true, &annos)
 	if err != nil {
 		return annos, err
 	}
@@ -271,11 +357,12 @@ func grantSecurable(
 func revokeSecurable(
 	ctx context.Context,
 	client *databricks.Client,
+	clientID string,
 	level securableLevel,
 	revoked *v2.Grant,
 ) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
-	change, err := resolveChange(ctx, client, level, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), false)
+	change, err := resolveChange(ctx, client, clientID, level, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), false, &annos)
 	if err != nil {
 		return annos, err
 	}
