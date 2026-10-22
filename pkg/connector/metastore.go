@@ -25,13 +25,16 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*metastoreBuilder)(nil)
 
 type metastoreBuilder struct {
 	client *databricks.Client
+	// clientID is the applicationId of the service principal the connector
+	// authenticates as, which is what grant visibility is decided against.
+	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 	sync       syncPrincipals
 }
 
-func newMetastoreBuilder(client *databricks.Client, workspaces map[string]struct{}, sync syncPrincipals) *metastoreBuilder {
-	return &metastoreBuilder{client: client, workspaces: workspaces, sync: sync}
+func newMetastoreBuilder(client *databricks.Client, clientID string, workspaces map[string]struct{}, sync syncPrincipals) *metastoreBuilder {
+	return &metastoreBuilder{client: client, clientID: clientID, workspaces: workspaces, sync: sync}
 }
 
 func (m *metastoreBuilder) ResourceType(_ context.Context) *v2.ResourceType {
@@ -155,6 +158,10 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	}
 
 	annos := annotations.Annotations{}
+	if err := m.ensureGrantsAreTrustworthy(ctx, resource, metastoreID, workspace, &annos); err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
 	pageToken := attr.PageToken.Token
 	assignments, nextPageToken, rateLimit, err := m.client.ListPermissions(ctx, workspace, databricks.SecurableMetastore, metastoreID, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
@@ -220,6 +227,7 @@ func (m *metastoreBuilder) resolveChange(
 	principalID *v2.ResourceId,
 	entitlement *v2.Entitlement,
 	isGrant bool,
+	annos *annotations.Annotations,
 ) (metastoreChange, error) {
 	if !isValidPrincipal(principalID) {
 		return metastoreChange{}, status.Errorf(codes.InvalidArgument,
@@ -252,6 +260,12 @@ func (m *metastoreBuilder) resolveChange(
 	if workspace == "" {
 		return metastoreChange{}, status.Errorf(codes.FailedPrecondition,
 			"databricks-connector: metastore %s has no workspace on its profile", metastoreID)
+	}
+
+	// A privilege list the connector cannot fully read also cannot be safely
+	// written to: the PATCH would be built from the rows it is allowed to see.
+	if err := m.ensureGrantsAreTrustworthy(ctx, resource, metastoreID, workspace, annos); err != nil {
+		return metastoreChange{}, err
 	}
 
 	scimID, err := unityPrincipalScimID(principalID)
@@ -294,7 +308,7 @@ func (c metastoreChange) updateError(verb string, err error) error {
 
 func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
-	change, err := m.resolveChange(ctx, principal.GetId(), entitlement, true)
+	change, err := m.resolveChange(ctx, principal.GetId(), entitlement, true, &annos)
 	if err != nil {
 		return annos, err
 	}
@@ -334,7 +348,7 @@ func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 
 func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
-	change, err := m.resolveChange(ctx, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), false)
+	change, err := m.resolveChange(ctx, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), false, &annos)
 	if err != nil {
 		return annos, err
 	}

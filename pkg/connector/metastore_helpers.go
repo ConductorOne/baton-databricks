@@ -14,12 +14,18 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 const (
 	securableTypeMetastore = "METASTORE"
+
+	// workspacePermissionAdmin is the workspace-level assignment that makes its
+	// holder a metastore admin for the workspace's Unity Catalog reads.
+	workspacePermissionAdmin = "ADMIN"
 
 	// Statuses the account API documents for a workspace. PROVISIONING,
 	// NOT_PROVISIONED and CANCELLING can still change; FAILED and BANNED cannot.
@@ -256,6 +262,173 @@ func (m *metastoreBuilder) routeMetastore(
 	}
 
 	return nil, inScope, nil
+}
+
+// metastoreGrantsAreTrustworthy reports whether the connector reads every
+// privilege assignment on a metastore. Databricks answers an under-permissioned
+// read of the permissions endpoint with 200 and only the rows the caller may
+// see, which is byte-identical to a securable that has no grants. Reporting
+// that subset would make ConductorOne revoke every privilege it cannot see, so
+// the sync refuses to report grants it cannot fully read.
+//
+// MANAGE and ALL_PRIVILEGES are rejected at the metastore level, so a privilege
+// read cannot settle this. The two authorities are owning the metastore and
+// being assigned Admin directly on the workspace the read goes through.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+func metastoreGrantsAreTrustworthy(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal, metastoreOwner, workspaceID string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	// An owner holds every privilege implicitly, which is not reported as a grant.
+	if ownsPrincipal(ownPrincipal, metastoreOwner) {
+		return true, nil
+	}
+
+	return isWorkspaceAdmin(ctx, client, ownPrincipal, workspaceID, annos)
+}
+
+// ownsPrincipal reports whether name is the service principal the connector
+// authenticates as. Databricks names a service principal by its applicationId
+// in an owner field, and does not normalise its case.
+func ownsPrincipal(ownPrincipal, name string) bool {
+	return ownPrincipal != "" && strings.EqualFold(name, ownPrincipal)
+}
+
+// isWorkspaceAdmin lists the workspace's permission assignments on every call.
+// An assignment list the connector may not read leaves Admin unproven, which is
+// the same answer as not holding it.
+func isWorkspaceAdmin(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal, workspaceID string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if ownPrincipal == "" || workspaceID == "" {
+		return false, nil
+	}
+
+	assignments, rateLimit, err := client.ListWorkspaceMembers(ctx, workspaceID)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if !deniesTrust(err) {
+			return false, fmt.Errorf("databricks-connector: failed to list the permission assignments of workspace %s: %w", workspaceID, err)
+		}
+		ctxzap.Extract(ctx).Debug("databricks-connector: the permission assignments of the workspace cannot be read, so Admin stays unproven",
+			zap.String("workspace_id", workspaceID),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return holdsWorkspaceAdmin(ctx, client, ownPrincipal, assignments, annos)
+}
+
+// holdsWorkspaceAdmin matches the connector's own principal against a
+// workspace's ADMIN assignments. A service principal is named by its
+// applicationId, so most accounts settle without the SCIM lookup.
+// Admin inherited only through a group is ignored: the connector principal must
+// hold ADMIN itself. Walking every admin group's membership on every call is
+// the cost that would close this gap.
+func holdsWorkspaceAdmin(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal string,
+	assignments []databricks.WorkspaceAssignment,
+	annos *annotations.Annotations,
+) (bool, error) {
+	var adminIDs []string
+	for _, assignment := range assignments {
+		principal := assignment.Principal
+		if principal == nil || !slices.Contains(assignment.Permissions, workspacePermissionAdmin) {
+			continue
+		}
+		if ownsPrincipal(ownPrincipal, principal.ServicePrincipalAppID) {
+			return true, nil
+		}
+		if principal.ID != 0 {
+			adminIDs = append(adminIDs, strconv.Itoa(principal.ID))
+		}
+	}
+
+	if len(adminIDs) == 0 {
+		return false, nil
+	}
+
+	ownID, err := ownPrincipalScimID(ctx, client, ownPrincipal, annos)
+	if err != nil {
+		return false, err
+	}
+
+	return ownID != "" && slices.Contains(adminIDs, ownID), nil
+}
+
+// ownPrincipalScimID resolves the connector's own service principal. An
+// applicationId filter on the service principal endpoint can only match a
+// service principal, which is why this asks for the one record instead of
+// walking account SCIM, where the same name field is shared by three namespaces.
+func ownPrincipalScimID(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal string,
+	annos *annotations.Annotations,
+) (string, error) {
+	id, rateLimit, err := client.FindServicePrincipalID(ctx, "", ownPrincipal)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		return "", fmt.Errorf("databricks-connector: failed to resolve the connector's own service principal: %w", err)
+	}
+
+	return id, nil
+}
+
+// deniesTrust is an answer that withholds what the connector asked for, as
+// opposed to one that says the account plane is unavailable.
+func deniesTrust(err error) bool {
+	switch apiStatus(err) {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// ensureGrantsAreTrustworthy settles whether the privilege list this call is
+// about to read, or write to, is the whole one. It runs per call and keeps no
+// answer: ConductorOne can hand back a profile from an earlier sync, so a
+// remembered verdict would outlive the access that earned it. The probe costs
+// one account call, and none at all when the connector owns the metastore.
+func (m *metastoreBuilder) ensureGrantsAreTrustworthy(
+	ctx context.Context,
+	resource *v2.Resource,
+	metastoreID, workspace string,
+	annos *annotations.Annotations,
+) error {
+	profile := rs.GetProfile(resource)
+	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
+	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
+
+	trustworthy, err := metastoreGrantsAreTrustworthy(ctx, m.client, m.clientID, owner, workspaceID, annos)
+	if err != nil {
+		return err
+	}
+	if !trustworthy {
+		return untrustedMetastoreError(metastoreID, workspace)
+	}
+
+	return nil
+}
+
+// untrustedMetastoreError names the metastore, the workspace the read goes
+// through and what an operator has to change.
+func untrustedMetastoreError(metastoreID, workspace string) error {
+	return status.Errorf(codes.PermissionDenied,
+		"databricks-connector: cannot read every privilege on metastore %s through workspace %s, and Databricks answers a partial read with 200, "+
+			"so reporting it would revoke the access ConductorOne cannot see; "+
+			"the connector's service principal must own the metastore or be assigned Admin directly on the workspace",
+		metastoreID, workspace)
 }
 
 // principalResolver maps a privilege assignment's principal to a C1 resource id.
