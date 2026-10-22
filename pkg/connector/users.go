@@ -10,6 +10,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -183,10 +184,10 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		return nil, nil, nil, err
 	}
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("baton-databricks: email field is required in profile")
+		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: email field is required in profile")
 	}
 	if email == "" {
-		return nil, nil, nil, fmt.Errorf("baton-databricks: email is required to create a user")
+		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: email is required to create a user")
 	}
 	body.UserName = email
 
@@ -196,7 +197,7 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	}
 	if ok {
 		if displayName == "" {
-			return nil, nil, nil, fmt.Errorf("baton-databricks: displayName is required to create a user")
+			return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: displayName is required to create a user")
 		}
 		body.DisplayName = displayName
 	}
@@ -216,7 +217,7 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	if active, ok := pMap["active"]; ok {
 		activeBool, ok := active.(bool)
 		if !ok {
-			return nil, nil, nil, fmt.Errorf("baton-databricks: active field must be a boolean")
+			return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: active field must be a boolean")
 		}
 		body.Active = activeBool
 	}
@@ -241,10 +242,10 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 			databricks.NewFilterVars(fmt.Sprintf("userName eq '%s'", body.UserName)),
 			databricks.NewUserAttrVars(),
 		)
-		// A failed lookup is reported with the create error, so it can be told
-		// apart from a 409 that has no matching user.
+		// A failed lookup carries its own code, so a transient failure stays
+		// retryable; the create error is kept as text only.
 		if lookupErr != nil {
-			return nil, nil, nil, fmt.Errorf("%w (existing-user lookup failed: %w)", createErr, lookupErr)
+			return nil, nil, nil, fmt.Errorf("baton-databricks: existing-user lookup failed: %w (after %s)", lookupErr, createErr.Error())
 		}
 		// The filter is not escaped, so accept only the user whose userName
 		// matches; Databricks compares userNames case-insensitively.
@@ -294,7 +295,7 @@ func profileString(pMap map[string]interface{}, key string) (string, bool, error
 	}
 	s, ok := v.(string)
 	if !ok {
-		return "", true, fmt.Errorf("baton-databricks: %s field must be a string", key)
+		return "", true, uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("baton-databricks: %s field must be a string", key))
 	}
 	return s, true, nil
 }

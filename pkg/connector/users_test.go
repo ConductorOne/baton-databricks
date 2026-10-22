@@ -166,6 +166,9 @@ func TestCreateAccountActiveNonBoolProfileValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateAccount succeeded with a non-bool active profile value, want error")
 	}
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Errorf("status.Code(err) = %v, want %v", got, codes.InvalidArgument)
+	}
 }
 
 // Non-string profile values, null included, must error naming the field
@@ -199,14 +202,69 @@ func TestCreateAccountNonStringProfileValues(t *testing.T) {
 
 				_, _, _, err = b.CreateAccount(context.Background(), &v2.AccountInfo{Profile: profile}, nil)
 				want := fmt.Sprintf("baton-databricks: %s field must be a string", field)
-				if err == nil || err.Error() != want {
+				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Errorf("CreateAccount error = %v, want %q", err, want)
+				}
+				if got := status.Code(err); got != codes.InvalidArgument {
+					t.Errorf("status.Code(err) = %v, want %v", got, codes.InvalidArgument)
 				}
 				if requests != 0 {
 					t.Errorf("sent %d requests, want 0", requests)
 				}
 			})
 		}
+	}
+}
+
+// A missing or empty email, or an empty displayName, is rejected as invalid
+// input before any request is sent.
+func TestCreateAccountMissingRequiredProfileValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile map[string]interface{}
+		want    string
+	}{
+		{
+			name:    "missing email",
+			profile: map[string]interface{}{"displayName": "Alice"},
+			want:    "baton-databricks: email field is required in profile",
+		},
+		{
+			name:    "empty email",
+			profile: map[string]interface{}{"email": "", "displayName": "Alice"},
+			want:    "baton-databricks: email is required to create a user",
+		},
+		{
+			name:    "empty displayName",
+			profile: map[string]interface{}{"email": "alice@example.com", "displayName": ""},
+			want:    "baton-databricks: displayName is required to create a user",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			b := newTestUserBuilder(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+
+			profile, err := structpb.NewStruct(tc.profile)
+			if err != nil {
+				t.Fatalf("structpb.NewStruct: %v", err)
+			}
+
+			_, _, _, err = b.CreateAccount(context.Background(), &v2.AccountInfo{Profile: profile}, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("CreateAccount error = %v, want %q", err, tc.want)
+			}
+			if got := status.Code(err); got != codes.InvalidArgument {
+				t.Errorf("status.Code(err) = %v, want %v", got, codes.InvalidArgument)
+			}
+			if requests != 0 {
+				t.Errorf("sent %d requests, want 0", requests)
+			}
+		})
 	}
 }
 
@@ -308,32 +366,46 @@ func TestCreateAccountConflictWithoutExistingUserErrors(t *testing.T) {
 }
 
 // A 409 whose lookup itself fails reports the lookup failure with the create
-// error, which still resolves to AlreadyExists.
+// error as text, and resolves to the lookup error's code so a transient
+// failure stays retryable.
 func TestCreateAccountConflictWithFailedLookupReportsLookupError(t *testing.T) {
-	srv := &createConflictServer{
-		createStatus: http.StatusConflict,
-		lookupStatus: http.StatusInternalServerError,
+	tests := []struct {
+		name         string
+		lookupStatus int
+		wantCode     codes.Code
+	}{
+		{name: "lookup 500", lookupStatus: http.StatusInternalServerError, wantCode: codes.Unavailable},
+		{name: "lookup 429", lookupStatus: http.StatusTooManyRequests, wantCode: codes.Unavailable},
 	}
-	b := newTestUserBuilder(t, srv.handle)
 
-	res, err := createAliceAccount(t, b)
-	if err == nil {
-		t.Fatalf("CreateAccount result = %T, want an error", res)
-	}
-	if res != nil {
-		t.Errorf("CreateAccount result = %T, want nil (no already-exists result)", res)
-	}
-	if !strings.Contains(err.Error(), "baton-databricks: failed to create user:") {
-		t.Errorf("CreateAccount error = %v, want the wrapped create error", err)
-	}
-	if !strings.Contains(err.Error(), "existing-user lookup failed") {
-		t.Errorf("CreateAccount error = %v, want the lookup failure note", err)
-	}
-	if got := status.Code(err); got != codes.AlreadyExists {
-		t.Errorf("status.Code(err) = %v, want %v", got, codes.AlreadyExists)
-	}
-	if srv.posts != 1 || srv.lookups != 1 {
-		t.Errorf("posts = %d, lookups = %d, want 1 and 1", srv.posts, srv.lookups)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &createConflictServer{
+				createStatus: http.StatusConflict,
+				lookupStatus: tc.lookupStatus,
+			}
+			b := newTestUserBuilder(t, srv.handle)
+
+			res, err := createAliceAccount(t, b)
+			if err == nil {
+				t.Fatalf("CreateAccount result = %T, want an error", res)
+			}
+			if res != nil {
+				t.Errorf("CreateAccount result = %T, want nil (no already-exists result)", res)
+			}
+			if !strings.Contains(err.Error(), "baton-databricks: failed to create user:") {
+				t.Errorf("CreateAccount error = %v, want the create error text", err)
+			}
+			if !strings.Contains(err.Error(), "existing-user lookup failed") {
+				t.Errorf("CreateAccount error = %v, want the lookup failure note", err)
+			}
+			if got := status.Code(err); got != tc.wantCode {
+				t.Errorf("status.Code(err) = %v, want %v", got, tc.wantCode)
+			}
+			if srv.posts != 1 || srv.lookups != 1 {
+				t.Errorf("posts = %d, lookups = %d, want 1 and 1", srv.posts, srv.lookups)
+			}
+		})
 	}
 }
 
