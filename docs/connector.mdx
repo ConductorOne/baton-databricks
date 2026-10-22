@@ -48,9 +48,9 @@ The Metastores, Catalogs, Schemas, Tables and Volumes resource types are turned 
 <Note>
 **Notes on Unity Catalog access in C1:**
 
-- Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
+- Ownership is shown but cannot be provisioned. An owner that is not an account identity, such as `System user`, is not shown. A workspace admins group is shown when it resolves as an account group.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
-- A catalog is synced when a workspace in the sync lists it. A catalog that only excluded workspaces can reach is not synced.
+- A catalog is synced through the first running workspace in the sync. A catalog that only a later workspace lists is not synced. A catalog that only excluded workspaces can reach is not synced either.
 - `information_schema` is skipped.
 - Unity Catalog tags are not synced.
 </Note>

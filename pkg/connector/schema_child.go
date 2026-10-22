@@ -106,6 +106,11 @@ func listSchemaChildren(
 			schemaChildListingError(noun, catalogName+schemaNameSeparator+schemaName, route.Workspace, err)
 	}
 
+	if next != "" && next == bag.PageToken() {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.Internal,
+			"databricks-connector: listing %ss of schema %s repeated page token %q", noun, catalogName+schemaNameSeparator+schemaName, next)
+	}
+
 	nextToken, err := bag.NextToken(next)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, err

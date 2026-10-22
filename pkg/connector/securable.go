@@ -214,6 +214,11 @@ func syncSecurableGrants(
 		}
 	}
 
+	if nextPageToken != "" && nextPageToken == pageToken {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.Internal,
+			"databricks-connector: listing privileges on %s %s repeated page token %q", level.noun, fullName, nextPageToken)
+	}
+
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextPageToken}, nil
 }
 

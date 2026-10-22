@@ -82,6 +82,10 @@ baton resources
 - Users
 - Roles
 - Metastores
+- Catalogs
+- Schemas
+- Tables
+- Volumes
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
@@ -93,8 +97,9 @@ listed workspace is synced, so narrowing the list removes the other metastores
 and their grants from ConductorOne. A list that names no workspace on the
 account is rejected during credential validation, before any sync runs.
 
-Metastores are Unity Catalog securables and are opt-in: the type stays off until
-it is enabled for the connector in ConductorOne.
+Metastores, catalogs, schemas, tables, and volumes are Unity Catalog securables
+and are opt-in: each type stays off until it is enabled for the connector in
+ConductorOne.
 
 ## Authentication
 
@@ -178,17 +183,19 @@ path.
 
 ## Unity Catalog provisioning
 
-A metastore privilege can be granted to and revoked from a user, group or
-service principal. The `owner` entitlement is read-only: granting or revoking it
-fails with an `InvalidArgument` error.
+A privilege on a metastore, catalog, schema, table, or volume can be granted to
+and revoked from a user, group or service principal. The `owner` entitlement is
+read-only: granting or revoking it fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions
 
 The service principal must own the metastore, or be assigned **Admin** directly
 on the workspace the metastore is read through. Admin inherited only through a
-group is not enough. Databricks answers an under-permissioned read with HTTP 200
-and only the rows the caller may see. The connector refuses that read, so the
-sync fails and ConductorOne keeps the grants it already has.
+group is not enough. Listing every schema, table, or volume also takes ownership
+of the catalog, or `MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that catalog.
+Databricks answers an under-permissioned read with HTTP 200 and only the rows
+the caller may see. The connector refuses that read, so the sync fails and
+ConductorOne keeps the grants it already has.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
