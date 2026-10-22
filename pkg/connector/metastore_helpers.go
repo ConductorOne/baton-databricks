@@ -20,7 +20,13 @@ import (
 
 const (
 	securableTypeMetastore = "METASTORE"
-	workspaceStatusRunning = "RUNNING"
+
+	// Statuses the account API documents for a workspace. PROVISIONING,
+	// NOT_PROVISIONED and CANCELLING can still change; FAILED and BANNED cannot.
+	workspaceStatusRunning        = "RUNNING"
+	workspaceStatusProvisioning   = "PROVISIONING"
+	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
+	workspaceStatusCancelling     = "CANCELLING"
 
 	profileKeyMetastoreID   = "metastore_id"
 	profileKeyOwner         = "owner"
@@ -197,11 +203,29 @@ func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotati
 				continue
 			}
 		}
+		// A workspace that will not become RUNNING is left out of scope entirely,
+		// so a metastore attached only to one is skipped rather than failing every
+		// sync. Only a status that can still change keeps the metastore waiting.
+		if !workspaceIsUsable(workspace.Status) {
+			continue
+		}
 		scoped[id] = workspace
 		running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
 	}
 
 	return scoped, running, nil
+}
+
+// workspaceIsUsable reports a status that is RUNNING or can still become it.
+// FAILED and BANNED are terminal, and a status Databricks has not documented
+// takes that path too: treating one as pending would fail the sync on every run.
+func workspaceIsUsable(workspaceStatus string) bool {
+	switch strings.ToUpper(workspaceStatus) {
+	case "", workspaceStatusRunning, workspaceStatusProvisioning, workspaceStatusNotProvisioned, workspaceStatusCancelling:
+		return true
+	default:
+		return false
+	}
 }
 
 // routeMetastore picks the first running in-scope workspace attached to the

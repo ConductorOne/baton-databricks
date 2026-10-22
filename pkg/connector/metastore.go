@@ -92,15 +92,16 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			continue
 		}
 
+		// An assignment list that cannot be read, including a 404, leaves which
+		// workspaces serve the metastore unknown. Skipping it here would drop the
+		// metastore and make ConductorOne remove its grants, so the sync fails and
+		// keeps what it already holds. A metastore that is really gone stops being
+		// returned by ListMetastores instead.
 		workspace, inScope, err := m.routeMetastore(ctx, metastore.MetastoreID, scoped, running, &annos)
 		if err != nil {
-			if isNotFoundError(err) {
-				l.Debug("databricks-connector: metastore is no longer on the account; skipping it",
-					zap.String("metastore", metastore.MetastoreID))
-				continue
-			}
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to list workspaces for metastore %s: %w", metastore.MetastoreID, err)
+				"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
+				metastore.MetastoreID, err)
 		}
 		if workspace == nil {
 			if inScope {

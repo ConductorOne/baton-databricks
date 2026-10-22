@@ -205,6 +205,63 @@ func testMetastore(t *testing.T, workspace string) *v2.Resource {
 	return r
 }
 
+// Which workspaces serve a metastore decides whether it syncs at all, so an
+// assignment list the connector cannot read is unknown, not absent. Skipping it
+// would drop the metastore and make ConductorOne remove its grants.
+func TestMetastoreListFailsWhenAnAssignmentListCannotBeRead(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			f := defaultFakeAccount()
+			f.assignments = map[string]any{"ms-a": code}
+			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
+
+			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+			if err == nil {
+				t.Fatalf("List returned %d resources and no error, want the sync to fail", len(resources))
+			}
+			if !strings.Contains(err.Error(), "ms-a") {
+				t.Errorf("error %q does not name the metastore", err)
+			}
+		})
+	}
+}
+
+// A workspace that will not become RUNNING leaves the metastore out of the sync
+// instead of failing it on every run; one that can still change keeps it waiting.
+func TestMetastoreListSeparatesTerminalFromPendingWorkspaces(t *testing.T) {
+	tests := []struct {
+		workspaceStatus string
+		wantErr         bool
+		wantSynced      bool
+	}{
+		{"RUNNING", false, true},
+		{"PROVISIONING", true, false},
+		{"NOT_PROVISIONED", true, false},
+		{"CANCELLING", true, false},
+		{"FAILED", false, false},
+		{"BANNED", false, false},
+		{"SOMETHING_NEW", false, false},
+	}
+	for _, test := range tests {
+		t.Run(test.workspaceStatus, func(t *testing.T) {
+			f := defaultFakeAccount()
+			f.assignments = map[string]any{"ms-a": []int{1}}
+			f.workspaces = []map[string]any{
+				{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": test.workspaceStatus},
+			}
+			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
+
+			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+			if test.wantErr != (err != nil) {
+				t.Fatalf("List error = %v, want error: %v", err, test.wantErr)
+			}
+			if got := len(resources) > 0; got != test.wantSynced {
+				t.Errorf("metastore synced = %v, want %v", got, test.wantSynced)
+			}
+		})
+	}
+}
+
 func TestMetastoreListPicksTheFirstUsableWorkspace(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -218,12 +275,9 @@ func TestMetastoreListPicksTheFirstUsableWorkspace(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			f := defaultFakeAccount()
-			f.metastores = append(f.metastores,
-				map[string]any{"metastore_id": "ms-missing"},
-				map[string]any{"metastore_id": "ms-elsewhere"})
+			f.metastores = append(f.metastores, map[string]any{"metastore_id": "ms-elsewhere"})
 			f.assignments = map[string]any{
 				"ms-a":         []int{2, 1, 3},
-				"ms-missing":   http.StatusNotFound,
 				"ms-elsewhere": []int{4},
 			}
 			f.workspaces = []map[string]any{
