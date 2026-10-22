@@ -21,7 +21,7 @@ import (
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*metastoreBuilder)(nil)
 
 type metastoreBuilder struct {
-	client *databricks.Client
+	client   *databricks.Client
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
