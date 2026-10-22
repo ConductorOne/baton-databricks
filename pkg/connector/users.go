@@ -175,14 +175,22 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	annotations.Annotations,
 	error,
 ) {
-	pMap := accountInfo.Profile.AsMap()
+	profile := accountInfo.GetProfile()
 	body := &databricks.CreateUserBody{Active: true}
 
-	// Use email as userName since Databricks API expects email in userName field
-	email, ok, err := profileString(pMap, "email")
-	if err != nil {
-		return nil, nil, nil, err
+	// A present value of any other type, null included, is rejected before
+	// any field is read.
+	for _, key := range []string{"email", "displayName", "givenName", "familyName", "id"} {
+		if _, ok := profile.GetFields()[key]; !ok {
+			continue
+		}
+		if _, ok := rs.GetProfileStringValue(profile, key); !ok {
+			return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("baton-databricks: %s field must be a string", key))
+		}
 	}
+
+	// Use email as userName since Databricks API expects email in userName field
+	email, ok := rs.GetProfileStringValue(profile, "email")
 	if !ok {
 		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: email field is required in profile")
 	}
@@ -191,30 +199,20 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	}
 	body.UserName = email
 
-	displayName, ok, err := profileString(pMap, "displayName")
-	if err != nil {
-		return nil, nil, nil, err
+	displayName, ok := rs.GetProfileStringValue(profile, "displayName")
+	if !ok {
+		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: displayName field is required in profile")
 	}
-	if ok {
-		if displayName == "" {
-			return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: displayName is required to create a user")
-		}
-		body.DisplayName = displayName
+	if displayName == "" {
+		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: displayName is required to create a user")
 	}
+	body.DisplayName = displayName
 
-	if body.Name.FamilyName, _, err = profileString(pMap, "familyName"); err != nil {
-		return nil, nil, nil, err
-	}
+	body.Name.FamilyName, _ = rs.GetProfileStringValue(profile, "familyName")
+	body.Name.GivenName, _ = rs.GetProfileStringValue(profile, "givenName")
+	body.Id, _ = rs.GetProfileStringValue(profile, "id")
 
-	if body.Name.GivenName, _, err = profileString(pMap, "givenName"); err != nil {
-		return nil, nil, nil, err
-	}
-
-	if body.Id, _, err = profileString(pMap, "id"); err != nil {
-		return nil, nil, nil, err
-	}
-
-	if active, ok := pMap["active"]; ok {
+	if active, ok := profile.AsMap()["active"]; ok {
 		activeBool, ok := active.(bool)
 		if !ok {
 			return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: active field must be a boolean")
@@ -235,13 +233,7 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		if status.Code(err) != codes.AlreadyExists {
 			return nil, nil, nil, createErr
 		}
-		users, _, _, lookupErr := o.client.ListUsers(
-			ctx,
-			"",
-			&databricks.PaginationVars{Count: 1},
-			databricks.NewFilterVars(fmt.Sprintf("userName eq '%s'", body.UserName)),
-			databricks.NewUserAttrVars(),
-		)
+		existing, _, lookupErr := o.client.GetUserByUsername(ctx, "", body.UserName)
 		// A failed lookup carries its own code, so a transient failure stays
 		// retryable; the create error is kept as text only.
 		if lookupErr != nil {
@@ -249,10 +241,10 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		}
 		// The filter is not escaped, so accept only the user whose userName
 		// matches; Databricks compares userNames case-insensitively.
-		if len(users) == 0 || !strings.EqualFold(users[0].UserName, body.UserName) {
+		if existing == nil || !strings.EqualFold(existing.UserName, body.UserName) {
 			return nil, nil, nil, createErr
 		}
-		resource, err := o.userResource(ctx, &users[0], parentResourceId)
+		resource, err := o.userResource(ctx, existing, parentResourceId)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("baton-databricks: failed to create user resource: %w", err)
 		}
@@ -284,20 +276,6 @@ func (o *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (an
 		return nil, fmt.Errorf("baton-databricks: failed to delete user: %w", err)
 	}
 	return nil, nil
-}
-
-// profileString returns the string profile value for key and whether the key
-// is present. A present value of any other type, null included, is an error.
-func profileString(pMap map[string]interface{}, key string) (string, bool, error) {
-	v, ok := pMap[key]
-	if !ok {
-		return "", false, nil
-	}
-	s, ok := v.(string)
-	if !ok {
-		return "", true, uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("baton-databricks: %s field must be a string", key))
-	}
-	return s, true, nil
 }
 
 func newUserBuilder(client *databricks.Client) *userBuilder {

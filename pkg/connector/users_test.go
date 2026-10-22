@@ -216,8 +216,8 @@ func TestCreateAccountNonStringProfileValues(t *testing.T) {
 	}
 }
 
-// A missing or empty email, or an empty displayName, is rejected as invalid
-// input before any request is sent.
+// A missing or empty email or displayName is rejected as invalid input before
+// any request is sent.
 func TestCreateAccountMissingRequiredProfileValues(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -233,6 +233,11 @@ func TestCreateAccountMissingRequiredProfileValues(t *testing.T) {
 			name:    "empty email",
 			profile: map[string]interface{}{"email": "", "displayName": "Alice"},
 			want:    "baton-databricks: email is required to create a user",
+		},
+		{
+			name:    "displayName missing",
+			profile: map[string]interface{}{"email": "alice@example.com"},
+			want:    "baton-databricks: displayName field is required in profile",
 		},
 		{
 			name:    "empty displayName",
