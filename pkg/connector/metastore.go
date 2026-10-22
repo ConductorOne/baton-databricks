@@ -117,11 +117,7 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			continue
 		}
 
-		// An assignment list that cannot be read, including a 404, leaves which
-		// workspaces serve the metastore unknown. Skipping it here would drop the
-		// metastore and make ConductorOne remove its grants, so the sync fails and
-		// keeps what it already holds. A metastore that is really gone stops being
-		// returned by ListMetastores instead.
+		// A 404 here does not mean the metastore is gone. Skipping it would make ConductorOne delete it.
 		usable, inScope, err := scope.attached(ctx, m.client, metastore.MetastoreID, &annos)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(

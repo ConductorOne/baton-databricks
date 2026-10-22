@@ -69,17 +69,7 @@ type securableTrust struct {
 	workspaceID string
 }
 
-// ensureGrantsAreTrustworthy settles whether the privilege list this call is
-// about to read, or write to, is the whole one. Databricks answers an
-// under-permissioned read of the permissions endpoint with 200 and only the rows
-// the caller may see, which is byte-identical to a securable that has no grants.
-// Reporting that subset would make ConductorOne revoke every privilege it cannot
-// see, and skipping the securable would make it delete the securable itself, so
-// the connector refuses instead.
-//
-// It runs per call and keeps no answer: ConductorOne can hand back a profile
-// from an earlier sync, so a remembered verdict would outlive the access that
-// earned it. Ownership settles it with no extra call at all.
+// ensureGrantsAreTrustworthy refuses the call unless the privilege list is complete. Databricks returns HTTP 200 with a partial list, and reporting it would make ConductorOne revoke the rest. The check is not cached.
 func ensureGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
