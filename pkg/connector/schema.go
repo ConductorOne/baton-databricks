@@ -179,11 +179,10 @@ type schemaRoute struct {
 	CatalogOwner   string `json:"c"`
 }
 
-// List pages a catalog's schemas through one workspace whose listing is proven
-// complete. Unlike catalogs, a schema is listed by every workspace bound to its
-// catalog, so one workspace is enough — but it has to be a workspace that sees
-// all of them: Databricks answers a caller without catalog-wide visibility with
-// only the schemas it owns or can use, at 200.
+// List pages a catalog's schemas through the one workspace the route picked.
+// Databricks answers a caller without catalog-wide visibility with only the
+// schemas it owns or can use, at 200, so that listing is refused rather than
+// synced.
 func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != catalogResourceType.Id {
 		return nil, nil, nil
@@ -246,11 +245,11 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// pushRoute stacks the one workspace that both lists the catalog and sees every
-// schema in it. An empty stack means no workspace this sync can use lists the
-// catalog, which catalog List already settled by not emitting it. A catalog that
-// is listed but whose schemas cannot all be read fails instead: a short listing
-// would make ConductorOne delete the schemas it hides, and their whole subtree.
+// pushRoute records the one workspace the schemas are read through: the first
+// running workspace attached to the metastore. An empty stack means no workspace
+// this sync can use serves it. A catalog listed there whose schemas cannot all be
+// read fails instead: a short listing would make ConductorOne delete the schemas
+// it hides, and their whole subtree.
 func (b *schemaBuilder) pushRoute(
 	ctx context.Context,
 	metastoreID, catalogName string,
@@ -286,73 +285,55 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	l := ctxzap.Extract(ctx)
-	listed := false
-	for _, workspace := range usable {
-		// The catalog listing answers both whether this workspace is bound to the
-		// catalog — an ISOLATED catalog is listed only by the workspaces it is
-		// bound to, and the others cannot read its schemas either — and who owns
-		// it, which is what the completeness rule is decided against.
-		catalog, err := b.catalogThrough(ctx, workspace.DeploymentName, metastoreID, catalogName, annos)
-		if err != nil {
-			return err
-		}
-		if catalog == nil {
-			l.Debug("databricks-connector: this workspace does not list the catalog; trying the next one",
-				zap.String("catalog", catalogName),
-				zap.String("workspace", workspace.DeploymentName))
-
-			continue
-		}
-		listed = true
-
-		route := schemaRoute{
-			Workspace:      workspace.DeploymentName,
-			WorkspaceID:    strconv.Itoa(workspace.ID),
-			WorkspaceName:  workspace.Name,
-			MetastoreOwner: owner,
-			CatalogOwner:   catalog.Owner,
-		}
-
-		complete, err := schemaListingIsComplete(ctx, b.client, securableTrust{
-			ownPrincipal:   b.clientID,
-			metastoreOwner: owner,
-			parentOwner:    catalog.Owner,
-			fullName:       catalogName,
-			workspace:      route.Workspace,
-			workspaceID:    route.WorkspaceID,
-		}, annos)
-		if err != nil {
-			return err
-		}
-		if !complete {
-			// A workspace that refuses the probe leaves it unproven, which reads
-			// the same as not holding the access. Another workspace may still see
-			// every schema, so the walk continues before giving up.
-			l.Debug("databricks-connector: this workspace does not list every schema in the catalog; trying the next one",
-				zap.String("catalog", catalogName),
-				zap.String("workspace", route.Workspace))
-
-			continue
-		}
-
-		encoded, err := json.Marshal(route)
-		if err != nil {
-			return err
-		}
-		bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
+	workspace := usable[0]
+	// The catalog listing answers who owns the catalog, which is what the
+	// completeness rule is decided against. A catalog this workspace does not
+	// list has no schemas on this path.
+	catalog, err := b.catalogThrough(ctx, workspace.DeploymentName, metastoreID, catalogName, annos)
+	if err != nil {
+		return err
+	}
+	if catalog == nil {
+		ctxzap.Extract(ctx).Debug("databricks-connector: the workspace does not list the catalog, so it lists no schemas",
+			zap.String("catalog", catalogName),
+			zap.String("workspace", workspace.DeploymentName))
 
 		return nil
 	}
 
-	if !listed {
-		return nil
+	route := schemaRoute{
+		Workspace:      workspace.DeploymentName,
+		WorkspaceID:    strconv.Itoa(workspace.ID),
+		WorkspaceName:  workspace.Name,
+		MetastoreOwner: owner,
+		CatalogOwner:   catalog.Owner,
 	}
 
-	return status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot list every schema in catalog %s, and Databricks answers a partial listing with 200, "+
-			"so syncing it would delete the schemas ConductorOne cannot see along with their grants; %s",
-		catalogName, schemaListRemedy)
+	complete, err := schemaListingIsComplete(ctx, b.client, securableTrust{
+		ownPrincipal:   b.clientID,
+		metastoreOwner: owner,
+		parentOwner:    catalog.Owner,
+		fullName:       catalogName,
+		workspace:      route.Workspace,
+		workspaceID:    route.WorkspaceID,
+	}, annos)
+	if err != nil {
+		return err
+	}
+	if !complete {
+		return status.Errorf(codes.PermissionDenied,
+			"databricks-connector: cannot list every schema in catalog %s, and Databricks answers a partial listing with 200, "+
+				"so syncing it would delete the schemas ConductorOne cannot see along with their grants; %s",
+			catalogName, schemaListRemedy)
+	}
+
+	encoded, err := json.Marshal(route)
+	if err != nil {
+		return err
+	}
+	bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
+
+	return nil
 }
 
 // catalogThrough finds one catalog in the listing of workspace, nil when that
