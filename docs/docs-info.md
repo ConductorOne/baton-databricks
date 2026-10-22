@@ -40,7 +40,7 @@ While developing the connector, please fill out this form. This information is n
      >
      > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing).
      >
-     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. Without that standing Databricks answers the privilege read with the subset the caller may see, and ConductorOne reads the rest as revoked.
+     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on the workspace it is read through. Without that standing the sync fails, and ConductorOne keeps the grants it already has.
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
