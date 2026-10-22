@@ -114,10 +114,10 @@ func listSchemaChildren(
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// pushSchemaChildRoute stacks the one workspace that lists the parent catalog,
-// sees every schema in it, and still lists the schema itself. An empty stack
-// means this sync cannot reach the schema, which the schema syncer already
-// settled by not emitting it.
+// pushSchemaChildRoute records the one workspace the tables or volumes are read
+// through: the first running workspace attached to the metastore. An empty stack
+// means this sync cannot reach the schema. A schema whose children cannot all be
+// read fails instead of emitting the subset Databricks chose to show.
 func pushSchemaChildRoute(
 	ctx context.Context,
 	client *databricks.Client,
@@ -158,89 +158,71 @@ func pushSchemaChildRoute(
 		return err
 	}
 
-	l := ctxzap.Extract(ctx)
+	workspace := usable[0]
 	fullName := catalogName + schemaNameSeparator + schemaName
-	listed := false
-	for _, workspace := range usable {
-		catalog, err := catalogThrough(ctx, client, workspace.DeploymentName, metastoreID, catalogName, annos)
-		if err != nil {
-			return err
-		}
-		if catalog == nil {
-			l.Debug("databricks-connector: this workspace does not list the catalog; trying the next one",
-				zap.String("resource_type", resourceType.Id),
-				zap.String("catalog", catalogName),
-				zap.String("workspace", workspace.DeploymentName))
-
-			continue
-		}
-		listed = true
-
-		route := schemaChildRoute{
-			Workspace:      workspace.DeploymentName,
-			WorkspaceID:    strconv.Itoa(workspace.ID),
-			WorkspaceName:  workspace.Name,
-			MetastoreOwner: owner,
-			CatalogOwner:   catalog.Owner,
-		}
-
-		complete, err := schemaListingIsComplete(ctx, client, securableTrust{
-			ownPrincipal:   clientID,
-			metastoreOwner: owner,
-			parentOwner:    catalog.Owner,
-			fullName:       catalogName,
-			workspace:      route.Workspace,
-			workspaceID:    route.WorkspaceID,
-		}, annos)
-		if err != nil {
-			return err
-		}
-		if !complete {
-			// A workspace that refuses the probe leaves it unproven, which reads
-			// the same as not holding the access. Another workspace may still see
-			// every schema, so the walk continues before giving up.
-			l.Debug("databricks-connector: this workspace does not list every schema in the catalog; trying the next one",
-				zap.String("resource_type", resourceType.Id),
-				zap.String("catalog", catalogName),
-				zap.String("workspace", route.Workspace))
-
-			continue
-		}
-
-		// The owner of the schema is one of the things that makes the privilege
-		// read on a table or a volume complete, and this listing is already
-		// proven to hold every schema in the catalog.
-		schema, err := schemaThrough(ctx, client, route.Workspace, catalogName, schemaName, annos)
-		if err != nil {
-			return err
-		}
-		if schema == nil {
-			l.Debug("databricks-connector: the schema is no longer listed; listing none of its children",
-				zap.String("resource_type", resourceType.Id),
-				zap.String("schema", fullName),
-				zap.String("workspace", route.Workspace))
-
-			return nil
-		}
-		route.SchemaOwner = schema.Owner
-
-		encoded, err := json.Marshal(route)
-		if err != nil {
-			return err
-		}
-		bag.Push(pagination.PageState{ResourceTypeID: resourceType.Id, ResourceID: string(encoded)})
+	catalog, err := catalogThrough(ctx, client, workspace.DeploymentName, metastoreID, catalogName, annos)
+	if err != nil {
+		return err
+	}
+	if catalog == nil {
+		ctxzap.Extract(ctx).Debug("databricks-connector: the workspace does not list the catalog, so it lists no children",
+			zap.String("resource_type", resourceType.Id),
+			zap.String("catalog", catalogName),
+			zap.String("workspace", workspace.DeploymentName))
 
 		return nil
 	}
 
-	if !listed {
-		return nil
+	route := schemaChildRoute{
+		Workspace:      workspace.DeploymentName,
+		WorkspaceID:    strconv.Itoa(workspace.ID),
+		WorkspaceName:  workspace.Name,
+		MetastoreOwner: owner,
+		CatalogOwner:   catalog.Owner,
 	}
 
-	return status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot read every %s in schema %s, and Databricks answers a partial listing with 200, "+
-			"so syncing it would delete the ones ConductorOne cannot see along with their grants; %s",
-		noun, fullName, schemaListRemedy)
+	complete, err := schemaListingIsComplete(ctx, client, securableTrust{
+		ownPrincipal:   clientID,
+		metastoreOwner: owner,
+		parentOwner:    catalog.Owner,
+		fullName:       catalogName,
+		workspace:      route.Workspace,
+		workspaceID:    route.WorkspaceID,
+	}, annos)
+	if err != nil {
+		return err
+	}
+	if !complete {
+		return status.Errorf(codes.PermissionDenied,
+			"databricks-connector: cannot read every %s in schema %s, and Databricks answers a partial listing with 200, "+
+				"so syncing it would delete the ones ConductorOne cannot see along with their grants; %s",
+			noun, fullName, schemaListRemedy)
+	}
+
+	// The owner of the schema is one of the things that makes the privilege
+	// read on a table or a volume complete, and this listing is already
+	// proven to hold every schema in the catalog.
+	schema, err := schemaThrough(ctx, client, route.Workspace, catalogName, schemaName, annos)
+	if err != nil {
+		return err
+	}
+	if schema == nil {
+		ctxzap.Extract(ctx).Debug("databricks-connector: the schema is no longer listed; listing none of its children",
+			zap.String("resource_type", resourceType.Id),
+			zap.String("schema", fullName),
+			zap.String("workspace", route.Workspace))
+
+		return nil
+	}
+	route.SchemaOwner = schema.Owner
+
+	encoded, err := json.Marshal(route)
+	if err != nil {
+		return err
+	}
+	bag.Push(pagination.PageState{ResourceTypeID: resourceType.Id, ResourceID: string(encoded)})
+
+	return nil
 }
 
 // schemaChildListingError reads a workspace that refuses the listing as unknown,
