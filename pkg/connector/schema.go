@@ -81,7 +81,7 @@ var schemaLevel = securableLevel{
 }
 
 type schemaBuilder struct {
-	client *databricks.Client
+	client   *databricks.Client
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
@@ -233,6 +233,11 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 				"databricks-connector: failed to build the resource for schema %s.%s: %w", catalogName, schema.Name, err)
 		}
 		rv = append(rv, built)
+	}
+
+	if next != "" && next == bag.PageToken() {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.Internal,
+			"databricks-connector: listing schemas of catalog %s repeated page token %q", catalogName, next)
 	}
 
 	nextToken, err := bag.NextToken(next)
