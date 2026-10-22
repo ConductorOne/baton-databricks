@@ -376,7 +376,10 @@ func deniesTrust(err error) bool {
 	}
 }
 
-// ensureGrantsAreTrustworthy refuses the call unless the privilege list is complete. Databricks returns HTTP 200 with only the rows the caller may see, and reporting that subset would make ConductorOne revoke the rest. The check is not cached.
+// ensureGrantsAreTrustworthy refuses the call unless the privilege list is
+// complete. Databricks returns HTTP 200 with only the rows the caller may see,
+// and reporting that subset would make ConductorOne revoke the rest.
+// The check is not cached.
 func (m *metastoreBuilder) ensureGrantsAreTrustworthy(
 	ctx context.Context,
 	resource *v2.Resource,
