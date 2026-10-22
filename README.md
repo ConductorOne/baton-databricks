@@ -144,6 +144,8 @@ account
 ├── group
 ├── service principal
 └── metastore
+    └── catalog
+        └── schema
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
@@ -181,11 +183,10 @@ fails with an `InvalidArgument` error.
 ## Unity Catalog permissions
 
 The service principal must own the metastore, or be assigned **Admin** directly
-on a workspace the metastore is attached to. Admin inherited only through a
-group is not enough. Databricks answers an under-permissioned privilege read
-with HTTP 200 and the subset the caller may see, which is indistinguishable
-from an object with no grants, so a principal without that standing makes
-ConductorOne read the privileges it cannot see as revoked access.
+on the workspace the metastore is read through. Admin inherited only through a
+group is not enough. Databricks answers an under-permissioned read with HTTP 200
+and only the rows the caller may see. The connector refuses that read, so the
+sync fails and ConductorOne keeps the grants it already has.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`

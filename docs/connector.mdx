@@ -134,7 +134,8 @@ Otherwise, grant **MANAGE** on each catalog you want synced:
 </Steps>
 
 <Warning>
-A catalog the service principal cannot fully read is left out of the sync. Databricks returns a partial privilege list rather than an error, and syncing that list would make C1 treat the missing grants as revoked. Granting or revoking a privilege on a catalog that is not fully visible fails with a permission error and changes nothing in Databricks.
+Without this, the sync fails with a permission error naming the catalog, and ConductorOne keeps the grants it already has. Databricks would otherwise return HTTP 200 with only the privileges the caller can see.
+</Warning>
 
 ### Let the service principal list every schema
 
@@ -143,8 +144,7 @@ Skip this section if you are not syncing schemas, or if the service principal ow
 Workspace **Admin** does not list every schema. On a catalog the service principal does not own, Databricks returns only the schemas it owns or can use, with HTTP 200. To list every schema, the service principal must own the metastore, own the catalog, or hold **MANAGE**, **USE SCHEMA**, or **ALL PRIVILEGES** on the catalog.
 
 <Warning>
-Without that, the schema sync for that catalog fails with a permission error. A short list would make C1 delete the schemas it did not see, and the tables and volumes under them.
-</Warning>
+Without that, the schema sync for that catalog fails with a permission error, and ConductorOne keeps the schemas it already has. Databricks would otherwise return a short list and ConductorOne would delete the schemas it did not see.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
@@ -367,7 +367,3 @@ spec:
 
 </Tab>
 </Tabs>
-
-<Tip>
-Stable binaries and container images for the Databricks connector are available from the [official download center](https://dist.conductorone.com/ConductorOne/baton-databricks).
-</Tip>
