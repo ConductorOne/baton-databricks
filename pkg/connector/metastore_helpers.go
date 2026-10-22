@@ -280,7 +280,9 @@ func (s workspaceScope) attached(
 	return usable, inScope, nil
 }
 
-// metastoreGrantsAreTrustworthy is true when the connector owns the metastore or is a direct Admin of the routed workspace. MANAGE is not a metastore privilege.
+// metastoreGrantsAreTrustworthy is true when the connector owns the metastore
+// or is a direct Admin of the routed workspace. MANAGE is not a metastore
+// privilege.
 func metastoreGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
