@@ -425,19 +425,19 @@ func TestSchemaListRequiresACompleteListing(t *testing.T) {
 	}
 }
 
-// Visibility through any one attached workspace is enough, and nothing in the
-// listing order says which one that is, so a workspace that refuses the probe is
-// not the end of the walk. A refusal is 401 or 403; anything else is the account
-// plane failing, which must not be read as an absence of access.
-func TestSchemaListTriesTheNextWorkspaceWhenOneRefusesTheProbe(t *testing.T) {
+// The one workspace the route picked refusing the probe ends the sync. A second
+// workspace that could see the schemas is not consulted: the route is one
+// workspace, chosen once. A 401 or 403 leaves the listing unproven, so it is a
+// refusal. A 500 is the account plane failing, which is that error.
+func TestSchemaListStopsWhenTheChosenWorkspaceRefusesTheProbe(t *testing.T) {
 	tests := []struct {
-		name        string
-		status      int
-		wantRouting string
+		name   string
+		status int
+		want   codes.Code
 	}{
-		{"unauthorized", http.StatusUnauthorized, "wsb"},
-		{"forbidden", http.StatusForbidden, "wsb"},
-		{"server error", http.StatusInternalServerError, ""},
+		{"unauthorized", http.StatusUnauthorized, codes.PermissionDenied},
+		{"forbidden", http.StatusForbidden, codes.PermissionDenied},
+		{"server error", http.StatusInternalServerError, codes.Unavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -453,26 +453,9 @@ func TestSchemaListTriesTheNextWorkspaceWhenOneRefusesTheProbe(t *testing.T) {
 			}
 			b := newTestSchemaBuilderAs(t, f, "app-9")
 
-			resources, err := listAllSchemas(t, b)
-			if test.wantRouting == "" {
-				if err == nil {
-					t.Fatalf("List succeeded over a workspace answering %d", test.status)
-				}
-				if status.Code(err) == codes.PermissionDenied {
-					t.Errorf("List = %v, want the probe failure rather than a refusal", err)
-				}
-
-				return
-			}
-			if err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if len(resources) != 1 {
-				t.Fatalf("listed %d schemas, want 1", len(resources))
-			}
-			got, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace)
-			if got != test.wantRouting {
-				t.Errorf("schemas routed through %q, want %q", got, test.wantRouting)
+			_, err := listAllSchemas(t, b)
+			if status.Code(err) != test.want {
+				t.Fatalf("List = %v, want %s", err, test.want)
 			}
 		})
 	}
