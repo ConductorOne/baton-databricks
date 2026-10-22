@@ -139,10 +139,7 @@ func pushSchemaChildRoute(
 		return err
 	}
 
-	// An assignment list that cannot be read, including a 404, leaves which
-	// workspaces serve the metastore unknown. Listing nothing here would make
-	// ConductorOne delete every table and volume of the schema, so the sync fails
-	// and keeps what it already holds.
+	// A 404 here does not mean the metastore is gone. Listing nothing would make ConductorOne delete the tables and volumes.
 	usable, inScope, err := scope.attached(ctx, client, metastoreID, annos)
 	if err != nil {
 		return fmt.Errorf(
@@ -290,15 +287,7 @@ func schemaChildProfile(metastoreID, catalogName, schemaName, fullName, owner, s
 	}
 }
 
-// schemaChildGrantsAreTrustworthy reports whether the connector reads every
-// privilege assignment on a table or a volume. Databricks shows the full list to
-// the metastore admin, to the owner of the securable or of the schema or catalog
-// above it, and to a holder of MANAGE on any of those three; a direct workspace
-// Admin also sees it when the parent catalog is owned by that workspace's admins
-// group. Anyone else reads only their own rows, with a 200. See
-// ensureGrantsAreTrustworthy.
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+// schemaChildGrantsAreTrustworthy is true for an owner of the table or volume, its schema, its catalog, or the metastore, or for a holder of MANAGE on any of those.
 func schemaChildGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
