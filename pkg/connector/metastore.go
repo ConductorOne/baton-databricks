@@ -24,7 +24,7 @@ import (
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*metastoreBuilder)(nil)
 
 type metastoreBuilder struct {
-	client *databricks.Client
+	client   *databricks.Client
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
@@ -206,6 +206,11 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 			options := append(groupSecurableGrantOptions(principalId), grant.WithAnnotation(&v2.GrantImmutable{}))
 			rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
 		}
+	}
+
+	if nextPageToken != "" && nextPageToken == pageToken {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.Internal,
+			"databricks-connector: listing privileges on metastore %s repeated page token %q", metastoreID, nextPageToken)
 	}
 
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextPageToken}, nil
