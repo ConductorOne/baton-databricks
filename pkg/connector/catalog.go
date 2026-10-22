@@ -105,7 +105,7 @@ var catalogLevel = securableLevel{
 }
 
 type catalogBuilder struct {
-	client *databricks.Client
+	client   *databricks.Client
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
@@ -237,6 +237,11 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 				"databricks-connector: failed to build the resource for catalog %s: %w", catalog.Name, err)
 		}
 		rv = append(rv, built)
+	}
+
+	if next != "" && next == bag.PageToken() {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.Internal,
+			"databricks-connector: listing catalogs of metastore %s repeated page token %q", metastoreID, next)
 	}
 
 	nextToken, err := bag.NextToken(next)
