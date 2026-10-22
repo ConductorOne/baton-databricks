@@ -20,9 +20,6 @@ const (
 	// https://docs.databricks.com/api/account/accountmetastoreassignments/list
 	accountMetastoreWorkspacesEndpoint = "/api/2.0/accounts/%s/metastores/%s/workspaces"
 
-	// https://docs.databricks.com/api/workspace/catalogs/list
-	unityCatalogCatalogsEndpoint = "/api/2.1/unity-catalog/catalogs"
-
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
@@ -83,69 +80,6 @@ func (c *Client) ListMetastoreWorkspaces(
 	}
 
 	return ids, ratelimitData, nil
-}
-
-// listSecurables reads one page off a workspace-scoped securable endpoint.
-func listSecurables[R any, T any](
-	ctx context.Context,
-	c *Client,
-	workspaceId, endpoint string,
-	page func(res *R) ([]T, string),
-	vars ...Vars,
-) (
-	[]T,
-	string,
-	*v2.RateLimitDescription,
-	error,
-) {
-	var res R
-
-	u := c.workspaceUrl(workspaceId).JoinPath(endpoint)
-	ratelimitData, err := c.Get(ctx, u, &res, vars...)
-	if err != nil {
-		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId, err)
-	}
-
-	items, nextPageToken := page(&res)
-
-	return items, nextPageToken, ratelimitData, nil
-}
-
-// listCatalogs (GET /api/2.1/unity-catalog/catalogs) pages the catalogs of the
-// metastore attached to workspaceId, which is a deployment name.
-func (c *Client) listCatalogs(
-	ctx context.Context,
-	workspaceId, pageToken string,
-	maxResults uint,
-) (
-	[]Catalog,
-	string,
-	*v2.RateLimitDescription,
-	error,
-) {
-	catalogs, next, ratelimitData, err := listSecurables(ctx, c, workspaceId, unityCatalogCatalogsEndpoint,
-		func(res *catalogsResponse) ([]Catalog, string) { return res.Catalogs, res.NextPageToken },
-		&unityCatalogVars{
-			maxResults: &maxResults,
-			pageToken:  pageToken,
-		})
-	if err != nil {
-		return nil, "", ratelimitData, fmt.Errorf("failed to list catalogs: %w", err)
-	}
-
-	return catalogs, next, ratelimitData, nil
-}
-
-// ForEachCatalogPage walks listCatalogs without retaining the pages.
-func (c *Client) ForEachCatalogPage(
-	ctx context.Context,
-	workspaceId string,
-	maxResults uint,
-	visit func([]Catalog) (bool, error),
-) (*v2.RateLimitDescription, error) {
-	return forEachPageFrom(ctx, "", func(pageToken string) ([]Catalog, string, *v2.RateLimitDescription, error) {
-		return c.listCatalogs(ctx, workspaceId, pageToken, maxResults)
-	}, visit)
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).

@@ -90,9 +90,8 @@ deployment name, or numeric workspace ID, matched case-insensitively.
 
 `--workspaces` also scopes which metastores sync: only a metastore attached to a
 listed workspace is synced, so narrowing the list removes the other metastores
-and their grants from ConductorOne. A list that matches no workspace on the
-account fails the whole sync, including users, groups, service principals and
-workspaces, once the `metastore` resource type is enabled.
+and their grants from ConductorOne. A list that names no workspace on the
+account is rejected during credential validation, before any sync runs.
 
 Metastores are Unity Catalog securables and are opt-in: the type stays off until
 it is enabled for the connector in ConductorOne.
@@ -156,17 +155,7 @@ members as holders.
 metastore level.
 
 A metastore lives on the account plane, but its privileges are read through a
-workspace host assigned to it.
-
-| Level | Endpoint |
-|-------|----------|
-| Metastores | `GET /api/2.0/accounts/{account_id}/metastores` |
-| Metastore workspace assignments | `GET /api/2.0/accounts/{account_id}/metastores/{metastore_id}/workspaces` |
-| Privileges on every level | `GET` and `PATCH` `/api/2.1/unity-catalog/permissions/{securable_type}/{full_name}` |
-
-HTTP cache keys include the request Host. Two workspaces share paths such as
-`/unity-catalog/permissions/...`, and without the host in the key one
-workspace's response would be served for another.
+workspace attached to it.
 
 A metastore is synced only while a workspace this sync can use is attached to
 it. The connector never guesses when the answer is unknown:
@@ -191,39 +180,16 @@ fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions
 
-Three independent layers have to line up, and granting one does not imply the
-others:
+The service principal must own the metastore, or be assigned **Admin** directly
+on a workspace the metastore is attached to. Admin inherited only through a
+group is not enough. Databricks answers an under-permissioned privilege read
+with HTTP 200 and the subset the caller may see, which is indistinguishable
+from an object with no grants, so a principal without that standing makes
+ConductorOne read the privileges it cannot see as revoked access.
 
-1. **OAuth scopes** decide which API surfaces the credential may touch at all.
-2. **The service principal's roles** decide what it sees on those surfaces.
-3. **Unity Catalog privileges** apply on the securable itself.
-
-The scopes:
-
-| Scope | Covers |
-|-------|--------|
-| `unity-catalog` | Metastores, metastore workspace assignments, and the permissions endpoint |
-| `scim` | Account users, groups and service principals |
-| `access-management` | The rule-sets API, where roles live, plus the workspace permission assignments |
-| `provisioning` | The account workspaces listing. It is the only scope that grants it — including not the one named `workspace` |
-
-The connector requests `all-apis`, which covers all four. Each resource type
-declares its own scopes, roles and privileges, so `./baton-databricks
-capabilities` reports them per type.
-
-A privilege read is only trustworthy when the service principal owns the
-metastore, or is assigned **Admin** directly on a workspace the metastore is
-assigned to (Admin inherited only through a group is not enough). Holding a
-privilege is not an option at this level: Databricks rejects `MANAGE` and
-`ALL_PRIVILEGES` on a metastore, so there is no privilege whose presence would
-prove the read is complete.
-
-When neither holds, the sync fails with a `PermissionDenied` error naming the
-metastore rather than reporting a partial read. Databricks answers an
-under-permissioned privilege read with HTTP 200 and a partial list of privilege
-assignments, which is byte-indistinguishable from an object that genuinely has
-no grants on it. Reporting that partial list would make ConductorOne read every
-privilege the principal cannot see as revoked access.
+The connector requests the `all-apis` OAuth scope. Each resource type declares
+the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
+reports them per type.
 
 # Contributing, Support and Issues
 

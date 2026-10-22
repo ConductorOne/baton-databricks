@@ -38,9 +38,9 @@ While developing the connector, please fill out this form. This information is n
 
      > The credential must have admin access to each resource it reads or writes: account-admin on the Databricks account (for account-level sync and provisioning) and workspace-admin assigned directly to the service principal on each workspace being synced (Admin inherited only through a group is not enough).
      >
-     > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing). The scope-by-scope breakdown is in `## Permission model` below.
+     > The OAuth token carries scopes on top of that. The connector requests `all-apis`, which covers the four it uses: `unity-catalog` (the securables and the permissions endpoint), `scim` (account principals), `access-management` (roles and workspace permission assignments) and `provisioning` (the account workspaces listing).
      >
-     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. A privilege read cannot settle it at this level, because Databricks rejects `MANAGE` and `ALL_PRIVILEGES` on a metastore. `## Permission model` explains why neither is optional.
+     > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on a workspace it is assigned to. Without that standing Databricks answers the privilege read with the subset the caller may see, and ConductorOne reads the rest as revoked.
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
@@ -57,10 +57,10 @@ While developing the connector, please fill out this form. This information is n
   but the connector reports the privilege assignments recorded on the object
   itself. The endpoint that exposes inheritance does not return principal IDs,
   which are what the connector needs to resolve a principal unambiguously.
-- **Workspace Admin must be assigned directly.** The connector matches the
-  service principal's application ID or its own SCIM id against the workspace's
-  ADMIN assignments. Admin inherited only through a group is not treated as
-  enough.
+- **Workspace Admin must be assigned directly.** Admin inherited only through a
+  group does not let Databricks return every privilege assignment on a
+  metastore, so the sync would report the subset the service principal can see
+  as the complete set.
 - **Ownership is read-only.** The owner of a metastore is shown but cannot be
   provisioned. An owner that is not an account identity — `System user`, or a
   workspace admins group such as `_workspace_admins_<workspace_id>` — does not
@@ -73,16 +73,13 @@ While developing the connector, please fill out this form. This information is n
   ConductorOne removes it and its grants. Granting or revoking a privilege on
   such a metastore fails and changes nothing in Databricks.
 - **Narrowing `workspaces` narrows the metastores.** Only a metastore attached
-  to a listed workspace is synced. When the Metastores resource type is enabled,
-  a list that matches no workspace on the account fails the whole sync,
-  including users, groups, service principals and workspaces.
-- **The workspace shown on a metastore is an access path, not an authority.**
-  It names a workspace the metastore is assigned to. The connector confirms its
-  access before every read and uses another attached workspace when that one
-  does not serve the metastore, so the grants may have been read elsewhere.
-- **Admin on any attached workspace is enough.** The connector tries each
-  attached workspace in turn and reads through the first one where it holds
-  Admin directly.
+  to a listed workspace is synced. A list that names no workspace on the account
+  is rejected when the connector validates its credentials, before any sync
+  runs.
+- **The workspace shown on a metastore is the access path.** `List` records the
+  first workspace in the sync that the metastore is assigned to, and every
+  privilege read, grant and revoke goes through it. Admin on that workspace is
+  what the service principal needs.
 - **Other securables are not synced yet:** catalogs, schemas, tables, volumes,
   functions, registered models, external locations, storage credentials,
   connections, shares and Delta Sharing recipients.

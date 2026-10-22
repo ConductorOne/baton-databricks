@@ -48,19 +48,6 @@ func wrapTransportAuthError(err error) error {
 	return uhttp.WrapErrors(code, "databricks-connector: authentication failed", err)
 }
 
-// Databricks error_code values for a named securable that is not there.
-// The code narrows a 404 to the named securable, but it does not prove the
-// securable is gone: METASTORE_DOES_NOT_EXIST also answers a workspace that
-// serves no metastore. Only the account list separates absence from a route
-// that does not reach it.
-const (
-	ErrorCodeMetastoreDoesNotExist = "METASTORE_DOES_NOT_EXIST"
-	ErrorCodeCatalogDoesNotExist   = "CATALOG_DOES_NOT_EXIST"
-	ErrorCodeSchemaDoesNotExist    = "SCHEMA_DOES_NOT_EXIST"
-	ErrorCodeTableDoesNotExist     = "TABLE_DOES_NOT_EXIST"
-	ErrorCodeVolumeDoesNotExist    = "VOLUME_DOES_NOT_EXIST"
-)
-
 // APIError represents an error response from the Databricks API.
 type APIError struct {
 	StatusCode int
@@ -79,31 +66,6 @@ func (e *APIError) Error() string {
 		e.Message,
 		e.Err,
 	)
-}
-
-// HasErrorCode reports a 404 whose body named one of the given error codes.
-func (e *APIError) HasErrorCode(codes ...string) bool {
-	if e == nil || e.StatusCode != http.StatusNotFound || e.ErrorCode == "" {
-		return false
-	}
-	for _, code := range codes {
-		if e.ErrorCode == code {
-			return true
-		}
-	}
-
-	return false
-}
-
-// IsSecurableGone reports a 404 for a named securable that no longer exists.
-// A 404 with any other error_code (or none) is a routing or permission miss.
-func IsSecurableGone(err error, errorCodes ...string) bool {
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-
-	return apiErr.HasErrorCode(errorCodes...)
 }
 
 func (e *APIError) Unwrap() error {
