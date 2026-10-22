@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -12,7 +15,6 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
-	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
@@ -23,59 +25,259 @@ import (
 
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*catalogBuilder)(nil)
 
-type catalogBuilder struct {
-	securableDeps
+const (
+	securableTypeCatalog = "CATALOG"
+
+	profileKeyFullName      = "full_name"
+	profileKeyCatalogName   = "catalog_name"
+	profileKeyCatalogType   = "catalog_type"
+	profileKeyIsolationMode = "isolation_mode"
+
+	// catalogWriteRemedy is what a 403 on the PATCH tells the operator.
+	catalogWriteRemedy = "the connector must own the metastore or the catalog, or hold MANAGE on the catalog"
+)
+
+// catalogPrivileges is the widest privilege set in Unity Catalog: BROWSE,
+// CREATE_SCHEMA and USE_CATALOG stop here. Canonical UPPER_SNAKE names, the form
+// the permissions API answers with. The PATCH accepts and echoes every entry,
+// including ones missing from the databricks-sdk-go Privilege enum.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+var catalogPrivileges = []string{
+	"ALL_PRIVILEGES",
+	"APPLY_TAG",
+	"BROWSE",
+	"CREATE_SCHEMA",
+	"USE_CATALOG",
+	"USE_SCHEMA",
+	"CREATE_FUNCTION",
+	"CREATE_TABLE",
+	"CREATE_MATERIALIZED_VIEW",
+	"CREATE_MODEL",
+	"CREATE_VOLUME",
+	"CREATE_FEATURE",
+	"CREATE_SECRET",
+	"CREATE_SERVICE",
+	"SELECT",
+	"MODIFY",
+	"DELETE",
+	"INSERT",
+	"UPDATE",
+	"EXECUTE",
+	"REFRESH",
+	"READ_VOLUME",
+	"WRITE_VOLUME",
+	"READ_METADATA",
+	"READ_FEATURE",
+	"READ_SECRET",
+	"REFERENCE_SECRET",
+	"WRITE_SECRET",
+	"EXTERNAL_USE_SCHEMA",
+	"MANAGE",
 }
 
-func newCatalogBuilder(client *databricks.Client, uc *unityCatalog, sync syncPrincipals) *catalogBuilder {
-	return &catalogBuilder{securableDeps{client: client, uc: uc, sync: sync}}
+var catalogLevel = securableLevel{
+	securableType:   databricks.SecurableCatalog,
+	noun:            "catalog",
+	privileges:      catalogPrivileges,
+	writeRemedy:     catalogWriteRemedy,
+	permissionsName: catalogPermissionsName,
+}
+
+type catalogBuilder struct {
+	client *databricks.Client
+	// workspaces is the configured allowlist, empty when none was given.
+	workspaces map[string]struct{}
+	sync       syncPrincipals
+}
+
+func newCatalogBuilder(client *databricks.Client, workspaces map[string]struct{}, sync syncPrincipals) *catalogBuilder {
+	return &catalogBuilder{client: client, workspaces: workspaces, sync: sync}
 }
 
 func (b *catalogBuilder) ResourceType(_ context.Context) *v2.ResourceType {
 	return catalogResourceType
 }
 
-var catalogKind = securableKind{
-	name:        databricks.SecurableCatalog,
-	parse:       parseSecurableRef,
-	privileges:  catalogPrivileges,
-	writeRemedy: catalogTrustRemedy,
-	access: func(ctx context.Context, d *securableDeps, resource *v2.Resource, ref securableRef) (string, accessState, *v2.RateLimitDescription, error) {
-		return d.catalogAccess(ctx, resource, ref, true)
-	},
+// catalogResourceID keys a catalog by its metastore. Catalog names repeat across
+// metastores, so the name alone would merge two catalogs into one resource.
+func catalogResourceID(metastoreID, name string) string {
+	return metastoreID + securableKeySeparator + name
 }
 
+// parseCatalogID reads a catalog resource id, "{metastore_id}::{catalog_name}".
+func parseCatalogID(resourceID string) (string, string, error) {
+	metastoreID, name, ok := strings.Cut(resourceID, securableKeySeparator)
+	if !ok || metastoreID == "" || name == "" {
+		return "", "", status.Errorf(codes.InvalidArgument, "databricks-connector: invalid catalog resource id %q", resourceID)
+	}
+
+	return metastoreID, name, nil
+}
+
+// catalogPermissionsName: the permissions endpoint addresses a catalog by its
+// bare name, which is also its full name. The metastore is carried by the host.
+func catalogPermissionsName(resourceID string) (string, error) {
+	_, name, err := parseCatalogID(resourceID)
+
+	return name, err
+}
+
+func catalogResource(
+	catalog *databricks.Catalog,
+	metastoreID string,
+	parent *v2.ResourceId,
+	route catalogRoute,
+) (*v2.Resource, error) {
+	profile := map[string]any{
+		profileKeyMetastoreID:   metastoreID,
+		profileKeyFullName:      catalog.Name,
+		profileKeyCatalogName:   catalog.Name,
+		profileKeyCatalogType:   catalog.CatalogType,
+		profileKeyIsolationMode: catalog.IsolationMode,
+		profileKeyOwner:         catalog.Owner,
+		profileKeySecurableType: securableTypeCatalog,
+		profileKeyWorkspace:     route.Workspace,
+		profileKeyWorkspaceID:   route.WorkspaceID,
+		profileKeyWorkspaceName: route.WorkspaceName,
+	}
+
+	resourceID := catalogResourceID(metastoreID, catalog.Name)
+
+	return rs.NewAppResource(
+		catalog.Name,
+		catalogResourceType,
+		resourceID,
+		nil,
+		rs.WithResourceProfile(profile),
+		rs.WithParentResourceID(parent),
+		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+	)
+}
+
+// catalogRoute is one workspace the metastore's catalogs are listed through,
+// carried in the page token so later pages neither re-resolve the route nor
+// re-read the workspaces already walked.
+type catalogRoute struct {
+	Workspace     string `json:"w"`
+	WorkspaceID   string `json:"i"`
+	WorkspaceName string `json:"n"`
+}
+
+// List walks a metastore's catalogs one workspace at a time. A catalog bound to
+// a subset of the workspaces is listed only by the ones it is bound to, so every
+// usable workspace has to be asked; a catalog several of them list is emitted
+// once per workspace and the SDK keeps one row per resource id.
 func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != metastoreResourceType.Id {
 		return nil, nil, nil
 	}
 
-	parent := securableRef{metastoreID: parentResourceID.GetResource()}
+	metastoreID := parentResourceID.GetResource()
 	annos := annotations.Annotations{}
-	items, next, rateLimit, err := pageCatalogs(ctx, b.uc, parent, attr.PageToken.Token)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		if status.Code(err) == codes.FailedPrecondition {
+	bag := &pagination.Bag{}
+	if err := bag.Unmarshal(attr.PageToken.Token); err != nil {
+		return nil, nil, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid catalog page token: %v", err)
+	}
+
+	if bag.Current() == nil {
+		if err := b.pushRoute(ctx, metastoreID, bag, &annos); err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
+		if bag.Current() == nil {
+			ctxzap.Extract(ctx).Debug("databricks-connector: metastore has no workspace in sync scope; listing no catalogs",
+				zap.String("metastore", metastoreID))
 
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list catalogs under %s: %w", parent.resourceKey(), err)
+			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		}
+	}
+
+	var route catalogRoute
+	if err := json.Unmarshal([]byte(bag.ResourceID()), &route); err != nil {
+		return nil, nil, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid catalog page token: %v", err)
+	}
+
+	catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, route.Workspace, bag.PageToken(), ResourcesPageSize)
+	noteRateLimit(&annos, rateLimit)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, catalogListingError(metastoreID, route.Workspace, err)
 	}
 
 	var rv []*v2.Resource
-	for _, item := range items {
-		childRef := parent.child(item.name)
-		built, err := newSecurableResource(catalogResourceType, securableTypeCatalog, nil, item, childRef, parentResourceID)
-		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to build %s resource %s: %w", catalogResourceType.Id, childRef.resourceKey(), err)
+	for _, catalog := range catalogs {
+		if catalog.Name == "" || (catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID) {
+			continue
 		}
 
+		built, err := catalogResource(&catalog, metastoreID, parentResourceID, route)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
+				"databricks-connector: failed to build the resource for catalog %s: %w", catalog.Name, err)
+		}
 		rv = append(rv, built)
 	}
 
-	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: next}, nil
+	nextToken, err := bag.NextToken(next)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
+	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
+}
+
+// pushRoute stacks one page state per usable workspace, in reverse so the first
+// one is read first. An empty stack means no workspace this sync can use serves
+// the metastore, which metastore List already settled by not emitting it.
+func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag *pagination.Bag, annos *annotations.Annotations) error {
+	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
+	if err != nil {
+		return err
+	}
+
+	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
+	if err != nil {
+		if isNotFoundError(err) {
+			ctxzap.Extract(ctx).Debug("databricks-connector: metastore is no longer on the account; listing no catalogs",
+				zap.String("metastore", metastoreID))
+
+			return nil
+		}
+
+		return fmt.Errorf("databricks-connector: failed to list workspaces for metastore %s: %w", metastoreID, err)
+	}
+	if len(usable) == 0 && inScope {
+		return status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+	}
+
+	for _, workspace := range slices.Backward(usable) {
+		encoded, err := json.Marshal(catalogRoute{
+			Workspace:     workspace.DeploymentName,
+			WorkspaceID:   strconv.Itoa(workspace.ID),
+			WorkspaceName: workspace.Name,
+		})
+		if err != nil {
+			return err
+		}
+		bag.Push(pagination.PageState{ResourceTypeID: catalogResourceType.Id, ResourceID: string(encoded)})
+	}
+
+	return nil
+}
+
+// catalogListingError reads a workspace that refuses the catalog listing as
+// unknown, not as listing nothing: a short list would read as deletions in C1.
+func catalogListingError(metastoreID, workspace string, err error) error {
+	switch apiStatus(err) {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return uhttp.WrapErrors(codes.FailedPrecondition,
+			fmt.Sprintf("databricks-connector: the catalogs of metastore %s cannot be listed through attached workspace %s, "+
+				"so which catalogs are in scope is unknown; make the connector principal an Admin of that workspace, "+
+				"or leave the workspace out with workspaces or databricks-exclude-workspaces", metastoreID, workspace),
+			err)
+	}
+
+	return fmt.Errorf("databricks-connector: failed to list the catalogs of metastore %s through workspace %s: %w",
+		metastoreID, workspace, err)
 }
 
 func (b *catalogBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
@@ -88,7 +290,6 @@ func (b *catalogBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs)
 		))
 	}
 
-	// Owner is not grantable. Ownership is single-valued and has no revoke.
 	rv = append(rv, ent.NewOwnershipEntitlement(nil, ownerEntitlement,
 		ent.WithDescription("Owns a catalog in Databricks"),
 	))
@@ -101,233 +302,13 @@ func (b *catalogBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAt
 }
 
 func (b *catalogBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	ref, err := parseSecurableRef(resource.GetId().GetResource())
-	if err != nil {
-		return nil, nil, err
-	}
-
-	annos := annotations.Annotations{}
-	workspace, state, rateLimit, err := b.catalogAccess(ctx, resource, ref, false)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		if code := status.Code(err); code == codes.PermissionDenied || code == codes.FailedPrecondition {
-			return nil, &rs.SyncOpResults{Annotations: annos}, err
-		}
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve the access path for %s: %w", ref.resourceKey(), err)
-	}
-	if state != securableInScope {
-		ctxzap.Extract(ctx).Debug("databricks-connector: catalog is not reachable through a workspace this sync can use; skipping its grants",
-			zap.String("catalog", ref.resourceKey()),
-		)
-
-		return nil, &rs.SyncOpResults{Annotations: annos}, nil
-	}
-
-	l := ctxzap.Extract(ctx)
-	pageToken := attr.PageToken.Token
-	assignments, nextPageToken, rateLimit, err := b.client.ListPermissions(
-		ctx, workspace, databricks.SecurableCatalog, ref.permissionsName(), "", pageToken)
-	noteRateLimit(&annos, rateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to list permissions on %s %s: %w", databricks.SecurableCatalog, ref.permissionsName(), err)
-	}
-
-	owner := ""
-	if pageToken == "" {
-		owner = profileString(resource, profileKeyOwner)
-	}
-
-	principals, principalRateLimit, err := b.uc.principalsForGrants(ctx, assignments, owner)
-	noteRateLimit(&annos, principalRateLimit)
-	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-			"databricks-connector: failed to resolve account principals: %w", err)
-	}
-
-	var rv []*v2.Grant
-	for _, assignment := range assignments {
-		principalId, ok := principals.lookup(assignment)
-		if !ok {
-			l.Debug("databricks-connector: skipping a grant whose principal does not resolve",
-				zap.String("securable", ref.resourceKey()),
-				zap.String("principal", assignment.Principal),
-				zap.String("principal_id", assignment.PrincipalID.String()),
-			)
-
-			continue
-		}
-
-		if !emitPrincipal(b.sync, principalId.GetResourceType()) {
-			continue
-		}
-
-		options := groupSecurableGrantOptions(principalId)
-
-		for _, assigned := range assignment.Privileges {
-			if assigned == "" {
-				continue
-			}
-			if !slices.Contains(catalogPrivileges, assigned) {
-				l.Debug("databricks-connector: skipping a privilege the resource does not offer",
-					zap.String("securable", ref.resourceKey()),
-					zap.String("privilege", assigned),
-				)
-
-				continue
-			}
-
-			rv = append(rv, grant.NewGrant(resource, assigned, principalId, options...))
-		}
-	}
-
-	if owner != "" {
-		principalId, found := principals.lookupName(owner)
-		if !found {
-			l.Debug("databricks-connector: securable owner does not resolve to a synced principal",
-				zap.String("securable", ref.resourceKey()),
-				zap.String("owner", owner),
-			)
-		} else if emitPrincipal(b.sync, principalId.GetResourceType()) {
-			options := groupSecurableGrantOptions(principalId)
-			options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
-			rv = append(rv, grant.NewGrant(resource, ownerEntitlement, principalId, options...))
-		}
-	}
-
-	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextPageToken}, nil
+	return syncSecurableGrants(ctx, b.client, b.sync, catalogLevel, resource, attr)
 }
 
 func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return b.grantSecurable(ctx, principal, entitlement, catalogKind)
+	return grantSecurable(ctx, b.client, catalogLevel, principal, entitlement)
 }
 
 func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return b.revokeSecurable(ctx, revoked, catalogKind)
-}
-
-// catalogPageState is one usable workspace of the metastore, carried in the page
-// token so later pages neither rebuild the routing nor re-read other workspaces.
-type catalogPageState struct {
-	Workspace      string `json:"w"`
-	WorkspaceID    string `json:"i"`
-	WorkspaceName  string `json:"n"`
-	MetastoreOwner string `json:"o"`
-}
-
-// pageCatalogs pages a metastore's catalogs one workspace page at a time. A catalog
-// several workspaces list is emitted once per workspace; the SDK keeps one row
-// per resource id.
-func pageCatalogs(
-	ctx context.Context,
-	uc *unityCatalog,
-	parent securableRef,
-	pageToken string,
-) ([]securable, string, *v2.RateLimitDescription, error) {
-	bag := &pagination.Bag{}
-	if err := bag.Unmarshal(pageToken); err != nil {
-		return nil, "", nil, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid catalog page token: %v", err)
-	}
-
-	var rateLimit *v2.RateLimitDescription
-	if bag.Current() == nil {
-		snap, routingRateLimit, err := uc.buildRouting(ctx)
-		rateLimit = routingRateLimit
-		if err != nil {
-			return nil, "", rateLimit, err
-		}
-		workspaces, state, err := usableWorkspaces(snap, parent.metastoreID)
-		if err != nil || state != securableInScope {
-			return nil, "", rateLimit, err
-		}
-
-		// Pushed in reverse so the first workspace is read first.
-		for _, workspace := range slices.Backward(workspaces) {
-			encoded, err := json.Marshal(catalogPageState{
-				Workspace:      workspace,
-				WorkspaceID:    snap.workspaceIDs[workspace],
-				WorkspaceName:  snap.workspaceNames[workspace],
-				MetastoreOwner: snap.metastores[parent.metastoreID].Owner,
-			})
-			if err != nil {
-				return nil, "", rateLimit, err
-			}
-			bag.Push(pagination.PageState{ResourceTypeID: catalogResourceType.Id, ResourceID: string(encoded)})
-		}
-	}
-
-	var current catalogPageState
-	if err := json.Unmarshal([]byte(bag.ResourceID()), &current); err != nil {
-		return nil, "", rateLimit, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid catalog page token: %v", err)
-	}
-
-	catalogs, next, listRateLimit, err := uc.client.ListCatalogs(ctx, current.Workspace, bag.PageToken(), ResourcesPageSize)
-	if listRateLimit != nil {
-		rateLimit = listRateLimit
-	}
-	if err != nil {
-		return nil, "", rateLimit, catalogListingError(parent.metastoreID, current.Workspace, err)
-	}
-
-	snap := routingSnapshot{workspaceIDs: map[string]string{current.Workspace: current.WorkspaceID}}
-	items := make([]securable, 0, len(catalogs))
-	for _, catalog := range catalogs {
-		if catalog.Name == "" || (catalog.MetastoreID != "" && catalog.MetastoreID != parent.metastoreID) {
-			continue
-		}
-
-		ref := parent.child(catalog.Name)
-		trusted, trustRateLimit, err := uc.catalogGrantsAreTrustworthy(ctx, snap, current.MetastoreOwner, catalog.Owner, ref, current.Workspace)
-		if trustRateLimit != nil {
-			rateLimit = trustRateLimit
-		}
-		if err != nil {
-			// CATALOG_DOES_NOT_EXIST is this catalog disappearing between the
-			// listing and the probe. Any other 404 must not leave List as
-			// NotFound: the SDK would skip the page and drop the catalogs on it.
-			if databricks.IsSecurableGone(err, databricks.ErrorCodeCatalogDoesNotExist) {
-				ctxzap.Extract(ctx).Debug("databricks-connector: catalog is gone; skipping it",
-					zap.String("catalog", catalog.Name),
-				)
-
-				continue
-			}
-			if isNotFoundError(err) {
-				return nil, "", rateLimit, uhttp.WrapErrors(codes.FailedPrecondition,
-					fmt.Sprintf("databricks-connector: permissions on catalog %s returned 404 without %s, so this is not an absence",
-						catalog.Name, databricks.ErrorCodeCatalogDoesNotExist),
-					err)
-			}
-
-			return nil, "", rateLimit, fmt.Errorf(
-				"databricks-connector: failed to confirm grant visibility for catalog %s: %w", catalog.Name, err)
-		}
-		if !trusted {
-			return nil, "", rateLimit, status.Errorf(codes.PermissionDenied,
-				"databricks-connector: cannot read every grant on catalog %s: %s", catalog.Name, catalogTrustRemedy)
-		}
-
-		items = append(items, securable{
-			name:  catalog.Name,
-			owner: catalog.Owner,
-			profile: map[string]any{
-				profileKeyCatalogName:    catalog.Name,
-				profileKeyCatalogType:    catalog.CatalogType,
-				profileKeyIsolationMode:  catalog.IsolationMode,
-				profileKeyMetastoreOwner: current.MetastoreOwner,
-				profileKeyWorkspace:      current.Workspace,
-				profileKeyWorkspaceID:    current.WorkspaceID,
-				profileKeyWorkspaceName:  current.WorkspaceName,
-			},
-		})
-	}
-
-	nextToken, err := bag.NextToken(next)
-	if err != nil {
-		return nil, "", rateLimit, err
-	}
-
-	return items, nextToken, rateLimit, nil
+	return revokeSecurable(ctx, b.client, catalogLevel, revoked)
 }

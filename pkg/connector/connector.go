@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/config"
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -14,14 +17,14 @@ import (
 )
 
 type Databricks struct {
-	client       *databricks.Client
-	workspaces   []string
-	unityCatalog *unityCatalog
-	opts         *cli.ConnectorOpts
+	client     *databricks.Client
+	workspaces []string
+	opts       *cli.ConnectorOpts
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+	workspaces := configuredWorkspaceSet(d.workspaces)
 	principals := syncPrincipals{
 		groups:            d.willSyncResourceType(groupResourceType.Id),
 		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
@@ -34,8 +37,8 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.unityCatalog, principals),
-		newCatalogBuilder(d.client, d.unityCatalog, principals),
+		newMetastoreBuilder(d.client, workspaces, principals),
+		newCatalogBuilder(d.client, workspaces, principals),
 	}
 }
 
@@ -129,22 +132,28 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// Workspace enumeration is the other account-plane call every sync depends on.
 	// Per-workspace probing is deliberately not done here: a workspace the service
 	// principal can't reach is skipped during sync rather than failing validation.
-	if _, _, err := d.client.ListWorkspaces(ctx); err != nil {
+	workspaces, _, err := d.client.ListWorkspaces(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+	}
+
+	if len(d.workspaces) > 0 && !slices.ContainsFunc(workspaces, func(w databricks.Workspace) bool {
+		_, ok := matchConfiguredWorkspace(configuredWorkspaceSet(d.workspaces), w.DeploymentName, w.Name, strconv.Itoa(w.ID))
+		return ok
+	}) {
+		return nil, fmt.Errorf("databricks-connector: none of the configured workspaces (%s) exists on the account", strings.Join(d.workspaces, ", "))
 	}
 
 	return nil, nil
 }
 
-// New returns a new instance of the connector. clientID is the application id of
-// the service principal the connector authenticates as.
+// New returns a new instance of the connector.
 func New(
 	ctx context.Context,
 	hostname,
 	accountHostname,
 	accountID,
-	baseURL,
-	clientID string,
+	baseURL string,
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
@@ -161,10 +170,9 @@ func New(
 	}
 
 	return &Databricks{
-		client:       client,
-		workspaces:   workspaces,
-		unityCatalog: newUnityCatalog(client, clientID, configuredWorkspaceSet(workspaces)),
-		opts:         opts,
+		client:     client,
+		workspaces: workspaces,
+		opts:       opts,
 	}, nil
 }
 
@@ -179,7 +187,6 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		accountHostname,
 		cfg.AccountId,
 		cfg.BaseUrl,
-		cfg.DatabricksClientId,
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
