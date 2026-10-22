@@ -10,26 +10,6 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-func buildSecurable(
-	t *testing.T,
-	resourceType *v2.ResourceType,
-	typeEnum, parentType string,
-	childTypes []*v2.ResourceType,
-	metastoreID string,
-	parentParts []string,
-	item securable,
-) (*v2.Resource, error) {
-	t.Helper()
-
-	parent := securableRef{metastoreID: metastoreID, parts: parentParts}
-	parentResourceID := &v2.ResourceId{
-		ResourceType: parentType,
-		Resource:     parent.resourceKey(),
-	}
-
-	return newSecurableResource(resourceType, typeEnum, childTypes, item, parent.child(item.name), parentResourceID)
-}
-
 // C1 matches Terraform-preloaded resources and entitlements (match_baton_id) against the
 // RawId annotation on the resource, so every resource must carry one equal to its resource ID.
 func TestResourcesHaveRawId(t *testing.T) {
@@ -91,29 +71,31 @@ func TestResourcesHaveRawId(t *testing.T) {
 			"ms1",
 		},
 		{
-			// Keyed by metastore: several workspaces list the same catalog.
+			// Keyed by metastore: catalog names repeat across metastores.
 			"catalog",
-			build(buildSecurable(t, catalogResourceType, securableTypeCatalog, metastoreResourceType.Id,
-				[]*v2.ResourceType{schemaResourceType}, "ms1", nil, securable{name: "cat"})),
+			build(catalogResource(&databricks.Catalog{Name: "cat"}, "ms1",
+				&v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms1"}, catalogRoute{})),
 			"ms1::cat",
 		},
 		{
+			// The schema extends its catalog's id with the dotted full name.
 			"schema",
-			build(buildSecurable(t, schemaResourceType, securableTypeSchema, catalogResourceType.Id,
-				[]*v2.ResourceType{tableResourceType, volumeResourceType}, "ms1", []string{"cat"}, securable{name: "sch"})),
+			build(schemaResource(&databricks.Schema{Name: "sch"}, "ms1", "cat",
+				&v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: "ms1::cat"}, schemaRoute{})),
 			"ms1::cat.sch",
 		},
 		{
+			// A table and a volume extend the schema's id with their own name.
 			"table",
-			build(buildSecurable(t, tableResourceType, securableTypeTable, schemaResourceType.Id,
-				nil, "ms1", []string{"cat", "sch"}, securable{name: "tbl"})),
-			"ms1::cat.sch.tbl",
+			build(tableResource(&databricks.Table{Name: "orders"}, "ms1", "cat", "sch",
+				&v2.ResourceId{ResourceType: schemaResourceType.Id, Resource: "ms1::cat.sch"}, schemaChildRoute{})),
+			"ms1::cat.sch.orders",
 		},
 		{
 			"volume",
-			build(buildSecurable(t, volumeResourceType, securableTypeVolume, schemaResourceType.Id,
-				nil, "ms1", []string{"cat", "sch"}, securable{name: "vol"})),
-			"ms1::cat.sch.vol",
+			build(volumeResource(&databricks.Volume{Name: "files"}, "ms1", "cat", "sch",
+				&v2.ResourceId{ResourceType: schemaResourceType.Id, Resource: "ms1::cat.sch"}, schemaChildRoute{})),
+			"ms1::cat.sch.files",
 		},
 	}
 

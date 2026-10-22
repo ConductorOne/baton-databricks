@@ -3,15 +3,13 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
-
-	"fmt"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
@@ -24,397 +22,200 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-// fakeCatalogAccount is one metastore (ms-1) served by two RUNNING workspaces,
-// wsa (id 1) and wsb (id 2). Each field shapes one answer; the counters record
-// what the connector asked.
+// fakeCatalogAccount is one metastore (ms-1) served by the RUNNING workspaces
+// wsa (id 1, named prod) and wsb (id 2, named dev). Each field shapes one
+// answer; the counters record what the connector asked.
 type fakeCatalogAccount struct {
-	metastoreOwner string
-	attached       []int
+	attached []int
+	// attachedStatus fails the metastore's assignment list with that status.
+	attachedStatus int
 	// listed maps a workspace to the catalogs its listing returns.
 	listed map[string][]map[string]any
 	// listStatus fails a workspace's catalog listing with that status.
 	listStatus map[string]int
-	// unbound is what include_unbound=true returns.
-	unbound []map[string]any
-	// manage names the catalogs the connector principal holds MANAGE on.
-	manage map[string]bool
-	// workspaceAdmins names workspace ids where the connector principal is a direct Admin.
-	workspaceAdmins map[string]bool
-
-	routing          int
-	catalogPages     int
-	patches          int
-	patchBodies      []string
-	permissionsHosts []string
-	// assignments is what an unfiltered permissions read returns per catalog.
+	// assignments maps a catalog to the privilege assignments on it.
 	assignments map[string][]map[string]any
-	// echo is what a PATCH returns; nil echoes assignments.
-	echo        []map[string]any
-	patchStatus int
-	// users, groups and servicePrincipals are account SCIM, keyed by id. The value
-	// is the name a privilege assignment carries: userName, displayName, applicationId.
-	users             map[string]string
-	groups            map[string]string
-	servicePrincipals map[string]string
-}
+	// ownPrivileges answers a read filtered by principal, which is how the
+	// connector asks for its own effective privileges on a catalog.
+	ownPrivileges []map[string]any
+	// workspaceMembers maps a workspace id to its permission assignments, or to
+	// the HTTP status the account API answers the list with.
+	workspaceMembers map[string]any
+	permStatus       int
+	patchStatus      int
+	users            map[string]string
+	groups           map[string]string
 
-// scim answers account SCIM by id (/Users/{id}) and by filter (id or name eq).
-func (f *fakeCatalogAccount) scim(w http.ResponseWriter, r *http.Request) bool {
-	kinds := []struct {
-		segment, nameField string
-		byID               map[string]string
-	}{
-		{"/scim/v2/Users", "userName", f.users},
-		{"/scim/v2/Groups", "displayName", f.groups},
-		{"/scim/v2/ServicePrincipals", "applicationId", f.servicePrincipals},
-	}
-	for _, kind := range kinds {
-		idx := strings.Index(r.URL.Path, kind.segment)
-		if idx < 0 {
-			continue
-		}
-		rest := strings.TrimPrefix(r.URL.Path[idx+len(kind.segment):], "/")
-		if rest != "" {
-			name, ok := kind.byID[rest]
-			if !ok {
-				http.Error(w, `{"detail":"not found"}`, http.StatusNotFound)
-				return true
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": rest, kind.nameField: name})
-			return true
-		}
-
-		filter := r.URL.Query().Get("filter")
-		var found []map[string]any
-		for id, name := range kind.byID {
-			if strings.Contains(filter, strconv.Quote(id)) || strings.Contains(filter, strconv.Quote(name)) {
-				found = append(found, map[string]any{"id": id, kind.nameField: name})
-			}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"Resources": found, "totalResults": len(found)})
-		return true
-	}
-
-	return false
+	routed        int
+	catalogPages  int
+	patches       []map[string]any
+	permHosts     []string
+	memberLists   []string
+	filteredReads []string
 }
 
 func (f *fakeCatalogAccount) handler(t *testing.T) http.HandlerFunc {
-	t.Helper()
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
-		workspace := r.Header.Get("X-Test-Workspace")
-		if f.scim(w, r) {
-			return
-		}
-
+		encode := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 		switch {
+		case strings.Contains(path, "/scim/v2/"):
+			serveSCIM(w, r, f.users, f.groups, nil, nil)
 		case strings.HasSuffix(path, "/metastores"):
-			f.routing++
-			_ = json.NewEncoder(w).Encode(map[string]any{"metastores": []map[string]any{
-				{"metastore_id": "ms-1", "name": "main", "owner": f.metastoreOwner},
-			}})
+			encode(map[string]any{"metastores": []map[string]any{{"metastore_id": "ms-1", "name": "main", "owner": "eng"}}})
 		case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"workspace_ids": f.attached})
+			if f.attachedStatus != 0 {
+				http.Error(w, `{"message":"denied"}`, f.attachedStatus)
+
+				return
+			}
+			encode(map[string]any{"workspace_ids": f.attached})
+		case strings.HasSuffix(path, "/permissionassignments"):
+			parts := strings.Split(path, "/")
+			workspaceID := parts[len(parts)-2]
+			f.memberLists = append(f.memberLists, workspaceID)
+			switch v := f.workspaceMembers[workspaceID].(type) {
+			case int:
+				http.Error(w, `{"message":"denied"}`, v)
+			default:
+				encode(map[string]any{"permission_assignments": v})
+			}
 		case strings.HasSuffix(path, "/workspaces"):
-			_ = json.NewEncoder(w).Encode([]map[string]any{
+			f.routed++
+			encode([]map[string]any{
 				{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
 				{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "RUNNING"},
 			})
 		case strings.HasSuffix(path, "/unity-catalog/catalogs"):
-			if r.URL.Query().Get("include_unbound") == "true" {
-				_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": f.unbound})
-				return
-			}
-			f.catalogPages++
-			if code, ok := f.listStatus[workspace]; ok {
-				http.Error(w, `{"message":"denied"}`, code)
-				return
-			}
-			all := f.listed[workspace]
-			start, _ := strconv.Atoi(r.URL.Query().Get("page_token"))
-			size, _ := strconv.Atoi(r.URL.Query().Get("max_results"))
-			if size <= 0 || size > len(all)-start {
-				size = len(all) - start
-			}
-			next := ""
-			if start+size < len(all) {
-				next = strconv.Itoa(start + size)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": all[start : start+size], "next_page_token": next})
+			f.serveCatalogs(w, r)
 		case strings.Contains(path, "/unity-catalog/permissions/catalog/"):
-			name := path[strings.LastIndex(path, "/")+1:]
-			if r.Method == http.MethodPatch {
-				f.patches++
-				body, _ := io.ReadAll(r.Body)
-				f.patchBodies = append(f.patchBodies, string(body))
-				if f.patchStatus != 0 {
-					http.Error(w, `{"message":"forbidden"}`, f.patchStatus)
-					return
-				}
-				echo := f.echo
-				if echo == nil {
-					echo = f.assignments[name]
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": echo})
-				return
-			}
-			if r.URL.Query().Get("principal") != "" {
-				var assignments []map[string]any
-				if f.manage[name] {
-					assignments = []map[string]any{{"principal": "app-1", "privileges": []string{"MANAGE"}}}
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": assignments})
-				return
-			}
-			f.permissionsHosts = append(f.permissionsHosts, workspace)
-			_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": f.assignments[name]})
-		case strings.Contains(path, "/permissionassignments"):
-			id := ""
-			parts := strings.Split(path, "/")
-			for i, part := range parts {
-				if part == "workspaces" && i+1 < len(parts) {
-					id = parts[i+1]
-				}
-			}
-			var assignments []map[string]any
-			if f.workspaceAdmins[id] {
-				assignments = []map[string]any{{
-					"principal":   map[string]any{"service_principal_name": "app-1"},
-					"permissions": []string{"ADMIN"},
-				}}
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"permission_assignments": assignments})
+			f.servePermissions(w, r, path[strings.LastIndex(path, "/")+1:])
 		default:
+			t.Errorf("unexpected request %s %s", r.Method, path)
 			http.Error(w, `{"message":"unexpected"}`, http.StatusInternalServerError)
 		}
 	}
 }
 
+func (f *fakeCatalogAccount) serveCatalogs(w http.ResponseWriter, r *http.Request) {
+	workspace := r.Header.Get("X-Test-Workspace")
+	if code, ok := f.listStatus[workspace]; ok {
+		http.Error(w, `{"message":"denied"}`, code)
+		return
+	}
+
+	f.catalogPages++
+	all := f.listed[workspace]
+	start, _ := strconv.Atoi(r.URL.Query().Get("page_token"))
+	size, _ := strconv.Atoi(r.URL.Query().Get("max_results"))
+	if size <= 0 || size > len(all)-start {
+		size = len(all) - start
+	}
+	next := ""
+	if start+size < len(all) {
+		next = strconv.Itoa(start + size)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": all[start : start+size], "next_page_token": next})
+}
+
+func (f *fakeCatalogAccount) servePermissions(w http.ResponseWriter, r *http.Request, catalog string) {
+	f.permHosts = append(f.permHosts, r.Header.Get("X-Test-Workspace"))
+	if f.permStatus != 0 {
+		http.Error(w, `{"message":"nope"}`, f.permStatus)
+		return
+	}
+	if principal := r.URL.Query().Get("principal"); principal != "" {
+		f.filteredReads = append(f.filteredReads, principal)
+		_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": f.ownPrivileges})
+
+		return
+	}
+	if r.Method == http.MethodPatch {
+		if f.patchStatus != 0 {
+			http.Error(w, `{"message":"denied"}`, f.patchStatus)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var changes struct {
+			Changes []map[string]any `json:"changes"`
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(body)))
+		decoder.UseNumber()
+		_ = decoder.Decode(&changes)
+		for _, change := range changes.Changes {
+			f.patches = append(f.patches, change)
+			f.apply(catalog, change)
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": f.assignments[catalog]})
+}
+
+func (f *fakeCatalogAccount) apply(catalog string, change map[string]any) {
+	added, _ := change["add"].([]any)
+	for _, privilege := range added {
+		f.assignments[catalog] = append(f.assignments[catalog], map[string]any{
+			"principal": change["principal"], "principal_id": 1, "privileges": []string{privilege.(string)},
+		})
+	}
+	remove, ok := change["remove"].([]any)
+	if !ok {
+		return
+	}
+	kept := f.assignments[catalog][:0]
+	for _, assignment := range f.assignments[catalog] {
+		if fmt.Sprint(assignment["principal_id"]) != fmt.Sprint(change["principal_id"]) ||
+			!slices.Contains(assignment["privileges"].([]string), remove[0].(string)) {
+			kept = append(kept, assignment)
+		}
+	}
+	f.assignments[catalog] = kept
+}
+
+func newTestCatalogBuilder(t *testing.T, f *fakeCatalogAccount, allowlist []string, sync syncPrincipals) *catalogBuilder {
+	return newTestCatalogBuilderAs(t, f, allowlist, sync, testOwnPrincipal)
+}
+
+func newTestCatalogBuilderAs(t *testing.T, f *fakeCatalogAccount, allowlist []string, sync syncPrincipals, clientID string) *catalogBuilder {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+	client, _ := newWorkspaceRoutedClient(t, f.handler(t))
+
+	return newCatalogBuilder(client, clientID, configuredWorkspaceSet(allowlist), sync)
+}
+
+var testMetastoreResourceID = &v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms-1"}
+
 func catalogEntry(name, owner string) map[string]any {
 	return map[string]any{"name": name, "metastore_id": "ms-1", "owner": owner}
 }
 
-func newFakeCatalogBuilder(t *testing.T, f *fakeCatalogAccount, workspaces []string) *catalogBuilder {
+func manyCatalogs(prefix string, n int) []map[string]any {
+	catalogs := make([]map[string]any, 0, n)
+	for i := range n {
+		catalogs = append(catalogs, catalogEntry(fmt.Sprintf("%s_%03d", prefix, i), "someone"))
+	}
+
+	return catalogs
+}
+
+// testCatalog is a catalog resource as List writes it, routed through wsa, in a
+// metastore the connector's own principal owns. That is the live shape: ownership
+// settles grant visibility with no probe call at all.
+func testCatalog(t *testing.T, name, owner, workspace string) *v2.Resource {
 	t.Helper()
 
-	return newFakeCatalogBuilderSyncing(t, f, workspaces, syncPrincipals{})
+	return testCatalogOf(t, name, owner, testOwnPrincipal, workspace)
 }
 
-func newFakeCatalogBuilderSyncing(t *testing.T, f *fakeCatalogAccount, workspaces []string, sync syncPrincipals) *catalogBuilder {
+func testCatalogOf(t *testing.T, name, owner, metastoreOwner, workspace string) *v2.Resource {
 	t.Helper()
-	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
-
-	client, _ := newWorkspaceRoutedClient(t, f.handler(t))
-
-	return newCatalogBuilder(client, newUnityCatalog(client, "app-1", configuredWorkspaceSet(workspaces)), sync)
-}
-
-// profiledCatalog is a catalog resource as List writes it, routed through wsa.
-func profiledCatalog(t *testing.T, name, owner string) *v2.Resource {
-	t.Helper()
-
-	resource, err := newSecurableResource(catalogResourceType, securableTypeCatalog, nil, securable{
-		name:  name,
-		owner: owner,
-		profile: map[string]any{
-			profileKeyMetastoreOwner: "app-1",
-			profileKeyWorkspace:      "wsa",
-			profileKeyWorkspaceID:    "1",
-			profileKeyWorkspaceName:  "prod",
-		},
-	}, securableRef{metastoreID: "ms-1", parts: []string{name}}, &v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms-1"})
+	r, err := catalogResource(&databricks.Catalog{Name: name, MetastoreID: "ms-1", Owner: owner}, "ms-1", testMetastoreResourceID,
+		catalogRoute{Workspace: workspace, WorkspaceID: "1", WorkspaceName: "prod", MetastoreOwner: metastoreOwner})
 	if err != nil {
-		t.Fatalf("newSecurableResource: %v", err)
+		t.Fatalf("catalogResource: %v", err)
 	}
 
-	return resource
-}
-
-func catalogProvisioningAccount() *fakeCatalogAccount {
-	return &fakeCatalogAccount{
-		metastoreOwner: "app-1",
-		attached:       []int{1},
-		listed:         map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
-		users:          map[string]string{"1": "alice@example.com"},
-		assignments:    map[string][]map[string]any{},
-	}
-}
-
-func catalogGrantTo(t *testing.T, privilege string) (*v2.Resource, *v2.Grant) {
-	t.Helper()
-
-	principal := &v2.Resource{Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "1"}}
-
-	return principal, grant.NewGrant(profiledCatalog(t, "main", "someone"), privilege, principal.GetId())
-}
-
-// Databricks no-ops a privilege already held, so the pre-read is the only signal
-// for GrantAlreadyExists, and the echo is the only proof the PATCH landed.
-func TestCatalogGrantAddsThePrivilegeOnceAndConfirmsIt(t *testing.T) {
-	f := catalogProvisioningAccount()
-	f.echo = []map[string]any{{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"USE_CATALOG"}}}
-	b := newFakeCatalogBuilder(t, f, nil)
-	principal, g := catalogGrantTo(t, "USE_CATALOG")
-
-	annos, err := b.Grant(context.Background(), principal, g.GetEntitlement())
-	if err != nil {
-		t.Fatalf("Grant: %v", err)
-	}
-	if annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Error("a fresh grant reported GrantAlreadyExists")
-	}
-	if f.patches != 1 || !strings.Contains(f.patchBodies[0], `"add":["USE_CATALOG"]`) || !strings.Contains(f.patchBodies[0], "alice@example.com") {
-		t.Fatalf("PATCH bodies = %v, want one add of USE_CATALOG for alice", f.patchBodies)
-	}
-
-	f.assignments["main"] = f.echo
-	annos, err = b.Grant(context.Background(), principal, g.GetEntitlement())
-	if err != nil {
-		t.Fatalf("second Grant: %v", err)
-	}
-	if !annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Error("granting a held privilege did not report GrantAlreadyExists")
-	}
-	if f.patches != 1 {
-		t.Errorf("granting a held privilege sent a PATCH; patches = %d", f.patches)
-	}
-}
-
-func TestCatalogGrantFailsWhenTheEchoDoesNotCarryThePrivilege(t *testing.T) {
-	f := catalogProvisioningAccount()
-	f.echo = []map[string]any{}
-	b := newFakeCatalogBuilder(t, f, nil)
-	principal, g := catalogGrantTo(t, "USE_CATALOG")
-
-	_, err := b.Grant(context.Background(), principal, g.GetEntitlement())
-	if status.Code(err) != codes.Internal {
-		t.Fatalf("Grant = %v, want Internal", err)
-	}
-}
-
-// A principal that is gone from SCIM still carries its numeric id on the row, so
-// removal goes by principal_id, and an absent privilege is already revoked.
-func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
-	f := catalogProvisioningAccount()
-	f.assignments["main"] = []map[string]any{{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"USE_CATALOG"}}}
-	f.echo = []map[string]any{}
-	b := newFakeCatalogBuilder(t, f, nil)
-	_, g := catalogGrantTo(t, "USE_CATALOG")
-
-	annos, err := b.Revoke(context.Background(), g)
-	if err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	if annos.Contains(&v2.GrantAlreadyRevoked{}) {
-		t.Error("revoking a held privilege reported GrantAlreadyRevoked")
-	}
-	if f.patches != 1 || !strings.Contains(f.patchBodies[0], `"principal_id":1`) {
-		t.Fatalf("PATCH bodies = %v, want one removal by principal_id", f.patchBodies)
-	}
-
-	f.assignments["main"] = nil
-	annos, err = b.Revoke(context.Background(), g)
-	if err != nil {
-		t.Fatalf("second Revoke: %v", err)
-	}
-	if !annos.Contains(&v2.GrantAlreadyRevoked{}) {
-		t.Error("revoking an absent privilege did not report GrantAlreadyRevoked")
-	}
-	if f.patches != 1 {
-		t.Errorf("revoking an absent privilege sent a PATCH; patches = %d", f.patches)
-	}
-}
-
-func TestCatalogWriteRefusedByDatabricksNamesTheRemedy(t *testing.T) {
-	f := catalogProvisioningAccount()
-	f.patchStatus = http.StatusForbidden
-	b := newFakeCatalogBuilder(t, f, nil)
-	principal, g := catalogGrantTo(t, "USE_CATALOG")
-
-	_, err := b.Grant(context.Background(), principal, g.GetEntitlement())
-	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), catalogTrustRemedy) {
-		t.Fatalf("Grant = %v, want PermissionDenied naming %q", err, catalogTrustRemedy)
-	}
-}
-
-func TestCatalogGrantRejectsWhatCannotBeProvisioned(t *testing.T) {
-	for _, privilege := range []string{ownerEntitlement, "CREATE", "CREATE_CATALOG"} {
-		t.Run(privilege, func(t *testing.T) {
-			f := catalogProvisioningAccount()
-			b := newFakeCatalogBuilder(t, f, nil)
-			principal, g := catalogGrantTo(t, privilege)
-
-			_, err := b.Grant(context.Background(), principal, g.GetEntitlement())
-			if status.Code(err) != codes.InvalidArgument {
-				t.Fatalf("Grant(%s) = %v, want InvalidArgument", privilege, err)
-			}
-			if f.patches != 0 {
-				t.Errorf("Grant(%s) sent a PATCH", privilege)
-			}
-		})
-	}
-}
-
-// A group's grant is expandable to its members; the owner's is immutable and only
-// on the first page; a principal type the sync leaves out and a privilege the
-// catalog does not offer are not emitted.
-func TestCatalogGrantsEmission(t *testing.T) {
-	f := catalogProvisioningAccount()
-	f.groups = map[string]string{"11": "data-eng"}
-	f.servicePrincipals = map[string]string{"21": "app-2"}
-	f.assignments["main"] = []map[string]any{
-		{"principal": "data-eng", "principal_id": 11, "privileges": []string{"USE_CATALOG", "NOT_A_PRIVILEGE"}},
-		{"principal": "app-2", "principal_id": 21, "privileges": []string{"SELECT"}},
-	}
-	b := newFakeCatalogBuilderSyncing(t, f, nil, syncPrincipals{groups: true})
-
-	grants, _, err := b.Grants(context.Background(), profiledCatalog(t, "main", "alice@example.com"), rs.SyncOpAttrs{})
-	if err != nil {
-		t.Fatalf("Grants: %v", err)
-	}
-
-	got := map[string]*v2.Grant{}
-	for _, g := range grants {
-		got[g.GetEntitlement().GetId()+" -> "+g.GetPrincipal().GetId().GetResourceType()] = g
-	}
-	if len(got) != 2 {
-		t.Fatalf("grants = %v, want the group's USE_CATALOG and the owner", slices.Collect(maps.Keys(got)))
-	}
-
-	groupGrant, ok := got["catalog:ms-1::main:USE_CATALOG -> group"]
-	if !ok {
-		t.Fatalf("missing the group's USE_CATALOG grant; got %v", slices.Collect(maps.Keys(got)))
-	}
-	groupAnnos := annotations.Annotations(groupGrant.GetAnnotations())
-	expandable := &v2.GrantExpandable{}
-	if ok, err := groupAnnos.Pick(expandable); err != nil || !ok {
-		t.Fatalf("the group's grant is not expandable (err %v)", err)
-	}
-	if len(expandable.GetEntitlementIds()) != 1 || !strings.HasSuffix(expandable.GetEntitlementIds()[0], ":"+groupMemberEntitlement) || expandable.GetShallow() {
-		t.Errorf("GrantExpandable = %v, want the group's member entitlement, not shallow", expandable)
-	}
-
-	ownerGrant, ok := got["catalog:ms-1::main:owner -> user"]
-	if !ok {
-		t.Fatalf("missing the owner grant; got %v", slices.Collect(maps.Keys(got)))
-	}
-	ownerAnnos := annotations.Annotations(ownerGrant.GetAnnotations())
-	if !ownerAnnos.Contains(&v2.GrantImmutable{}) {
-		t.Error("the owner grant is not immutable")
-	}
-
-	next, _, err := b.Grants(context.Background(), profiledCatalog(t, "main", "alice@example.com"),
-		rs.SyncOpAttrs{PageToken: pagination.Token{Token: "page-2"}})
-	if err != nil {
-		t.Fatalf("Grants page 2: %v", err)
-	}
-	for _, g := range next {
-		if g.GetEntitlement().GetId() == "catalog:ms-1::main:owner" {
-			t.Error("the owner grant was emitted again on a later page")
-		}
-	}
+	return r
 }
 
 // listAllCatalogs drives List the way the SDK does, page token by page token.
@@ -424,8 +225,7 @@ func listAllCatalogs(t *testing.T, b *catalogBuilder) ([]*v2.Resource, error) {
 	var all []*v2.Resource
 	token := ""
 	for range 1000 {
-		resources, results, err := b.List(context.Background(), &v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms-1"},
-			rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		resources, results, err := b.List(context.Background(), testMetastoreResourceID, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
 		if err != nil {
 			return all, err
 		}
@@ -440,91 +240,84 @@ func listAllCatalogs(t *testing.T, b *catalogBuilder) ([]*v2.Resource, error) {
 	return nil, nil
 }
 
-func manyCatalogs(prefix string, n int) []map[string]any {
-	catalogs := make([]map[string]any, 0, n)
-	for i := range n {
-		catalogs = append(catalogs, catalogEntry(fmt.Sprintf("%s_%03d", prefix, i), "someone"))
-	}
-
-	return catalogs
-}
-
-// Every List page used to rebuild the routing and drain every workspace's catalogs.
-// Paging per workspace reads each API page once and the routing once per metastore.
-func TestCatalogListReadsEachWorkspacePageOnce(t *testing.T) {
+// A catalog bound to a subset of the workspaces is listed only by the ones it is
+// bound to, so every usable workspace is asked. Paging per workspace reads each
+// API page once and resolves the route once per metastore.
+func TestCatalogListPagesEachWorkspaceOnceAndUnionsThem(t *testing.T) {
 	shared := manyCatalogs("shared", 120)
 	f := &fakeCatalogAccount{
-		metastoreOwner: "app-1",
-		attached:       []int{1, 2},
+		attached: []int{1, 2},
 		listed: map[string][]map[string]any{
 			"wsa": shared,
 			"wsb": append(slices.Clone(shared), manyCatalogs("only_b", 30)...),
 		},
 	}
-	b := newFakeCatalogBuilder(t, f, nil)
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
 
 	resources, err := listAllCatalogs(t, b)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 
-	unique := map[string]struct{}{}
+	unique := map[string]*v2.Resource{}
 	for _, resource := range resources {
-		unique[resource.GetId().GetResource()] = struct{}{}
+		unique[resource.GetId().GetResource()] = resource
 	}
-	t.Logf("resources emitted=%d unique=%d routing=%d catalog pages read=%d", len(resources), len(unique), f.routing, f.catalogPages)
 	if len(unique) != 150 {
 		t.Fatalf("unique catalogs = %d, want 150", len(unique))
 	}
-	if f.routing != 1 {
-		t.Errorf("routing rebuilt %d times, want once per metastore", f.routing)
+	if f.routed != 1 {
+		t.Errorf("the route was resolved %d times, want once per metastore", f.routed)
 	}
 	if want := 3 + 3; f.catalogPages != want {
 		t.Errorf("catalog pages read = %d, want %d (each workspace's pages once)", f.catalogPages, want)
 	}
-}
 
-// An ISOLATED catalog is listed only by the workspaces bound to it, so every usable
-// workspace has to be asked, and the catalog has to keep the workspace that lists it.
-func TestCatalogsAreUnionedAcrossTheWorkspacesThatListThem(t *testing.T) {
-	f := &fakeCatalogAccount{
-		attached: []int{1, 2},
-		listed: map[string][]map[string]any{
-			"wsa": {catalogEntry("shared", "someone"), catalogEntry("only_a", "someone")},
-			"wsb": {catalogEntry("shared", "someone"), catalogEntry("only_b", "someone")},
-		},
+	// The resource id keys the catalog by its metastore, and the profile carries
+	// the workspace Grants and Grant/Revoke are addressed to.
+	first, ok := unique["ms-1::shared_000"]
+	if !ok {
+		t.Fatalf("no resource with id ms-1::shared_000")
 	}
-	b := newFakeCatalogBuilder(t, f, nil)
-
-	snap, _, err := b.uc.buildRouting(context.Background())
-	if err != nil {
-		t.Fatalf("buildRouting: %v", err)
+	if first.GetDisplayName() != "shared_000" {
+		t.Errorf("display name = %q, want shared_000", first.GetDisplayName())
 	}
-	facts, state, _, err := b.uc.catalogsOf(context.Background(), snap, "ms-1")
-	if err != nil || state != securableInScope {
-		t.Fatalf("catalogsOf = %v, %v", state, err)
-	}
-
-	want := map[string][]string{"shared": {"wsa", "wsb"}, "only_a": {"wsa"}, "only_b": {"wsb"}}
-	for name, workspaces := range want {
-		if got := facts[name].workspaces; !slices.Equal(got, workspaces) {
-			t.Errorf("catalog %s is listed by %v, want %v", name, got, workspaces)
+	profile := rs.GetProfile(first)
+	for key, want := range map[string]string{
+		profileKeyMetastoreID: "ms-1", profileKeyFullName: "shared_000", profileKeyCatalogName: "shared_000",
+		profileKeyOwner: "someone", profileKeySecurableType: securableTypeCatalog,
+		// Grants reads the metastore's owner off the profile, so List writes it down.
+		profileKeyMetastoreOwner: "eng",
+	} {
+		if got, _ := rs.GetProfileStringValue(profile, key); got != want {
+			t.Errorf("profile[%s] = %q, want %q", key, got, want)
 		}
 	}
+	// A catalog both workspaces list keeps whichever one emitted it last.
+	workspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
+	if workspace != "wsa" && workspace != "wsb" {
+		t.Errorf("profile[%s] = %q, want a workspace that lists the catalog", profileKeyWorkspace, workspace)
+	}
+	if only, ok := unique["ms-1::only_b_000"]; ok {
+		if got, _ := rs.GetProfileStringValue(rs.GetProfile(only), profileKeyWorkspace); got != "wsb" {
+			t.Errorf("a catalog only wsb lists is routed through %q, want wsb", got)
+		}
+	} else {
+		t.Error("the catalog only wsb lists was not emitted")
+	}
 }
 
-// Leaving a workspace out of the sync is the operator scoping its content out.
-// A catalog only that workspace lists is not synced, the same rule as a metastore.
-func TestACatalogOnlyAnOutOfScopeWorkspaceListsIsNotSynced(t *testing.T) {
+// Leaving a workspace out of the sync is the operator scoping its content out,
+// so a catalog only that workspace lists is not synced.
+func TestCatalogListSkipsAWorkspaceTheAllowlistLeavesOut(t *testing.T) {
 	f := &fakeCatalogAccount{
-		metastoreOwner: "app-1",
-		attached:       []int{1, 2},
+		attached: []int{1, 2},
 		listed: map[string][]map[string]any{
 			"wsa": {catalogEntry("main", "someone")},
 			"wsb": {catalogEntry("isolated_dev", "someone")},
 		},
 	}
-	b := newFakeCatalogBuilder(t, f, []string{"prod"})
+	b := newTestCatalogBuilder(t, f, []string{"prod"}, syncPrincipals{})
 
 	resources, err := listAllCatalogs(t, b)
 	if err != nil {
@@ -539,232 +332,359 @@ func TestACatalogOnlyAnOutOfScopeWorkspaceListsIsNotSynced(t *testing.T) {
 	}
 }
 
-// A workspace whose catalog listing is refused leaves the catalog set unknown.
-// Emitting what the other workspaces list would read as deleting the rest.
-func TestAnUnreadableCatalogListingFailsInsteadOfEmittingAShortList(t *testing.T) {
-	f := &fakeCatalogAccount{
-		attached: []int{1, 2},
-		listed:   map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
-		listStatus: map[string]int{
-			"wsb": http.StatusForbidden,
-		},
-	}
-	b := newFakeCatalogBuilder(t, f, nil)
+// Which workspaces serve the metastore decides which catalogs are in scope, so an
+// assignment list the connector cannot read is unknown, not empty. Listing no
+// catalogs would make ConductorOne delete the metastore's whole subtree.
+func TestCatalogListFailsWhenTheAssignmentListCannotBeRead(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusForbidden} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			f := &fakeCatalogAccount{attached: []int{1}, attachedStatus: code}
+			b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
 
-	_, err := listAllCatalogs(t, b)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("List = %v, want FailedPrecondition", err)
-	}
-}
-
-// Databricks shows a catalog's full grant list only to the metastore admin, the
-// owner, or a holder of MANAGE. Anyone else gets their own grants with a 200.
-func TestCatalogGrantsNeedOwnershipOrManage(t *testing.T) {
-	tests := []struct {
-		name           string
-		metastoreOwner string
-		catalogOwner   string
-		manage         bool
-		wantCode       codes.Code
-	}{
-		{"metastore owner", "app-1", "someone", false, codes.OK},
-		{"catalog owner", "someone", "app-1", false, codes.OK},
-		{"MANAGE on the catalog", "someone", "someone", true, codes.OK},
-		{"none of them", "someone", "someone", false, codes.PermissionDenied},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := &fakeCatalogAccount{
-				metastoreOwner: test.metastoreOwner,
-				attached:       []int{1},
-				listed:         map[string][]map[string]any{"wsa": {catalogEntry("main", test.catalogOwner)}},
-				manage:         map[string]bool{"main": test.manage},
+			resources, err := listAllCatalogs(t, b)
+			if err == nil {
+				t.Fatalf("List returned %d resources and no error, want the sync to fail", len(resources))
 			}
-			b := newFakeCatalogBuilder(t, f, nil)
-
-			resource := &v2.Resource{Id: &v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: "ms-1::main"}}
-			_, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{})
-			if got := status.Code(err); got != test.wantCode {
-				t.Fatalf("Grants = %v, want %s", err, test.wantCode)
-			}
-			if test.wantCode == codes.PermissionDenied && !strings.Contains(err.Error(), "MANAGE") {
-				t.Errorf("error %q does not name the alternatives", err)
+			if !strings.Contains(err.Error(), "ms-1") {
+				t.Errorf("error %q does not name the metastore", err)
 			}
 		})
 	}
 }
 
-// A catalog the connector cannot fully read is left out of the sync. Emitting it
-// with the partial grant list would read as revoking every grant it cannot see.
-func TestACatalogWithoutFullGrantVisibilityIsNotSynced(t *testing.T) {
-	f := &fakeCatalogAccount{
-		metastoreOwner: "someone",
-		attached:       []int{1},
-		listed:         map[string][]map[string]any{"wsa": {catalogEntry("hidden", "someone")}},
-	}
-	b := newFakeCatalogBuilder(t, f, nil)
+// A workspace that refuses the catalog listing leaves the catalog set unknown.
+// Emitting what the other workspaces list would read as deleting the rest.
+func TestCatalogListFailsInsteadOfEmittingAShortList(t *testing.T) {
+	// A refusal is reported as FailedPrecondition rather than NotFound, which
+	// the SDK would read as the page being empty.
+	for code, want := range map[int]codes.Code{
+		http.StatusForbidden:           codes.FailedPrecondition,
+		http.StatusNotFound:            codes.FailedPrecondition,
+		http.StatusInternalServerError: codes.Unavailable,
+	} {
+		f := &fakeCatalogAccount{
+			attached:   []int{1, 2},
+			listed:     map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
+			listStatus: map[string]int{"wsb": code},
+		}
+		b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
 
-	resources, err := listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(resources) != 0 {
-		t.Fatalf("listed %d catalogs, want none", len(resources))
+		_, err := listAllCatalogs(t, b)
+		if err == nil {
+			t.Errorf("List over a workspace answering %d succeeded", code)
+			continue
+		}
+		if got := status.Code(err); got != want {
+			t.Errorf("List over a workspace answering %d = %v, want %s", code, err, want)
+		}
 	}
 }
 
-// A direct Admin of a workspace sees every grant on a catalog that workspace's
-// admins group owns. Admin of a different workspace does not.
-func TestWorkspaceAdminsGroupOwnershipTrustsADirectAdmin(t *testing.T) {
+// A group's privilege is expandable to its members; the owner's is immutable and
+// emitted only with the first page; a principal type the sync leaves out and a
+// privilege the catalog does not offer are not emitted.
+func TestCatalogGrants(t *testing.T) {
 	f := &fakeCatalogAccount{
-		metastoreOwner:  "someone",
-		attached:        []int{1},
-		listed:          map[string][]map[string]any{"wsa": {catalogEntry("main", "_workspace_admins_prod_1")}},
-		workspaceAdmins: map[string]bool{"1": true},
+		users:  map[string]string{"1": "alice@example.com"},
+		groups: map[string]string{"11": "data-eng"},
+		assignments: map[string][]map[string]any{"main": {
+			{"principal": "data-eng", "principal_id": 11, "privileges": []string{"USE_CATALOG", "NOT_A_PRIVILEGE"}},
+			{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"SELECT"}},
+		}},
 	}
-	b := newFakeCatalogBuilder(t, f, nil)
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{groups: true})
+	resource := testCatalog(t, "main", "alice@example.com", "wsa")
 
-	resources, err := listAllCatalogs(t, b)
+	grants, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{})
 	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(resources) != 1 || resources[0].GetDisplayName() != "main" {
-		t.Fatalf("listed %v, want main", resources)
-	}
-
-	f.workspaceAdmins = nil
-	b = newFakeCatalogBuilder(t, f, nil)
-	resources, err = listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List without admin: %v", err)
-	}
-	if len(resources) != 0 {
-		t.Fatalf("listed %d catalogs without workspace Admin, want none", len(resources))
-	}
-}
-
-// The workspace written on the catalog profile spares Grants the routing rebuild.
-func TestCatalogGrantsReadThroughTheProfileWorkspace(t *testing.T) {
-	f := &fakeCatalogAccount{metastoreOwner: "app-1", attached: []int{1}}
-	b := newFakeCatalogBuilder(t, f, nil)
-
-	ref := securableRef{metastoreID: "ms-1", parts: []string{"main"}}
-	resource, err := newSecurableResource(catalogResourceType, securableTypeCatalog, nil, securable{
-		name: "main",
-		profile: map[string]any{
-			profileKeyMetastoreOwner: "app-1",
-			profileKeyWorkspace:      "wsa",
-			profileKeyWorkspaceID:    "1",
-			profileKeyWorkspaceName:  "prod",
-		},
-	}, ref, &v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms-1"})
-	if err != nil {
-		t.Fatalf("newSecurableResource: %v", err)
-	}
-
-	if _, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{}); err != nil {
 		t.Fatalf("Grants: %v", err)
 	}
-	if f.routing != 0 {
-		t.Errorf("routing was rebuilt %d time(s) despite a usable profile workspace", f.routing)
+
+	group := "account/" + testAccountId + "/group/11"
+	want := []string{
+		"1 catalog:ms-1::main:SELECT",
+		"1 catalog:ms-1::main:owner",
+		group + " catalog:ms-1::main:USE_CATALOG",
 	}
-	if !slices.Equal(f.permissionsHosts, []string{"wsa"}) {
-		t.Errorf("permissions read through %v, want [wsa]", f.permissionsHosts)
+	slices.Sort(want)
+	if got := grantKeys(grants); !slices.Equal(got, want) {
+		t.Fatalf("grants = %v, want %v", got, want)
+	}
+	if !slices.Equal(f.permHosts, []string{"wsa"}) {
+		t.Errorf("permissions read through %v, want [wsa]", f.permHosts)
+	}
+
+	for _, g := range grants {
+		annos := annotations.Annotations(g.GetAnnotations())
+		switch {
+		case strings.HasSuffix(g.GetEntitlement().GetId(), ":owner"):
+			if !annos.Contains(&v2.GrantImmutable{}) {
+				t.Error("the owner grant is not immutable")
+			}
+		case g.GetPrincipal().GetId().GetResourceType() == groupResourceType.Id:
+			expandable := &v2.GrantExpandable{}
+			if ok, err := annos.Pick(expandable); err != nil || !ok {
+				t.Fatalf("the group's grant is not expandable (err %v)", err)
+			}
+			if len(expandable.GetEntitlementIds()) != 1 ||
+				!strings.HasSuffix(expandable.GetEntitlementIds()[0], ":"+groupMemberEntitlement) || expandable.GetShallow() {
+				t.Errorf("GrantExpandable = %v, want the group's member entitlement, not shallow", expandable)
+			}
+		}
+	}
+
+	next, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{PageToken: pagination.Token{Token: "page-2"}})
+	if err != nil {
+		t.Fatalf("Grants page 2: %v", err)
+	}
+	for _, g := range next {
+		if strings.HasSuffix(g.GetEntitlement().GetId(), ":owner") {
+			t.Error("the owner grant was emitted again on a later page")
+		}
 	}
 }
 
-// A catalog no in-scope workspace lists is either deleted or bound only to
-// workspaces outside the sync. Revoke reports it gone only when include_unbound,
-// read by the metastore owner, proves it; otherwise the privilege may still be held.
-func TestRevokeOnAnUnlistedCatalogNeedsProofOfDeletion(t *testing.T) {
-	tests := []struct {
-		name           string
-		metastoreOwner string
-		unbound        []map[string]any
-		wantCode       codes.Code
-		wantRevoked    bool
-	}{
-		{"owner sees it is gone", "app-1", nil, codes.OK, true},
-		{"owner sees it bound elsewhere", "app-1", []map[string]any{catalogEntry("isolated", "someone")}, codes.FailedPrecondition, false},
-		{"not the owner, cannot tell", "someone", nil, codes.FailedPrecondition, false},
+// A permissions read that fails is never an absence: returning no grants would
+// revoke every privilege on the catalog in ConductorOne, and NotFound is what
+// the SDK reads as "no grants".
+func TestCatalogGrantsFailOnErrors(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusForbidden, http.StatusInternalServerError} {
+		f := &fakeCatalogAccount{permStatus: code}
+		b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+
+		_, _, err := b.Grants(context.Background(), testCatalog(t, "main", "", "wsa"), rs.SyncOpAttrs{})
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Errorf("Grants on %d = %v, want FailedPrecondition", code, err)
+		}
+	}
+}
+
+// Databricks answers an under-permissioned read of a catalog's privileges with
+// 200 and only the rows the caller may see, which is indistinguishable from a
+// catalog nobody holds a privilege on. The sync reports them only when it can
+// prove it reads all of them, and fails on a catalog it cannot prove rather than
+// dropping it: a dropped catalog takes its whole subtree out of ConductorOne.
+func TestCatalogGrantsRequireFullVisibility(t *testing.T) {
+	adminOfTheWorkspace := []map[string]any{
+		{"principal": map[string]any{"service_principal_name": "app-9"}, "permissions": []string{"ADMIN"}},
+	}
+	// The principal filter answers with the group the privilege is inherited
+	// through, so the row names the group and not the connector's principal.
+	manageThroughAGroup := []map[string]any{
+		{"principal": "data-eng", "principal_id": 11, "privileges": []string{"MANAGE"}},
+	}
+	allPrivileges := []map[string]any{
+		{"principal": "app-9", "principal_id": 3, "privileges": []string{"ALL_PRIVILEGES"}},
 	}
 
+	tests := []struct {
+		name              string
+		clientID          string
+		metastoreOwner    string
+		catalogOwner      string
+		members           any
+		ownPrivileges     []map[string]any
+		wantGrants        bool
+		wantMemberLists   int
+		wantFilteredReads int
+	}{
+		{
+			name: "owner of the metastore", clientID: "eng",
+			metastoreOwner: "eng", catalogOwner: "someone",
+			wantGrants: true,
+		},
+		{
+			name: "owner of the catalog", clientID: "app-9",
+			metastoreOwner: "eng", catalogOwner: "app-9",
+			wantGrants: true,
+		},
+		{
+			name: "manage inherited through a group", clientID: "app-9",
+			metastoreOwner: "eng", catalogOwner: "someone", ownPrivileges: manageThroughAGroup,
+			wantGrants: true, wantFilteredReads: 1,
+		},
+		{
+			name: "admin of the workspace whose admins group owns the catalog", clientID: "app-9",
+			metastoreOwner: "eng", catalogOwner: "_workspace_admins_prod_1", members: adminOfTheWorkspace,
+			wantGrants: true, wantMemberLists: 1,
+		},
+		{
+			// The admins group of another workspace is not this read's authority,
+			// so the name has to end in the id of the workspace it goes through.
+			name: "admins group of another workspace owns the catalog", clientID: "app-9",
+			metastoreOwner: "eng", catalogOwner: "_workspace_admins_dev_2", members: adminOfTheWorkspace,
+			wantGrants: false, wantFilteredReads: 1,
+		},
+		{
+			// Databricks leaves MANAGE out of ALL_PRIVILEGES, so its holder still
+			// reads a partial list.
+			name: "all privileges without manage", clientID: "app-9",
+			metastoreOwner: "eng", catalogOwner: "someone", ownPrivileges: allPrivileges,
+			wantGrants: false, wantFilteredReads: 1,
+		},
+		{
+			name: "none of them", clientID: "app-9",
+			metastoreOwner: "eng", catalogOwner: "someone",
+			wantGrants: false, wantFilteredReads: 1,
+		},
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			f := &fakeCatalogAccount{
-				metastoreOwner: test.metastoreOwner,
-				attached:       []int{1},
-				listed:         map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
-				unbound:        test.unbound,
+				users:            map[string]string{"1": "alice@example.com"},
+				workspaceMembers: map[string]any{"1": test.members},
+				ownPrivileges:    test.ownPrivileges,
+				assignments: map[string][]map[string]any{"main": {
+					{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"SELECT"}},
+				}},
 			}
-			b := newFakeCatalogBuilder(t, f, nil)
+			b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, test.clientID)
+			resource := testCatalogOf(t, "main", test.catalogOwner, test.metastoreOwner, "wsa")
 
-			catalog := &v2.Resource{Id: &v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: "ms-1::isolated"}}
-			principal := &v2.Resource{Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "1"}}
-			annos, err := b.Revoke(context.Background(), grant.NewGrant(catalog, "USE_CATALOG", principal.GetId()))
-			if got := status.Code(err); got != test.wantCode {
-				t.Fatalf("Revoke = %v, want %s", err, test.wantCode)
+			grants, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{})
+			switch {
+			case test.wantGrants && err != nil:
+				t.Fatalf("Grants: %v", err)
+			case test.wantGrants && len(grants) == 0:
+				t.Fatal("Grants returned nothing, want the privileges on the catalog")
+			case !test.wantGrants:
+				if status.Code(err) != codes.PermissionDenied {
+					t.Fatalf("Grants = %v, want PermissionDenied", err)
+				}
+				if len(grants) != 0 {
+					t.Errorf("grants = %v, want none", grantKeys(grants))
+				}
+				if !strings.Contains(err.Error(), "main") || !strings.Contains(err.Error(), catalogTrustRemedy) {
+					t.Errorf("error %q does not name the catalog and the remedy", err)
+				}
 			}
-			if got := annos.Contains(&v2.GrantAlreadyRevoked{}); got != test.wantRevoked {
-				t.Errorf("GrantAlreadyRevoked = %v, want %v", got, test.wantRevoked)
+			if len(f.memberLists) != test.wantMemberLists {
+				t.Errorf("workspace assignments listed %d times, want %d", len(f.memberLists), test.wantMemberLists)
 			}
-			if f.patches != 0 {
-				t.Errorf("Revoke sent %d PATCH(es) for a catalog it could not reach", f.patches)
+			if len(f.filteredReads) != test.wantFilteredReads {
+				t.Errorf("own privileges read %d times, want %d", len(f.filteredReads), test.wantFilteredReads)
 			}
 		})
 	}
 }
 
-// Catalog names repeat across metastores, and the permissions path is the same on
-// every workspace host, so a cache shared between hosts would hand one metastore's
-// grants to another.
-func TestSameNamedCatalogsInTwoMetastoresDoNotShareGrants(t *testing.T) {
-	client, router := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
-		workspace := r.Header.Get("X-Test-Workspace")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"privilege_assignments": []map[string]any{{
-				"principal":  "analyst_of_" + workspace,
-				"privileges": []string{"SELECT"},
-			}},
+// A privilege list the connector cannot fully read cannot be written to either:
+// the change would be decided from the subset Databricks chose to show.
+func TestCatalogProvisioningRefusesAPartialPrivilegeList(t *testing.T) {
+	for _, verb := range []string{"grant", "revoke"} {
+		t.Run(verb, func(t *testing.T) {
+			f := catalogProvisioningAccount()
+			f.assignments["main"] = []map[string]any{
+				{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"USE_CATALOG"}},
+			}
+			b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+			g := grant.NewGrant(testCatalogOf(t, "main", "someone", "eng", "wsa"), "USE_CATALOG", alice.GetId())
+
+			var err error
+			if verb == "grant" {
+				_, err = b.Grant(context.Background(), alice, g.GetEntitlement())
+			} else {
+				_, err = b.Revoke(context.Background(), g)
+			}
+			if status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("%s = %v, want PermissionDenied", verb, err)
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
 		})
-	})
-
-	ctx := context.Background()
-	for _, workspace := range []string{"wsa", "wsb"} {
-		assignments, _, _, err := client.ListPermissions(ctx, workspace, databricks.SecurableCatalog, "main", "", "")
-		if err != nil {
-			t.Fatalf("ListPermissions through %s: %v", workspace, err)
-		}
-
-		if router.hits[workspace] == 0 {
-			t.Errorf("workspace %s was never asked for the grants on main; hits = %v", workspace, router.hits)
-		}
-		if len(assignments) != 1 {
-			t.Fatalf("workspace %s returned %d assignments, want 1", workspace, len(assignments))
-		}
-
-		want := "analyst_of_" + workspace
-		if got := assignments[0].Principal; got != want {
-			t.Errorf("catalog main through %s is held by %s, want %s: a grant crossed between metastores", workspace, got, want)
-		}
 	}
 }
 
-func TestHoldsManageIgnoresAllPrivileges(t *testing.T) {
-	t.Parallel()
-
-	if holdsManage([]databricks.PrivilegeAssignment{{
-		Principal:  "sp",
-		Privileges: []string{privilegeAllPrivileges, "SELECT"},
-	}}) {
-		t.Fatal("ALL_PRIVILEGES must not count as full grant visibility")
+func catalogProvisioningAccount() *fakeCatalogAccount {
+	return &fakeCatalogAccount{
+		attached:    []int{1},
+		listed:      map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
+		users:       map[string]string{"1": "alice@example.com"},
+		assignments: map[string][]map[string]any{},
 	}
-	if !holdsManage([]databricks.PrivilegeAssignment{{
-		Principal:  "group",
-		Privileges: []string{privilegeManage},
-	}}) {
-		t.Fatal("MANAGE must count as full grant visibility")
+}
+
+// Databricks no-ops a privilege already held, so the pre-read is the only signal
+// for GrantAlreadyExists and the echo is the only proof the PATCH landed.
+func TestCatalogGrantAddsThePrivilegeOnceAndConfirmsIt(t *testing.T) {
+	f := catalogProvisioningAccount()
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+	entitlement := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId()).GetEntitlement()
+
+	annos, err := b.Grant(context.Background(), alice, entitlement)
+	if err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if annos.Contains(&v2.GrantAlreadyExists{}) {
+		t.Error("a fresh grant reported GrantAlreadyExists")
+	}
+	if len(f.patches) != 1 || f.patches[0]["principal"] != "alice@example.com" {
+		t.Fatalf("patches = %v, want one add for alice@example.com", f.patches)
+	}
+
+	annos, err = b.Grant(context.Background(), alice, entitlement)
+	if err != nil || !annos.Contains(&v2.GrantAlreadyExists{}) {
+		t.Fatalf("second Grant = %v, %v; want GrantAlreadyExists", annos, err)
+	}
+	if len(f.patches) != 1 {
+		t.Errorf("a held privilege was patched again: %v", f.patches)
+	}
+}
+
+// A principal that is gone from SCIM still carries its numeric id on the row, so
+// the removal goes by principal_id; an absent privilege is already revoked.
+func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
+	f := catalogProvisioningAccount()
+	f.assignments["main"] = []map[string]any{{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"USE_CATALOG"}}}
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+	g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
+
+	annos, err := b.Revoke(context.Background(), g)
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Error("revoking a held privilege reported GrantAlreadyRevoked")
+	}
+	if len(f.patches) != 1 || fmt.Sprint(f.patches[0]["principal_id"]) != "1" {
+		t.Fatalf("patches = %v, want one removal by principal_id 1", f.patches)
+	}
+
+	annos, err = b.Revoke(context.Background(), g)
+	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+}
+
+func TestCatalogGrantRejections(t *testing.T) {
+	tests := []struct {
+		name        string
+		workspace   string
+		privilege   string
+		patchStatus int
+		code        codes.Code
+	}{
+		{"owner", "wsa", ownerEntitlement, 0, codes.InvalidArgument},
+		{"legacy alias", "wsa", "USAGE", 0, codes.InvalidArgument},
+		{"not offered", "wsa", "CREATE_CATALOG", 0, codes.InvalidArgument},
+		{"no workspace on the profile", "", "USE_CATALOG", 0, codes.FailedPrecondition},
+		{"forbidden", "wsa", "USE_CATALOG", http.StatusForbidden, codes.PermissionDenied},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := catalogProvisioningAccount()
+			f.patchStatus = test.patchStatus
+			b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+			g := grant.NewGrant(testCatalog(t, "main", "someone", test.workspace), test.privilege, alice.GetId())
+
+			_, err := b.Grant(context.Background(), alice, g.GetEntitlement())
+			if status.Code(err) != test.code {
+				t.Fatalf("Grant = %v, want %s", err, test.code)
+			}
+			if test.code == codes.PermissionDenied && !strings.Contains(err.Error(), catalogWriteRemedy) {
+				t.Errorf("error %q does not name the remedy", err)
+			}
+		})
 	}
 }

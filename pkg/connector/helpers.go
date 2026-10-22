@@ -11,7 +11,6 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
-	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -36,20 +35,6 @@ func parseResourceId(resourceId string) (*v2.ResourceId, *v2.ResourceId, error) 
 	}
 
 	return nil, nil, fmt.Errorf("invalid resource ID: %s", resourceId)
-}
-
-// groupSecurableGrantOptions annotates a group-held Unity Catalog grant so C1
-// expands it through the group's member entitlement. Shallow stays unset:
-// setting it would suppress propagation through a nested group.
-func groupSecurableGrantOptions(principalId *v2.ResourceId) []grant.GrantOption {
-	if principalId.GetResourceType() != groupResourceType.Id {
-		return nil
-	}
-
-	return []grant.GrantOption{grant.WithAnnotation(&v2.GrantExpandable{
-		EntitlementIds:  []string{fmt.Sprintf("group:%s:%s", principalId.GetResource(), groupMemberEntitlement)},
-		ResourceTypeIds: []string{userResourceType.Id, groupResourceType.Id, servicePrincipalResourceType.Id},
-	})}
 }
 
 func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2.ResourceId) (*v2.ResourceId, *v2.GrantExpandable, error) {
@@ -247,79 +232,6 @@ func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, enti
 func isNotFoundError(err error) bool {
 	var apiErr *databricks.APIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
-}
-
-// isRejectedFilter reports a SCIM filter Databricks refused. A quoted value
-// should not hit this; when it does, the owner stays unresolved instead of
-// failing the sync.
-func isRejectedFilter(err error) bool {
-	var apiErr *databricks.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest
-}
-
-func isForbiddenError(err error) bool {
-	var apiErr *databricks.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
-}
-
-func isRateLimitError(err error) bool {
-	var apiErr *databricks.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests
-}
-
-// isUnreadableWorkspaceError reports an answer that says this credential cannot
-// read this workspace, not a fact about the account. Only codes.NotFound is a
-// warning to the SDK; any other code fails the whole sync.
-func isUnreadableWorkspaceError(err error) bool {
-	var apiErr *databricks.APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-
-	switch apiErr.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return true
-	default:
-		return false
-	}
-}
-
-// A privilege assignment carries the numeric SCIM id in principal_id, which is the
-// only handle left on a principal that no longer resolves to a name.
-func unityPrincipalScimID(principal *v2.ResourceId) (string, error) {
-	if principal.GetResourceType() != groupResourceType.Id {
-		return principal.GetResource(), nil
-	}
-
-	_, parsed, err := parseResourceId(principal.GetResource())
-	if err != nil {
-		return "", fmt.Errorf("failed to parse group resource id: %w", err)
-	}
-
-	return parsed.GetResource(), nil
-}
-
-// One `principal` field carries a user's userName, a group's displayName or a service
-// principal's applicationId. The second result is false when nothing resolves it,
-// which is not an error: a deleted principal keeps its grants and is addressable
-// only by principal_id.
-func unityPrincipalName(ctx context.Context, c *databricks.Client, principal *v2.ResourceId) (string, bool, error) {
-	principalId, err := unityPrincipalScimID(principal)
-	if err != nil {
-		return "", false, err
-	}
-
-	qualified, err := preparePrincipalId(ctx, c, "", principal.GetResourceType(), principalId)
-	if err != nil {
-		return "", false, err
-	}
-
-	_, name, ok := strings.Cut(qualified, "/")
-	if !ok || name == "" {
-		return "", false, nil
-	}
-
-	return name, true, nil
 }
 
 func prepareWorkspaceRole(entitlement string) string {

@@ -87,7 +87,10 @@ func TestResourceSyncersAlwaysRegisterTheUnityCatalogBuilders(t *testing.T) {
 	for _, syncer := range d.ResourceSyncers(ctx) {
 		registered = append(registered, syncer.ResourceType(ctx).GetId())
 	}
-	for _, want := range []string{metastoreResourceType.Id, catalogResourceType.Id} {
+	for _, want := range []string{
+		metastoreResourceType.Id, catalogResourceType.Id, schemaResourceType.Id,
+		tableResourceType.Id, volumeResourceType.Id,
+	} {
 		if !slices.Contains(registered, want) {
 			t.Errorf("registered syncers = %v, want them to include %s", registered, want)
 		}

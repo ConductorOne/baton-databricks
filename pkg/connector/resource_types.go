@@ -106,6 +106,8 @@ var (
 		Id:          "table",
 		DisplayName: "Table",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
+		// Not static: the privilege set and which of them are requestable follow
+		// table_type, so the entitlements are built per table.
 		Annotations: annotationsForSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
 	}
 
