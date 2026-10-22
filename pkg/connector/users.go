@@ -241,9 +241,14 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 			databricks.NewFilterVars(fmt.Sprintf("userName eq '%s'", body.UserName)),
 			databricks.NewUserAttrVars(),
 		)
+		// A failed lookup is reported with the create error, so it can be told
+		// apart from a 409 that has no matching user.
+		if lookupErr != nil {
+			return nil, nil, nil, fmt.Errorf("%w (existing-user lookup failed: %w)", createErr, lookupErr)
+		}
 		// The filter is not escaped, so accept only the user whose userName
 		// matches; Databricks compares userNames case-insensitively.
-		if lookupErr != nil || len(users) == 0 || !strings.EqualFold(users[0].UserName, body.UserName) {
+		if len(users) == 0 || !strings.EqualFold(users[0].UserName, body.UserName) {
 			return nil, nil, nil, createErr
 		}
 		resource, err := o.userResource(ctx, &users[0], parentResourceId)

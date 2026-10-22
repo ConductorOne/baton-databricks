@@ -14,6 +14,8 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -209,9 +211,11 @@ func TestCreateAccountNonStringProfileValues(t *testing.T) {
 }
 
 // createConflictServer answers POST with createStatus and the filtered
-// userName lookup with lookupBody, counting both.
+// userName lookup with lookupBody, or with lookupStatus when it is set,
+// counting both.
 type createConflictServer struct {
 	createStatus int
+	lookupStatus int
 	lookupBody   string
 	posts        int
 	lookups      int
@@ -228,6 +232,11 @@ func (s *createConflictServer) handle(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.lookups++
 		s.lookupFilter = r.URL.Query().Get("filter")
+		if s.lookupStatus != 0 {
+			w.WriteHeader(s.lookupStatus)
+			fmt.Fprintf(w, `{"detail":"error %d","status":"%d"}`, s.lookupStatus, s.lookupStatus)
+			return
+		}
 		fmt.Fprint(w, s.lookupBody)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -290,6 +299,39 @@ func TestCreateAccountConflictWithoutExistingUserErrors(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), "baton-databricks: failed to create user:") {
 		t.Fatalf("CreateAccount error = %v, want the wrapped create error", err)
 	}
+	if strings.Contains(err.Error(), "existing-user lookup failed") {
+		t.Errorf("CreateAccount error = %v, want no lookup failure note", err)
+	}
+	if srv.posts != 1 || srv.lookups != 1 {
+		t.Errorf("posts = %d, lookups = %d, want 1 and 1", srv.posts, srv.lookups)
+	}
+}
+
+// A 409 whose lookup itself fails reports the lookup failure with the create
+// error, which still resolves to AlreadyExists.
+func TestCreateAccountConflictWithFailedLookupReportsLookupError(t *testing.T) {
+	srv := &createConflictServer{
+		createStatus: http.StatusConflict,
+		lookupStatus: http.StatusInternalServerError,
+	}
+	b := newTestUserBuilder(t, srv.handle)
+
+	res, err := createAliceAccount(t, b)
+	if err == nil {
+		t.Fatalf("CreateAccount result = %T, want an error", res)
+	}
+	if res != nil {
+		t.Errorf("CreateAccount result = %T, want nil (no already-exists result)", res)
+	}
+	if !strings.Contains(err.Error(), "baton-databricks: failed to create user:") {
+		t.Errorf("CreateAccount error = %v, want the wrapped create error", err)
+	}
+	if !strings.Contains(err.Error(), "existing-user lookup failed") {
+		t.Errorf("CreateAccount error = %v, want the lookup failure note", err)
+	}
+	if got := status.Code(err); got != codes.AlreadyExists {
+		t.Errorf("status.Code(err) = %v, want %v", got, codes.AlreadyExists)
+	}
 	if srv.posts != 1 || srv.lookups != 1 {
 		t.Errorf("posts = %d, lookups = %d, want 1 and 1", srv.posts, srv.lookups)
 	}
@@ -311,6 +353,9 @@ func TestCreateAccountConflictWithDifferentUserNameErrors(t *testing.T) {
 	}
 	if res != nil {
 		t.Errorf("CreateAccount result = %T, want nil", res)
+	}
+	if strings.Contains(err.Error(), "existing-user lookup failed") {
+		t.Errorf("CreateAccount error = %v, want no lookup failure note", err)
 	}
 	if srv.posts != 1 || srv.lookups != 1 {
 		t.Errorf("posts = %d, lookups = %d, want 1 and 1", srv.posts, srv.lookups)
