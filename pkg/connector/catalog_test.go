@@ -240,10 +240,10 @@ func listAllCatalogs(t *testing.T, b *catalogBuilder) ([]*v2.Resource, error) {
 	return nil, nil
 }
 
-// A catalog bound to a subset of the workspaces is listed only by the ones it is
-// bound to, so every usable workspace is asked. Paging per workspace reads each
-// API page once and resolves the route once per metastore.
-func TestCatalogListPagesEachWorkspaceOnceAndUnionsThem(t *testing.T) {
+// Catalogs are read through the one workspace the metastore route picked, the
+// first running one. A catalog listed only by another workspace is outside that
+// path. Paging reads that workspace's pages once and resolves the route once.
+func TestCatalogListReadsTheFirstWorkspaceOnce(t *testing.T) {
 	shared := manyCatalogs("shared", 120)
 	f := &fakeCatalogAccount{
 		attached: []int{1, 2},
@@ -263,14 +263,14 @@ func TestCatalogListPagesEachWorkspaceOnceAndUnionsThem(t *testing.T) {
 	for _, resource := range resources {
 		unique[resource.GetId().GetResource()] = resource
 	}
-	if len(unique) != 150 {
-		t.Fatalf("unique catalogs = %d, want 150", len(unique))
+	if len(unique) != 120 {
+		t.Fatalf("unique catalogs = %d, want the 120 listed by the first workspace", len(unique))
 	}
 	if f.routed != 1 {
 		t.Errorf("the route was resolved %d times, want once per metastore", f.routed)
 	}
-	if want := 3 + 3; f.catalogPages != want {
-		t.Errorf("catalog pages read = %d, want %d (each workspace's pages once)", f.catalogPages, want)
+	if want := 3; f.catalogPages != want {
+		t.Errorf("catalog pages read = %d, want %d (the first workspace's pages once)", f.catalogPages, want)
 	}
 
 	// The resource id keys the catalog by its metastore, and the profile carries
@@ -293,17 +293,10 @@ func TestCatalogListPagesEachWorkspaceOnceAndUnionsThem(t *testing.T) {
 			t.Errorf("profile[%s] = %q, want %q", key, got, want)
 		}
 	}
-	// A catalog both workspaces list keeps whichever one emitted it last.
+	// Grants reads the workspace the route picked.
 	workspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
-	if workspace != "wsa" && workspace != "wsb" {
-		t.Errorf("profile[%s] = %q, want a workspace that lists the catalog", profileKeyWorkspace, workspace)
-	}
-	if only, ok := unique["ms-1::only_b_000"]; ok {
-		if got, _ := rs.GetProfileStringValue(rs.GetProfile(only), profileKeyWorkspace); got != "wsb" {
-			t.Errorf("a catalog only wsb lists is routed through %q, want wsb", got)
-		}
-	} else {
-		t.Error("the catalog only wsb lists was not emitted")
+	if workspace != "wsa" {
+		t.Errorf("profile[%s] = %q, want wsa", profileKeyWorkspace, workspace)
 	}
 }
 
@@ -352,8 +345,8 @@ func TestCatalogListFailsWhenTheAssignmentListCannotBeRead(t *testing.T) {
 	}
 }
 
-// A workspace that refuses the catalog listing leaves the catalog set unknown.
-// Emitting what the other workspaces list would read as deleting the rest.
+// The one workspace the route picked refusing the catalog listing leaves the
+// catalog set unknown. Emitting nothing would read as deleting every catalog.
 func TestCatalogListFailsInsteadOfEmittingAShortList(t *testing.T) {
 	// A refusal is reported as FailedPrecondition rather than NotFound, which
 	// the SDK would read as the page being empty.
@@ -363,9 +356,8 @@ func TestCatalogListFailsInsteadOfEmittingAShortList(t *testing.T) {
 		http.StatusInternalServerError: codes.Unavailable,
 	} {
 		f := &fakeCatalogAccount{
-			attached:   []int{1, 2},
-			listed:     map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
-			listStatus: map[string]int{"wsb": code},
+			attached:   []int{1},
+			listStatus: map[string]int{"wsa": code},
 		}
 		b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
 

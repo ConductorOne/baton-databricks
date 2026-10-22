@@ -191,10 +191,7 @@ type catalogRoute struct {
 	MetastoreOwner string `json:"o"`
 }
 
-// List walks a metastore's catalogs one workspace at a time. A catalog bound to
-// a subset of the workspaces is listed only by the ones it is bound to, so every
-// usable workspace has to be asked; a catalog several of them list is emitted
-// once per workspace and the SDK keeps one row per resource id.
+// List reads a metastore's catalogs through the one workspace the route picked.
 func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != metastoreResourceType.Id {
 		return nil, nil, nil
@@ -252,9 +249,10 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// pushRoute stacks one page state per usable workspace, in reverse so the first
-// one is read first. An empty stack means no workspace this sync can use serves
-// the metastore, which metastore List already settled by not emitting it.
+// pushRoute records the one workspace the catalogs are read through: the first
+// running workspace attached to the metastore. A catalog bound only to some
+// other workspace is outside that path. An empty stack means no workspace this
+// sync can use serves the metastore, which metastore List already settled.
 func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag *pagination.Bag, annos *annotations.Annotations) error {
 	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
 	if err != nil {
@@ -271,9 +269,13 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
 			metastoreID, err)
 	}
-	if len(usable) == 0 && inScope {
-		return status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+	if len(usable) == 0 {
+		if inScope {
+			return status.Errorf(codes.FailedPrecondition,
+				"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+		}
+
+		return nil
 	}
 
 	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
@@ -281,18 +283,17 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 		return err
 	}
 
-	for _, workspace := range slices.Backward(usable) {
-		encoded, err := json.Marshal(catalogRoute{
-			Workspace:      workspace.DeploymentName,
-			WorkspaceID:    strconv.Itoa(workspace.ID),
-			WorkspaceName:  workspace.Name,
-			MetastoreOwner: owner,
-		})
-		if err != nil {
-			return err
-		}
-		bag.Push(pagination.PageState{ResourceTypeID: catalogResourceType.Id, ResourceID: string(encoded)})
+	workspace := usable[0]
+	encoded, err := json.Marshal(catalogRoute{
+		Workspace:      workspace.DeploymentName,
+		WorkspaceID:    strconv.Itoa(workspace.ID),
+		WorkspaceName:  workspace.Name,
+		MetastoreOwner: owner,
+	})
+	if err != nil {
+		return err
 	}
+	bag.Push(pagination.PageState{ResourceTypeID: catalogResourceType.Id, ResourceID: string(encoded)})
 
 	return nil
 }
