@@ -244,6 +244,21 @@ func TestCreateAccountMissingRequiredProfileValues(t *testing.T) {
 			profile: map[string]interface{}{"email": "alice@example.com", "displayName": ""},
 			want:    "baton-databricks: displayName is required to create a user",
 		},
+		{
+			name:    "missing email is reported before a type error",
+			profile: map[string]interface{}{"displayName": "A", "givenName": 42},
+			want:    "baton-databricks: email field is required in profile",
+		},
+		{
+			name:    "present email that is not a string is a type error",
+			profile: map[string]interface{}{"email": 123, "displayName": "A"},
+			want:    "baton-databricks: email field must be a string",
+		},
+		{
+			name:    "empty profile",
+			profile: map[string]interface{}{},
+			want:    "baton-databricks: email field is required in profile",
+		},
 	}
 
 	for _, tc := range tests {

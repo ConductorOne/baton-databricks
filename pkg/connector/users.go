@@ -178,8 +178,16 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	profile := accountInfo.GetProfile()
 	body := &databricks.CreateUserBody{Active: true}
 
-	// A present value of any other type, null included, is rejected before
-	// any field is read.
+	// Required fields must be present. Presence is checked on the struct because
+	// the SDK helper returns false for a missing value and a non-string one alike.
+	for _, key := range []string{"email", "displayName"} {
+		if _, ok := profile.GetFields()[key]; !ok {
+			return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("baton-databricks: %s field is required in profile", key))
+		}
+	}
+
+	// A present value of any other type, null included, is rejected before any
+	// field is read.
 	for _, key := range []string{"email", "displayName", "givenName", "familyName", "id"} {
 		if _, ok := profile.GetFields()[key]; !ok {
 			continue
@@ -190,19 +198,13 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 	}
 
 	// Use email as userName since Databricks API expects email in userName field
-	email, ok := rs.GetProfileStringValue(profile, "email")
-	if !ok {
-		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: email field is required in profile")
-	}
+	email, _ := rs.GetProfileStringValue(profile, "email")
 	if email == "" {
 		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: email is required to create a user")
 	}
 	body.UserName = email
 
-	displayName, ok := rs.GetProfileStringValue(profile, "displayName")
-	if !ok {
-		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: displayName field is required in profile")
-	}
+	displayName, _ := rs.GetProfileStringValue(profile, "displayName")
 	if displayName == "" {
 		return nil, nil, nil, uhttp.WrapErrors(codes.InvalidArgument, "baton-databricks: displayName is required to create a user")
 	}
