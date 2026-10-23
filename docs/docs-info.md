@@ -58,4 +58,4 @@ While developing the connector, please fill out this form. This information is n
 - **No `MANAGE` or `ALL_PRIVILEGES` on a metastore.** Databricks rejects both, so they are not offered.
 - **Read through one running workspace.** Privileges are not served on the account plane. With no running workspace in scope, the metastore is not synced and ConductorOne removes it. A workspace that is still provisioning fails the sync until it is `RUNNING`. An unreadable assignment list fails the sync and ConductorOne keeps the metastore.
 - **`workspaces` scopes metastores.** An allowlist that names no workspace on the account fails at credential validation, before any sync.
-- **Not synced yet:** catalogs, schemas, tables, volumes, functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.
+- **Not synced yet:** schemas, tables, volumes, functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.

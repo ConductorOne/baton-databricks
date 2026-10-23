@@ -20,6 +20,9 @@ const (
 	// https://docs.databricks.com/api/account/accountmetastoreassignments/list
 	accountMetastoreWorkspacesEndpoint = "/api/2.0/accounts/%s/metastores/%s/workspaces"
 
+	// https://docs.databricks.com/api/workspace/catalogs/list
+	unityCatalogCatalogsEndpoint = "/api/2.1/unity-catalog/catalogs"
+
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
@@ -28,6 +31,7 @@ const (
 	// uppercase securable_type a listed securable carries. A metastore is
 	// addressed by its UUID: its name is rejected.
 	SecurableMetastore = "metastore"
+	SecurableCatalog   = "catalog"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
@@ -80,6 +84,33 @@ func (c *Client) ListMetastoreWorkspaces(
 	}
 
 	return ids, ratelimitData, nil
+}
+
+// ListCatalogs (GET /api/2.1/unity-catalog/catalogs) reads one page of the catalogs
+// of the metastore attached to workspaceId, which is a deployment name. A catalog
+// bound to a subset of the workspaces is listed only by the ones it is bound to.
+func (c *Client) ListCatalogs(
+	ctx context.Context,
+	workspaceId, pageToken string,
+	maxResults uint,
+) (
+	[]Catalog,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res catalogsResponse
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogCatalogsEndpoint)
+	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
+		maxResults: &maxResults,
+		pageToken:  pageToken,
+	})
+	if err != nil {
+		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to list catalogs: %w", err))
+	}
+
+	return res.Catalogs, res.NextPageToken, ratelimitData, nil
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).

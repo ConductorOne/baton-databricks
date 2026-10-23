@@ -165,12 +165,20 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 }
 
 func (f *fakeAccount) scim(w http.ResponseWriter, r *http.Request) {
+	serveSCIM(w, r, f.users, f.groups, f.sps, f.scimGets)
+}
+
+// serveSCIM answers account SCIM by id (/Users/{id}) and by filter (id or name eq).
+// gets, when given, counts the reads by id.
+func serveSCIM(w http.ResponseWriter, r *http.Request, users, groups, sps map[string]string, gets map[string]int) {
 	_, rest, _ := strings.Cut(r.URL.Path, "/scim/v2/")
 	kind, id, _ := strings.Cut(rest, "/")
 	field, records := map[string]string{"Users": "userName", "Groups": "displayName", "ServicePrincipals": "applicationId"}[kind],
-		map[string]map[string]string{"Users": f.users, "Groups": f.groups, "ServicePrincipals": f.sps}[kind]
+		map[string]map[string]string{"Users": users, "Groups": groups, "ServicePrincipals": sps}[kind]
 	if id != "" {
-		f.scimGets[kind+"/"+id]++
+		if gets != nil {
+			gets[kind+"/"+id]++
+		}
 		if name, ok := records[id]; ok {
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, field: name})
 			return
