@@ -510,28 +510,38 @@ func TestGroupRuleSetPrincipalLookup(t *testing.T) {
 	}
 }
 
+// shuffled returns a shuffled copy of items, mimicking Databricks returning members in a different
+// order on every call.
+func shuffled[T any](items []T) []T {
+	out := slices.Clone(items)
+	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] }) // #nosec G404 -- test data order, not security sensitive
+	return out
+}
+
+func testGroupMembers(count int) []databricks.Member {
+	members := make([]databricks.Member, 0, count)
+	for i := range count {
+		id := fmt.Sprintf("%05d", i)
+		members = append(members, databricks.Member{ID: id, Ref: "Users/" + id})
+	}
+	return members
+}
+
 // newTestGroupBuilder backs a group builder with a test server serving an account group with
-// memberCount user members and one rule set granting a service principal the manager role.
-// It counts the rule set requests so tests can assert they are only made once.
-func newTestGroupBuilder(t *testing.T, memberCount int, ruleSetCalls *int) *groupBuilder {
+// *members as its members and one rule set granting a service principal the manager role.
+// Tests may change *members between pages. It counts the rule set requests so tests can assert
+// they are only made once.
+func newTestGroupBuilder(t *testing.T, members *[]databricks.Member, ruleSetCalls *int) *groupBuilder {
 	t.Helper()
 	// Every page re-fetches the group. Disable the HTTP cache so each page sees a fresh, reshuffled
 	// response, as it does when pages run in separate Lambda invocations.
 	t.Setenv("BATON_DISABLE_HTTP_CACHE", "true")
-	members := make([]databricks.Member, 0, memberCount)
-	for i := range memberCount {
-		id := fmt.Sprintf("%05d", i)
-		members = append(members, databricks.Member{ID: id, Ref: "Users/" + id})
-	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/scim/v2/Groups/g1"):
-			// Databricks returns members in a different order on every call.
-			shuffled := slices.Clone(members)
-			rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-			_ = json.NewEncoder(w).Encode(databricks.Group{ID: "g1", DisplayName: "all users", Members: shuffled})
+			_ = json.NewEncoder(w).Encode(databricks.Group{ID: "g1", DisplayName: "all users", Members: shuffled(*members)})
 		case strings.HasSuffix(r.URL.Path, "/access-control/rule-sets"):
 			*ruleSetCalls++
 			_, _ = w.Write([]byte(`{"grant_rules":[{"role":"roles/group.manager","principals":["servicePrincipals/app-1"]}],"etag":"e1"}`))
@@ -567,15 +577,12 @@ func testAccountGroup(t *testing.T) *v2.Resource {
 	return g
 }
 
-// A group's members come back in one API response, so Grants must split them across pages:
-// a single page for a group with thousands of members exceeds the 6MB Lambda response limit.
-func TestGroupGrantsPagesMembers(t *testing.T) {
-	memberCount := 2*int(GrantsPageSize) + 500
-	ruleSetCalls := 0
-	g := newTestGroupBuilder(t, memberCount, &ruleSetCalls)
-	group := testAccountGroup(t)
-
-	seen := map[string]bool{}
+// groupGrantPages pages through Grants for group until the page token is empty, calling
+// afterPage after each page. It returns how many times each member was granted, the manager
+// grant count and the page count, and checks no page exceeds GrantsPageSize member grants.
+func groupGrantPages(t *testing.T, g *groupBuilder, group *v2.Resource, afterPage func(page int)) (map[string]int, int, int) {
+	t.Helper()
+	seen := map[string]int{}
 	managerGrants := 0
 	pages := 0
 	token := ""
@@ -591,11 +598,7 @@ func TestGroupGrantsPagesMembers(t *testing.T) {
 			switch {
 			case strings.HasSuffix(gr.Entitlement.Id, ":"+groupMemberEntitlement):
 				memberGrants++
-				id := gr.Principal.Id.Resource
-				if seen[id] {
-					t.Errorf("member %s granted on more than one page", id)
-				}
-				seen[id] = true
+				seen[gr.Principal.Id.Resource]++
 			case strings.HasSuffix(gr.Entitlement.Id, ":"+groupManagerEntitlement):
 				managerGrants++
 			}
@@ -606,12 +609,26 @@ func TestGroupGrantsPagesMembers(t *testing.T) {
 
 		token = results.NextPageToken
 		if token == "" {
-			break
+			return seen, managerGrants, pages
 		}
-		if pages > memberCount {
+		if pages > 100 {
 			t.Fatal("pagination did not terminate")
 		}
+		if afterPage != nil {
+			afterPage(pages)
+		}
 	}
+}
+
+// A group's members come back in one API response, so Grants must split them across pages:
+// a single page for a group with thousands of members exceeds the 6MB Lambda response limit.
+func TestGroupGrantsPagesMembers(t *testing.T) {
+	memberCount := 2*int(GrantsPageSize) + 500
+	members := testGroupMembers(memberCount)
+	ruleSetCalls := 0
+	g := newTestGroupBuilder(t, &members, &ruleSetCalls)
+
+	seen, managerGrants, pages := groupGrantPages(t, g, testAccountGroup(t), nil)
 
 	if pages != 3 {
 		t.Errorf("got %d pages, want 3", pages)
@@ -619,14 +636,67 @@ func TestGroupGrantsPagesMembers(t *testing.T) {
 	if len(seen) != memberCount {
 		t.Errorf("got %d distinct member grants, want %d", len(seen), memberCount)
 	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("member %s granted %d times, want 1", id, n)
+		}
+	}
 	if managerGrants != 1 || ruleSetCalls != 1 {
 		t.Errorf("got %d manager grants from %d rule set calls, want 1 from 1", managerGrants, ruleSetCalls)
 	}
 }
 
+// Members removed or added between page fetches must not shift the next page's start, or a
+// member near the boundary is skipped (C1 reads its grant as revoked) or granted twice.
+func TestGroupGrantsMembershipChurnBetweenPages(t *testing.T) {
+	memberCount := 2*int(GrantsPageSize) + 500
+	tests := []struct {
+		name   string
+		change func([]databricks.Member) []databricks.Member
+	}{
+		{
+			// With an offset cursor, every later member moves up one slot and the first member
+			// of page 2 is never granted.
+			name:   "member already emitted is removed",
+			change: func(m []databricks.Member) []databricks.Member { return slices.Clone(m[1:]) },
+		},
+		{
+			// With an offset cursor, every later member moves down one slot and the last member
+			// of page 1 is granted again on page 2.
+			name: "member sorting before the cursor is added",
+			change: func(m []databricks.Member) []databricks.Member {
+				return append(slices.Clone(m), databricks.Member{ID: "00000a", Ref: "Users/00000a"})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			members := testGroupMembers(memberCount)
+			ruleSetCalls := 0
+			g := newTestGroupBuilder(t, &members, &ruleSetCalls)
+
+			seen, _, _ := groupGrantPages(t, g, testAccountGroup(t), func(page int) {
+				if page == 1 {
+					members = tt.change(members)
+				}
+			})
+
+			// Every original member is granted exactly once; the removed one on page 1, before
+			// its removal. A member added before the cursor is picked up by the next sync.
+			for _, m := range testGroupMembers(memberCount) {
+				if seen[m.ID] != 1 {
+					t.Errorf("member %s granted %d times, want 1", m.ID, seen[m.ID])
+				}
+			}
+		})
+	}
+}
+
 func TestGroupGrantsSmallGroupSinglePage(t *testing.T) {
+	members := testGroupMembers(3)
 	ruleSetCalls := 0
-	g := newTestGroupBuilder(t, 3, &ruleSetCalls)
+	g := newTestGroupBuilder(t, &members, &ruleSetCalls)
 
 	grants, results, err := g.Grants(context.Background(), testAccountGroup(t), rs.SyncOpAttrs{})
 	if err != nil {

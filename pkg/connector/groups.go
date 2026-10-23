@@ -186,7 +186,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 		workspaceId = parentId.Resource
 	}
 
-	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})
+	bag, cursor, err := parseCursorToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
@@ -206,19 +206,17 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 
 	// The API returns every member at once and has no member pagination, so members are paged
 	// locally to keep each response under the Lambda payload limit. The API returns members in a
-	// different order on every call, so they must be sorted for pages to line up across re-fetches.
-	members := group.Members
-	slices.SortFunc(members, func(a, b databricks.Member) int { return strings.Compare(a.Ref, b.Ref) })
-	start, end := pageBounds(page, len(members))
+	// different order on every call, so pageAfter sorts them for pages to line up across re-fetches.
+	members, nextCursor := pageAfter(group.Members, func(m databricks.Member) string { return m.Ref }, cursor)
 
 	l.Debug("grants: group resource",
 		zap.String("group_id", groupId.Resource),
-		zap.Int("member_count", len(members)),
-		zap.Int("page_start", start),
-		zap.Int("page_end", end),
+		zap.Int("member_count", len(group.Members)),
+		zap.Int("page_member_count", len(members)),
+		zap.String("cursor", cursor),
 	)
 
-	for _, member := range members[start:end] {
+	for _, member := range members {
 		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
 		pp := strings.Split(member.Ref, "/")
 		if len(pp) != 2 {
@@ -248,13 +246,13 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 		rv = append(rv, grant.NewGrant(resource, groupMemberEntitlement, resourceId, grant.WithAnnotation(anns...)))
 	}
 
-	nextPage, err := bag.NextToken(prepareNextToken(page, end-start, uint(len(members))))
+	nextPage, err := bag.NextToken(nextCursor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
 	// role permissions grants are only emitted with the first page of members
-	if start > 0 {
+	if cursor != "" {
 		return rv, &rs.SyncOpResults{NextPageToken: nextPage, Annotations: annos}, nil
 	}
 

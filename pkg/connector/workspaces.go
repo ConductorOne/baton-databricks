@@ -1,12 +1,10 @@
 package connector
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -187,7 +185,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get workspace ID")
 	}
 
-	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: workspaceResourceType.Id})
+	bag, cursor, err := parseCursorToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: workspaceResourceType.Id})
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
@@ -225,20 +223,19 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	}
 
 	// The API returns every assignment at once, so they are paged locally to keep each
-	// response under the Lambda payload limit. Sorting keeps the order stable across re-fetches.
-	slices.SortFunc(assignments, func(a, b databricks.WorkspaceAssignment) int {
-		return cmp.Compare(principalID(a), principalID(b))
-	})
-	start, end := pageBounds(page, len(assignments))
+	// response under the Lambda payload limit.
+	assignmentsPage, nextCursor := pageAfter(assignments, func(a databricks.WorkspaceAssignment) string {
+		return strconv.Itoa(principalID(a))
+	}, cursor)
 
 	var rv []*v2.Grant
 	l.Debug("grants: workspace resource",
 		zap.String("workspace_id", workspace),
 		zap.Int("assignments_count", len(assignments)),
-		zap.Int("page_start", start),
-		zap.Int("page_end", end),
+		zap.Int("page_assignments_count", len(assignmentsPage)),
+		zap.String("cursor", cursor),
 	)
-	for _, assignment := range assignments[start:end] {
+	for _, assignment := range assignmentsPage {
 		resourceType, err := prepareResourceType(assignment.Principal)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource type: %w", err)
@@ -262,7 +259,7 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
 	}
 
-	nextPage, err := bag.NextToken(prepareNextToken(page, end-start, uint(len(assignments))))
+	nextPage, err := bag.NextToken(nextCursor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}

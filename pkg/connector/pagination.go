@@ -2,7 +2,9 @@ package connector
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
@@ -63,10 +65,46 @@ func prepareNextToken(page uint, pageTotal int, total uint) string {
 	return token
 }
 
-// pageBounds returns the slice bounds of the page starting at the 1-based offset page.
-func pageBounds(page uint, total int) (int, int) {
-	page = max(page, 1)
-	start := min(int(page-1), total) // #nosec G115
-	end := min(start+int(GrantsPageSize), total)
-	return start, end
+// parseCursorToken returns the pagination bag and the cursor stored in its current page token,
+// which is empty on the first page.
+func parseCursorToken(i string, resourceID *v2.ResourceId) (*pagination.Bag, string, error) {
+	b := &pagination.Bag{}
+	err := b.Unmarshal(i)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if b.Current() == nil {
+		b.Push(pagination.PageState{
+			ResourceTypeID: resourceID.ResourceType,
+			ResourceID:     resourceID.Resource,
+		})
+	}
+
+	return b, b.PageToken(), nil
+}
+
+// pageAfter sorts items by key and returns up to GrantsPageSize of them that sort after cursor,
+// plus the cursor for the next page (empty when this is the last page). Keys must be unique.
+// Paging from the last emitted key rather than an offset keeps page boundaries stable when items
+// are added or removed between page fetches.
+func pageAfter[T any](items []T, key func(T) string, cursor string) ([]T, string) {
+	slices.SortFunc(items, func(a, b T) int { return strings.Compare(key(a), key(b)) })
+
+	start := 0
+	if cursor != "" {
+		var found bool
+		start, found = slices.BinarySearchFunc(items, cursor, func(item T, c string) int { return strings.Compare(key(item), c) })
+		if found {
+			start++
+		}
+	}
+
+	end := min(start+int(GrantsPageSize), len(items))
+	var next string
+	if end < len(items) {
+		next = key(items[end-1])
+	}
+
+	return items[start:end], next
 }
