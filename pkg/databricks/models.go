@@ -128,8 +128,17 @@ type WorkspacePrincipal struct {
 	ID                    int    `json:"principal_id"`
 }
 
+// WorkspaceAdminPermission marks a principal as a workspace admin; WorkspaceUserPermission is basic access.
+const (
+	WorkspaceAdminPermission = "ADMIN"
+	WorkspaceUserPermission  = "USER"
+)
+
 type WorkspaceAssignment struct {
-	Principal *WorkspacePrincipal `json:"principal"`
+	Principal   *WorkspacePrincipal `json:"principal"`
+	Permissions []string            `json:"permissions"`
+	// Error is the error response associated with this assignment, if any.
+	Error string `json:"error"`
 }
 
 type Role struct {

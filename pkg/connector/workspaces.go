@@ -260,9 +260,12 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	_, err := w.client.CreateOrUpdateWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	alreadyGranted, _, err := w.client.AddWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to add workspace member: %w", err)
+	}
+	if alreadyGranted {
+		return annotations.New(&v2.GrantAlreadyExists{}), nil
 	}
 
 	return nil, nil
@@ -292,9 +295,12 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	_, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	alreadyRevoked, _, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to create or update workspace member: %w", err)
+		return nil, fmt.Errorf("databricks-connector: failed to remove workspace member: %w", err)
+	}
+	if alreadyRevoked {
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 	}
 
 	return nil, nil
