@@ -10,6 +10,10 @@ import (
 
 const ResourcesPageSize uint = 50
 
+// GrantsPageSize caps grants built from a single unpaginated API response (e.g. group members).
+// Each grant serializes to ~550 bytes, so a page is ~1.1MB, well under the 6MB Lambda response limit.
+const GrantsPageSize uint = 2000
+
 func parsePageToken(i string, resourceID *v2.ResourceId) (*pagination.Bag, uint, error) {
 	b := &pagination.Bag{}
 	err := b.Unmarshal(i)
@@ -57,4 +61,12 @@ func prepareNextToken(page uint, pageTotal int, total uint) string {
 	}
 
 	return token
+}
+
+// pageBounds returns the slice bounds of the page starting at the 1-based offset page.
+func pageBounds(page uint, total int) (int, int) {
+	page = max(page, 1)
+	start := min(int(page-1), total) // #nosec G115
+	end := min(start+int(GrantsPageSize), total)
+	return start, end
 }

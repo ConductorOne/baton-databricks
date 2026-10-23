@@ -3,15 +3,19 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/grpc/codes"
@@ -503,5 +507,135 @@ func TestGroupRuleSetPrincipalLookup(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// newTestGroupBuilder backs a group builder with a test server serving an account group with
+// memberCount user members and one rule set granting a service principal the manager role.
+// It counts the rule set requests so tests can assert they are only made once.
+func newTestGroupBuilder(t *testing.T, memberCount int, ruleSetCalls *int) *groupBuilder {
+	t.Helper()
+	// Every page re-fetches the group. Disable the HTTP cache so each page sees a fresh, reshuffled
+	// response, as it does when pages run in separate Lambda invocations.
+	t.Setenv("BATON_DISABLE_HTTP_CACHE", "true")
+	members := make([]databricks.Member, 0, memberCount)
+	for i := range memberCount {
+		id := fmt.Sprintf("%05d", i)
+		members = append(members, databricks.Member{ID: id, Ref: "Users/" + id})
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/scim/v2/Groups/g1"):
+			// Databricks returns members in a different order on every call.
+			shuffled := slices.Clone(members)
+			rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+			_ = json.NewEncoder(w).Encode(databricks.Group{ID: "g1", DisplayName: "all users", Members: shuffled})
+		case strings.HasSuffix(r.URL.Path, "/access-control/rule-sets"):
+			*ruleSetCalls++
+			_, _ = w.Write([]byte(`{"grant_rules":[{"role":"roles/group.manager","principals":["servicePrincipals/app-1"]}],"etag":"e1"}`))
+		case strings.HasSuffix(r.URL.Path, "/scim/v2/ServicePrincipals"):
+			_, _ = w.Write([]byte(`{"Resources":[{"id":"sp-1","applicationId":"app-1"}],"totalResults":1}`))
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &hostRewriter{target: target}}
+	c, err := databricks.NewClient(context.Background(), httpClient, testHostname, testAccountHost, testAccountId, "", &databricks.NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return newGroupBuilder(c)
+}
+
+func testAccountGroup(t *testing.T) *v2.Resource {
+	t.Helper()
+	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
+	g, err := groupResource(context.Background(), &databricks.Group{ID: "g1", DisplayName: "all users"}, parent)
+	if err != nil {
+		t.Fatalf("groupResource: %v", err)
+	}
+	return g
+}
+
+// A group's members come back in one API response, so Grants must split them across pages:
+// a single page for a group with thousands of members exceeds the 6MB Lambda response limit.
+func TestGroupGrantsPagesMembers(t *testing.T) {
+	memberCount := 2*int(GrantsPageSize) + 500
+	ruleSetCalls := 0
+	g := newTestGroupBuilder(t, memberCount, &ruleSetCalls)
+	group := testAccountGroup(t)
+
+	seen := map[string]bool{}
+	managerGrants := 0
+	pages := 0
+	token := ""
+	for {
+		grants, results, err := g.Grants(context.Background(), group, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		if err != nil {
+			t.Fatalf("Grants page %d: %v", pages, err)
+		}
+		pages++
+
+		memberGrants := 0
+		for _, gr := range grants {
+			switch {
+			case strings.HasSuffix(gr.Entitlement.Id, ":"+groupMemberEntitlement):
+				memberGrants++
+				id := gr.Principal.Id.Resource
+				if seen[id] {
+					t.Errorf("member %s granted on more than one page", id)
+				}
+				seen[id] = true
+			case strings.HasSuffix(gr.Entitlement.Id, ":"+groupManagerEntitlement):
+				managerGrants++
+			}
+		}
+		if memberGrants > int(GrantsPageSize) {
+			t.Errorf("page %d has %d member grants, want at most %d", pages, memberGrants, GrantsPageSize)
+		}
+
+		token = results.NextPageToken
+		if token == "" {
+			break
+		}
+		if pages > memberCount {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+
+	if pages != 3 {
+		t.Errorf("got %d pages, want 3", pages)
+	}
+	if len(seen) != memberCount {
+		t.Errorf("got %d distinct member grants, want %d", len(seen), memberCount)
+	}
+	if managerGrants != 1 || ruleSetCalls != 1 {
+		t.Errorf("got %d manager grants from %d rule set calls, want 1 from 1", managerGrants, ruleSetCalls)
+	}
+}
+
+func TestGroupGrantsSmallGroupSinglePage(t *testing.T) {
+	ruleSetCalls := 0
+	g := newTestGroupBuilder(t, 3, &ruleSetCalls)
+
+	grants, results, err := g.Grants(context.Background(), testAccountGroup(t), rs.SyncOpAttrs{})
+	if err != nil {
+		t.Fatalf("Grants: %v", err)
+	}
+	if results.NextPageToken != "" {
+		t.Errorf("got next page token %q, want none", results.NextPageToken)
+	}
+	if len(grants) != 4 {
+		t.Errorf("got %d grants, want 3 members + 1 manager", len(grants))
 	}
 }
