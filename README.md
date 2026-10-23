@@ -131,6 +131,10 @@ A workspace entitlement can only be granted to a principal that is already
 assigned to that workspace. Otherwise the grant fails with a
 `FailedPrecondition` error; grant the workspace membership first.
 
+Revoking workspace membership deletes the principal's whole workspace
+assignment, so a principal that is also a workspace admin loses admin access
+to that workspace too.
+
 ## Unity Catalog
 
 A metastore is the top of the Databricks Unity Catalog hierarchy. The resource
