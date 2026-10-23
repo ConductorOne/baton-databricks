@@ -251,15 +251,6 @@ func listAllSchemas(t *testing.T, b *schemaBuilder) ([]*v2.Resource, error) {
 	return nil, nil
 }
 
-func manySchemas(prefix string, n int) []map[string]any {
-	schemas := make([]map[string]any, 0, n)
-	for i := range n {
-		schemas = append(schemas, map[string]any{"name": fmt.Sprintf("%s_%03d", prefix, i), "owner": "someone"})
-	}
-
-	return schemas
-}
-
 // Databricks answers a caller without catalog-wide visibility with only the
 // schemas it owns or can use, at 200, which is indistinguishable from a catalog
 // that holds just those. A short list read as the whole one makes ConductorOne
