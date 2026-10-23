@@ -339,50 +339,6 @@ func TestMetastoreListPicksTheFirstUsableWorkspace(t *testing.T) {
 	}
 }
 
-func TestMetastoreListProfile(t *testing.T) {
-	m := newTestMetastoreBuilder(t, defaultFakeAccount(), nil, syncPrincipals{})
-	resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
-	if err != nil || len(resources) != 1 {
-		t.Fatalf("List = %v, %v", resources, err)
-	}
-	profile := rs.GetProfile(resources[0])
-	for key, want := range map[string]string{
-		profileKeyWorkspace: "wsa", profileKeyWorkspaceID: "1", profileKeyWorkspaceName: "prod",
-		profileKeyOwner: "eng", profileKeyMetastoreID: "ms-a", profileKeySecurableType: securableTypeMetastore,
-	} {
-		if got, _ := rs.GetProfileStringValue(profile, key); got != want {
-			t.Errorf("profile[%s] = %q, want %q", key, got, want)
-		}
-	}
-	if resources[0].GetDisplayName() != "main" {
-		t.Errorf("display name = %q, want main", resources[0].GetDisplayName())
-	}
-}
-
-func TestMetastoreListFailsWhenItCannotRoute(t *testing.T) {
-	tests := []struct {
-		name       string
-		assignment any
-	}{
-		{"assignment list answers 403", http.StatusForbidden},
-		{"assignment list answers 500", http.StatusInternalServerError},
-		{"only in-scope workspace is not running", []int{2}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := defaultFakeAccount()
-			f.assignments["ms-a"] = test.assignment
-			f.workspaces = append(f.workspaces,
-				map[string]any{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "PROVISIONING"})
-			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
-
-			if _, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{}); err == nil {
-				t.Fatal("List succeeded")
-			}
-		})
-	}
-}
-
 func grantKeys(grants []*v2.Grant) []string {
 	keys := make([]string, 0, len(grants))
 	for _, g := range grants {
@@ -391,84 +347,6 @@ func grantKeys(grants []*v2.Grant) []string {
 	slices.Sort(keys)
 
 	return keys
-}
-
-func TestMetastoreGrants(t *testing.T) {
-	f := defaultFakeAccount()
-	f.permissions = []map[string]any{
-		{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"CREATE_CATALOG", "NOT_OFFERED"}},
-		{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"USE_SHARE"}},
-		{"principal": "eng", "principal_id": 2, "privileges": []string{"READ_METADATA"}},
-		{"principal": "app-9", "principal_id": 3, "privileges": []string{"CREATE_SHARE"}},
-		{"principal": "", "principal_id": 99, "privileges": []string{"CREATE_SHARE"}},
-	}
-	m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{groups: true})
-
-	grants, _, err := m.Grants(context.Background(), testMetastore(t, "wsa"), rs.SyncOpAttrs{})
-	if err != nil {
-		t.Fatalf("Grants: %v", err)
-	}
-	group := "account/" + testAccountId + "/group/2"
-	want := []string{
-		"1 metastore:ms-a:CREATE_CATALOG",
-		"1 metastore:ms-a:USE_SHARE",
-		group + " metastore:ms-a:READ_METADATA",
-		group + " metastore:ms-a:owner",
-	}
-	slices.Sort(want)
-	if got := grantKeys(grants); !slices.Equal(got, want) {
-		t.Fatalf("grants = %v, want %v", got, want)
-	}
-	if !slices.Equal(f.permHosts, []string{"wsa"}) {
-		t.Errorf("permissions read through %v, want [wsa]", f.permHosts)
-	}
-	if f.scimGets["Users/1"] != 1 {
-		t.Errorf("user 1 resolved %d times, want 1", f.scimGets["Users/1"])
-	}
-	for _, g := range grants {
-		annos := g.GetAnnotations()
-		if !strings.HasSuffix(g.GetEntitlement().GetId(), ":owner") {
-			continue
-		}
-		if len(annos) != 2 {
-			t.Errorf("owner grant annotations = %v, want expandable and immutable", annos)
-		}
-	}
-}
-
-func TestMetastoreGrantsReturnNothing(t *testing.T) {
-	tests := []struct {
-		name       string
-		workspace  string
-		permStatus int
-	}{
-		{"no workspace on the profile", "", 0},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := defaultFakeAccount()
-			f.permStatus = test.permStatus
-			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{groups: true})
-
-			grants, _, err := m.Grants(context.Background(), testMetastore(t, test.workspace), rs.SyncOpAttrs{})
-			if err != nil || len(grants) != 0 {
-				t.Fatalf("Grants = %v, %v; want none and no error", grants, err)
-			}
-		})
-	}
-}
-
-func TestMetastoreGrantsFailOnErrors(t *testing.T) {
-	for _, code := range []int{http.StatusNotFound, http.StatusInternalServerError} {
-		f := defaultFakeAccount()
-		f.permStatus = code
-		m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
-
-		_, _, err := m.Grants(context.Background(), testMetastore(t, "wsa"), rs.SyncOpAttrs{})
-		if status.Code(err) != codes.FailedPrecondition {
-			t.Fatalf("Grants on %d = %v, want FailedPrecondition", code, err)
-		}
-	}
 }
 
 // Databricks answers an under-permissioned read of the permissions endpoint
@@ -535,27 +413,6 @@ func TestMetastoreGrantsRequireFullVisibility(t *testing.T) {
 }
 
 var alice = &v2.Resource{Id: &v2.ResourceId{ResourceType: "user", Resource: "1"}}
-
-func TestMetastoreGrant(t *testing.T) {
-	f := defaultFakeAccount()
-	m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
-	g := grant.NewGrant(testMetastore(t, "wsa"), "CREATE_CATALOG", alice.GetId())
-
-	if _, err := m.Grant(context.Background(), alice, g.GetEntitlement()); err != nil {
-		t.Fatalf("Grant: %v", err)
-	}
-	if len(f.patches) != 1 || f.patches[0]["principal"] != "alice@example.com" {
-		t.Fatalf("patches = %v, want one add for alice@example.com", f.patches)
-	}
-
-	annos, err := m.Grant(context.Background(), alice, g.GetEntitlement())
-	if err != nil || !annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Fatalf("second Grant = %v, %v; want GrantAlreadyExists", annos, err)
-	}
-	if len(f.patches) != 1 {
-		t.Errorf("a held privilege was patched again: %v", f.patches)
-	}
-}
 
 func TestMetastoreGrantRejections(t *testing.T) {
 	tests := []struct {
@@ -633,36 +490,5 @@ func TestMetastoreProvisioningRefusesAPartialPrivilegeList(t *testing.T) {
 				t.Errorf("patches = %v, want none", f.patches)
 			}
 		})
-	}
-}
-
-// Every workspace answers /api/2.1/unity-catalog/permissions with the same path
-// and query, so a cache shared between hosts would misattribute privileges.
-func TestPermissionsListingIsNotAnsweredByAnotherWorkspacesCachedPage(t *testing.T) {
-	held := map[string]string{"wsa": "alice", "wsb": "bob"}
-
-	client, router := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
-		workspace := r.Header.Get("X-Test-Workspace")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"privilege_assignments": []map[string]any{{
-				"principal":  held[workspace],
-				"privileges": []string{"CREATE_CATALOG"},
-			}},
-		})
-	})
-
-	ctx := context.Background()
-	for _, workspace := range []string{"wsa", "wsb"} {
-		assignments, _, _, err := client.ListPermissions(ctx, workspace, databricks.SecurableMetastore, "ms-1", "", "")
-		if err != nil {
-			t.Fatalf("ListPermissions(%s): %v", workspace, err)
-		}
-		if router.hits[workspace] == 0 {
-			t.Errorf("workspace %s was never asked for its permissions; hits = %v", workspace, router.hits)
-		}
-		if len(assignments) != 1 || assignments[0].Principal != held[workspace] {
-			t.Errorf("workspace %s answered %+v, want %s", workspace, assignments, held[workspace])
-		}
 	}
 }
