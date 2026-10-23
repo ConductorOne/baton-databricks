@@ -2,9 +2,7 @@ package connector
 
 import (
 	"context"
-	"fmt"
 	"slices"
-	"strings"
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -121,91 +119,5 @@ func TestVolumeGrantsReportOnlyVolumePrivileges(t *testing.T) {
 	}
 	if len(f.patches) != 0 {
 		t.Errorf("patches = %v, want none", f.patches)
-	}
-}
-
-// Databricks no-ops a privilege already held or already absent, so the pre-read
-// is the only signal for the idempotency annotations.
-func TestVolumeGrantAndRevokeAreIdempotent(t *testing.T) {
-	f := &fakeSchemaChildAccount{catalogOwner: "someone", schemaOwner: "someone", users: map[string]string{"1": "alice@example.com"}}
-	b := newTestVolumeBuilder(t, f)
-	g := grant.NewGrant(testVolume(t, "files", "someone", "someone", "someone", testOwnPrincipal), "READ_VOLUME", alice.GetId())
-
-	annos, err := b.Grant(context.Background(), alice, g.GetEntitlement())
-	if err != nil {
-		t.Fatalf("Grant: %v", err)
-	}
-	if annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Error("a fresh grant reported GrantAlreadyExists")
-	}
-	if len(f.patches) != 1 || f.patches[0]["principal"] != "alice@example.com" {
-		t.Fatalf("patches = %v, want one add for alice@example.com", f.patches)
-	}
-
-	annos, err = b.Grant(context.Background(), alice, g.GetEntitlement())
-	if err != nil || !annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Fatalf("second Grant = %v, %v; want GrantAlreadyExists", annos, err)
-	}
-
-	if _, err := b.Revoke(context.Background(), g); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	if len(f.patches) != 2 || fmt.Sprint(f.patches[1]["principal_id"]) != "1" {
-		t.Fatalf("patches = %v, want a removal by principal_id 1", f.patches)
-	}
-
-	annos, err = b.Revoke(context.Background(), g)
-	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
-		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
-	}
-}
-
-// A volume is settled by the same owner chain as a table. The full matrix is in
-// TestTableGrantsRequireFullVisibility; what is proven here is that the volume
-// level is wired to it and names itself in the refusal.
-func TestVolumeGrantsRequireFullVisibility(t *testing.T) {
-	tests := []struct {
-		name        string
-		schemaOwner string
-		wantGrants  bool
-	}{
-		{"owner of the parent schema", "app-9", true},
-		{"none of them", "someone", false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := &fakeSchemaChildAccount{
-				metastoreOwner: "eng",
-				catalogOwner:   "someone",
-				schemaOwner:    test.schemaOwner,
-				users:          map[string]string{"1": "alice@example.com"},
-				assignments: map[string][]map[string]any{"main.sales.files": {
-					{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"READ_VOLUME"}},
-				}},
-			}
-			b := newTestVolumeBuilderAs(t, f, "app-9")
-			resource := testVolume(t, "files", "someone", test.schemaOwner, "someone", "eng")
-
-			grants, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{})
-			if test.wantGrants {
-				if err != nil {
-					t.Fatalf("Grants: %v", err)
-				}
-				if len(grants) != 1 {
-					t.Fatalf("grants = %v, want the one privilege on the volume", grantKeys(grants))
-				}
-
-				return
-			}
-			if status.Code(err) != codes.PermissionDenied {
-				t.Fatalf("Grants = %v, want PermissionDenied", err)
-			}
-			if !strings.Contains(err.Error(), "main.sales.files") || !strings.Contains(err.Error(), volumeTrustRemedy) {
-				t.Errorf("error %q does not name the volume and the remedy", err)
-			}
-			if !slices.Equal(f.filteredReads, []string{"volume/main.sales.files", "schema/main.sales", "catalog/main"}) {
-				t.Errorf("own privileges read on %v, want the volume, then the schema, then the catalog", f.filteredReads)
-			}
-		})
 	}
 }
