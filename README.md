@@ -149,6 +149,7 @@ account
 ├── service principal
 └── metastore
     └── catalog
+        └── schema
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,

@@ -167,6 +167,11 @@ type Catalog struct {
 	IsolationMode string `json:"isolation_mode"`
 }
 
+type Schema struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
 type PrivilegeAssignment struct {
 	Principal   string      `json:"principal"`
 	PrincipalID json.Number `json:"principal_id"`
@@ -206,6 +211,11 @@ type metastoreWorkspacesResponse struct {
 type catalogsResponse struct {
 	Catalogs      []Catalog `json:"catalogs"`
 	NextPageToken string    `json:"next_page_token"`
+}
+
+type schemasResponse struct {
+	Schemas       []Schema `json:"schemas"`
+	NextPageToken string   `json:"next_page_token"`
 }
 
 type permissionsResponse struct {

@@ -383,6 +383,56 @@ func ownPrincipalScimID(
 	return id, nil
 }
 
+// managePrivilege is what a trust rule looks for when ownership did not settle
+// it. ALL_PRIVILEGES is deliberately not here: Databricks leaves MANAGE out of
+// it, so its holder still reads a partial privilege list.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+var managePrivilege = []string{privilegeManage}
+
+// holdsPrivilegeOn reports whether the connector holds one of wanted. A refusal leaves it unproven. The read is not cached.
+func holdsPrivilegeOn(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	securableType, fullName string,
+	wanted []string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if trust.ownPrincipal == "" || trust.workspace == "" {
+		return false, nil
+	}
+
+	var holds bool
+	rateLimit, err := client.ForEachUncachedPermissionsPage(ctx, trust.workspace, securableType, fullName, trust.ownPrincipal,
+		func(page []databricks.PrivilegeAssignment) (bool, error) {
+			for _, assignment := range page {
+				for _, privilege := range assignment.Privileges {
+					if slices.Contains(wanted, privilege) {
+						holds = true
+
+						return true, nil
+					}
+				}
+			}
+
+			return false, nil
+		})
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if !deniesTrust(err) {
+			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on %s %s: %w", securableType, fullName, err)
+		}
+		ctxzap.Extract(ctx).Debug("databricks-connector: the connector's own privileges on the securable cannot be read, so they stay unproven",
+			zap.String("securable_type", securableType),
+			zap.String("securable", fullName),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return holds, nil
+}
+
 // deniesTrust is an answer that withholds what the connector asked for, as
 // opposed to one that says the account plane is unavailable.
 func deniesTrust(err error) bool {

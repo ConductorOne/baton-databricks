@@ -15,6 +15,7 @@ sidebarTitle: "Databricks"
 | Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Schemas | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Service principals | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Users | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
 | Workspaces | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
@@ -29,19 +30,19 @@ Revoking the workspace **member** entitlement removes the principal's entire wor
 
 [This connector syncs non-human identities](/product/admin/nhi) and displays them on the **Identities overview** dashboard.
 
-## Metastore and catalog access in C1
+## Metastore, catalog and schema access in C1
 
 The connector syncs Databricks [Unity Catalog](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges)
-metastores and the catalogs in them as C1 resources. Each privilege Databricks
+metastores, the catalogs in them, and the schemas in those catalogs as C1 resources. Each privilege Databricks
 records on one of them (`CREATE_CATALOG` on a metastore, `USE_CATALOG` or
-`SELECT` on a catalog, and so on) becomes an entitlement in C1, so you can
+`SELECT` on a catalog, `USE_SCHEMA` on a schema, and so on) becomes an entitlement in C1, so you can
 review who holds it, request it, and revoke it for users, groups and service
 principals. A grant held by a group is expandable so C1 can resolve the
 group's members as holders. Ownership is shown as a read-only `owner`
 entitlement — it cannot be granted or revoked through C1.
 
 <Note>
-The Metastores and Catalogs resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1.
+The Metastores, Catalogs and Schemas resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1.
 </Note>
 
 <Note>
@@ -50,6 +51,7 @@ The Metastores and Catalogs resource types are turned off by default. Turn on th
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
 - A catalog is synced when a workspace in the sync lists it. A catalog that only excluded workspaces can reach is not synced.
+- `information_schema` is skipped.
 - Unity Catalog tags are not synced.
 </Note>
 
@@ -135,6 +137,16 @@ Otherwise, grant **MANAGE** on each catalog you want synced:
 
 <Warning>
 Without this, the sync fails with a permission error naming the catalog, and ConductorOne keeps the grants it already has. Databricks would otherwise return HTTP 200 with only the privileges the caller can see.
+</Warning>
+
+### Let the service principal list every schema
+
+Skip this section if you are not syncing schemas, or if the service principal owns the metastore or the catalog.
+
+Workspace **Admin** does not list every schema. On a catalog the service principal does not own, Databricks returns only the schemas it owns or can use, with HTTP 200. To list every schema, the service principal must own the metastore, own the catalog, or hold **MANAGE**, **USE SCHEMA**, or **ALL PRIVILEGES** on the catalog.
+
+<Warning>
+Without that, the schema sync for that catalog fails with a permission error, and ConductorOne keeps the schemas it already has. Databricks would otherwise return a short list and ConductorOne would delete the schemas it did not see.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
