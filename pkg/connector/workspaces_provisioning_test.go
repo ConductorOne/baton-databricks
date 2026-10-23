@@ -206,7 +206,7 @@ func existingGroupAssignment() []map[string]any {
 	}}
 }
 
-func testGroupPrincipal(t *testing.T, resourceID string) *v2.Resource {
+func testWorkspaceGroupPrincipal(t *testing.T, resourceID string) *v2.Resource {
 	t.Helper()
 	return &v2.Resource{Id: &v2.ResourceId{ResourceType: groupResourceType.Id, Resource: resourceID}}
 }
@@ -364,7 +364,7 @@ func TestWorkspaceGroupPrincipalInvalidIDRejected(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := &workspaceAssignmentsServer{}
 			w := newWorkspaceBuilderWithMock(t, m)
-			principal := testGroupPrincipal(t, id)
+			principal := testWorkspaceGroupPrincipal(t, id)
 
 			_, err := w.Grant(context.Background(), principal, testWorkspaceMemberEntitlement(t))
 			if code := status.Code(err); code != codes.InvalidArgument {
