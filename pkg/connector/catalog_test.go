@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
-	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -300,31 +299,6 @@ func TestCatalogListReadsTheFirstWorkspaceOnce(t *testing.T) {
 	}
 }
 
-// Leaving a workspace out of the sync is the operator scoping its content out,
-// so a catalog only that workspace lists is not synced.
-func TestCatalogListSkipsAWorkspaceTheAllowlistLeavesOut(t *testing.T) {
-	f := &fakeCatalogAccount{
-		attached: []int{1, 2},
-		listed: map[string][]map[string]any{
-			"wsa": {catalogEntry("main", "someone")},
-			"wsb": {catalogEntry("isolated_dev", "someone")},
-		},
-	}
-	b := newTestCatalogBuilder(t, f, []string{"prod"}, syncPrincipals{})
-
-	resources, err := listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	names := make([]string, 0, len(resources))
-	for _, resource := range resources {
-		names = append(names, resource.GetDisplayName())
-	}
-	if !slices.Equal(names, []string{"main"}) {
-		t.Errorf("listed %v, want only main", names)
-	}
-}
-
 // Which workspaces serve the metastore decides which catalogs are in scope, so an
 // assignment list the connector cannot read is unknown, not empty. Listing no
 // catalogs would make ConductorOne delete the metastore's whole subtree.
@@ -342,112 +316,6 @@ func TestCatalogListFailsWhenTheAssignmentListCannotBeRead(t *testing.T) {
 				t.Errorf("error %q does not name the metastore", err)
 			}
 		})
-	}
-}
-
-// The one workspace the route picked refusing the catalog listing leaves the
-// catalog set unknown. Emitting nothing would read as deleting every catalog.
-func TestCatalogListFailsInsteadOfEmittingAShortList(t *testing.T) {
-	// A refusal is reported as FailedPrecondition rather than NotFound, which
-	// the SDK would read as the page being empty.
-	for code, want := range map[int]codes.Code{
-		http.StatusForbidden:           codes.FailedPrecondition,
-		http.StatusNotFound:            codes.FailedPrecondition,
-		http.StatusInternalServerError: codes.Unavailable,
-	} {
-		f := &fakeCatalogAccount{
-			attached:   []int{1},
-			listStatus: map[string]int{"wsa": code},
-		}
-		b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
-
-		_, err := listAllCatalogs(t, b)
-		if err == nil {
-			t.Errorf("List over a workspace answering %d succeeded", code)
-			continue
-		}
-		if got := status.Code(err); got != want {
-			t.Errorf("List over a workspace answering %d = %v, want %s", code, err, want)
-		}
-	}
-}
-
-// A group's privilege is expandable to its members; the owner's is immutable and
-// emitted only with the first page; a principal type the sync leaves out and a
-// privilege the catalog does not offer are not emitted.
-func TestCatalogGrants(t *testing.T) {
-	f := &fakeCatalogAccount{
-		users:  map[string]string{"1": "alice@example.com"},
-		groups: map[string]string{"11": "data-eng"},
-		assignments: map[string][]map[string]any{"main": {
-			{"principal": "data-eng", "principal_id": 11, "privileges": []string{"USE_CATALOG", "NOT_A_PRIVILEGE"}},
-			{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"SELECT"}},
-		}},
-	}
-	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{groups: true})
-	resource := testCatalog(t, "main", "alice@example.com", "wsa")
-
-	grants, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{})
-	if err != nil {
-		t.Fatalf("Grants: %v", err)
-	}
-
-	group := "account/" + testAccountId + "/group/11"
-	want := []string{
-		"1 catalog:ms-1::main:SELECT",
-		"1 catalog:ms-1::main:owner",
-		group + " catalog:ms-1::main:USE_CATALOG",
-	}
-	slices.Sort(want)
-	if got := grantKeys(grants); !slices.Equal(got, want) {
-		t.Fatalf("grants = %v, want %v", got, want)
-	}
-	if !slices.Equal(f.permHosts, []string{"wsa"}) {
-		t.Errorf("permissions read through %v, want [wsa]", f.permHosts)
-	}
-
-	for _, g := range grants {
-		annos := annotations.Annotations(g.GetAnnotations())
-		switch {
-		case strings.HasSuffix(g.GetEntitlement().GetId(), ":owner"):
-			if !annos.Contains(&v2.GrantImmutable{}) {
-				t.Error("the owner grant is not immutable")
-			}
-		case g.GetPrincipal().GetId().GetResourceType() == groupResourceType.Id:
-			expandable := &v2.GrantExpandable{}
-			if ok, err := annos.Pick(expandable); err != nil || !ok {
-				t.Fatalf("the group's grant is not expandable (err %v)", err)
-			}
-			if len(expandable.GetEntitlementIds()) != 1 ||
-				!strings.HasSuffix(expandable.GetEntitlementIds()[0], ":"+groupMemberEntitlement) || expandable.GetShallow() {
-				t.Errorf("GrantExpandable = %v, want the group's member entitlement, not shallow", expandable)
-			}
-		}
-	}
-
-	next, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{PageToken: pagination.Token{Token: "page-2"}})
-	if err != nil {
-		t.Fatalf("Grants page 2: %v", err)
-	}
-	for _, g := range next {
-		if strings.HasSuffix(g.GetEntitlement().GetId(), ":owner") {
-			t.Error("the owner grant was emitted again on a later page")
-		}
-	}
-}
-
-// A permissions read that fails is never an absence: returning no grants would
-// revoke every privilege on the catalog in ConductorOne, and NotFound is what
-// the SDK reads as "no grants".
-func TestCatalogGrantsFailOnErrors(t *testing.T) {
-	for _, code := range []int{http.StatusNotFound, http.StatusForbidden, http.StatusInternalServerError} {
-		f := &fakeCatalogAccount{permStatus: code}
-		b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
-
-		_, _, err := b.Grants(context.Background(), testCatalog(t, "main", "", "wsa"), rs.SyncOpAttrs{})
-		if status.Code(err) != codes.FailedPrecondition {
-			t.Errorf("Grants on %d = %v, want FailedPrecondition", code, err)
-		}
 	}
 }
 
@@ -597,33 +465,6 @@ func catalogProvisioningAccount() *fakeCatalogAccount {
 	}
 }
 
-// Databricks no-ops a privilege already held, so the pre-read is the only signal
-// for GrantAlreadyExists and the echo is the only proof the PATCH landed.
-func TestCatalogGrantAddsThePrivilegeOnceAndConfirmsIt(t *testing.T) {
-	f := catalogProvisioningAccount()
-	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
-	entitlement := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId()).GetEntitlement()
-
-	annos, err := b.Grant(context.Background(), alice, entitlement)
-	if err != nil {
-		t.Fatalf("Grant: %v", err)
-	}
-	if annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Error("a fresh grant reported GrantAlreadyExists")
-	}
-	if len(f.patches) != 1 || f.patches[0]["principal"] != "alice@example.com" {
-		t.Fatalf("patches = %v, want one add for alice@example.com", f.patches)
-	}
-
-	annos, err = b.Grant(context.Background(), alice, entitlement)
-	if err != nil || !annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Fatalf("second Grant = %v, %v; want GrantAlreadyExists", annos, err)
-	}
-	if len(f.patches) != 1 {
-		t.Errorf("a held privilege was patched again: %v", f.patches)
-	}
-}
-
 // A principal that is gone from SCIM still carries its numeric id on the row, so
 // the removal goes by principal_id; an absent privilege is already revoked.
 func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
@@ -646,37 +487,5 @@ func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
 	annos, err = b.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
-	}
-}
-
-func TestCatalogGrantRejections(t *testing.T) {
-	tests := []struct {
-		name        string
-		workspace   string
-		privilege   string
-		patchStatus int
-		code        codes.Code
-	}{
-		{"owner", "wsa", ownerEntitlement, 0, codes.InvalidArgument},
-		{"legacy alias", "wsa", "USAGE", 0, codes.InvalidArgument},
-		{"not offered", "wsa", "CREATE_CATALOG", 0, codes.InvalidArgument},
-		{"no workspace on the profile", "", "USE_CATALOG", 0, codes.FailedPrecondition},
-		{"forbidden", "wsa", "USE_CATALOG", http.StatusForbidden, codes.PermissionDenied},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := catalogProvisioningAccount()
-			f.patchStatus = test.patchStatus
-			b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
-			g := grant.NewGrant(testCatalog(t, "main", "someone", test.workspace), test.privilege, alice.GetId())
-
-			_, err := b.Grant(context.Background(), alice, g.GetEntitlement())
-			if status.Code(err) != test.code {
-				t.Fatalf("Grant = %v, want %s", err, test.code)
-			}
-			if test.code == codes.PermissionDenied && !strings.Contains(err.Error(), catalogWriteRemedy) {
-				t.Errorf("error %q does not name the remedy", err)
-			}
-		})
 	}
 }

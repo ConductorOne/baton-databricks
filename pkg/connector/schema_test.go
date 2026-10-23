@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
-	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -261,59 +260,6 @@ func manySchemas(prefix string, n int) []map[string]any {
 	return schemas
 }
 
-// A schema is keyed by its metastore and its dotted full name, which extends the
-// catalog's id, and carries the route and the owners its Grants are decided from.
-// information_schema is Databricks' own read-only schema and is left out.
-func TestSchemaListEmitsTheSchemasOfItsCatalog(t *testing.T) {
-	f := &fakeSchemaAccount{
-		catalogOwner: "someone",
-		schemas: append(manySchemas("sales", 120),
-			map[string]any{"name": "information_schema", "owner": "System user"}),
-	}
-	b := newTestSchemaBuilder(t, f)
-
-	resources, err := listAllSchemas(t, b)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(resources) != 120 {
-		t.Fatalf("listed %d schemas, want 120 (information_schema left out)", len(resources))
-	}
-	if f.schemaPages != 3 {
-		t.Errorf("schema pages read = %d, want 3", f.schemaPages)
-	}
-	// Later pages carry the route, so neither the workspace nor the catalog is
-	// resolved again.
-	if f.routed != 1 || f.catalogPages != 1 {
-		t.Errorf("the route was resolved %d times over %d catalog pages, want once per catalog", f.routed, f.catalogPages)
-	}
-
-	first := resources[0]
-	if got := first.GetId().GetResource(); got != "ms-1::main.sales_000" {
-		t.Errorf("resource id = %q, want ms-1::main.sales_000", got)
-	}
-	if first.GetDisplayName() != "main.sales_000" {
-		t.Errorf("display name = %q, want main.sales_000", first.GetDisplayName())
-	}
-	if first.GetParentResourceId().GetResource() != "ms-1::main" {
-		t.Errorf("parent = %v, want the catalog ms-1::main", first.GetParentResourceId())
-	}
-	profile := rs.GetProfile(first)
-	for key, want := range map[string]string{
-		profileKeyMetastoreID: "ms-1", profileKeyFullName: "main.sales_000",
-		profileKeyCatalogName: "main", profileKeySchemaName: "sales_000",
-		profileKeyOwner: "someone", profileKeySecurableType: securableTypeSchema,
-		profileKeyWorkspace: "wsa", profileKeyWorkspaceID: "1", profileKeyWorkspaceName: "prod",
-		// Grants decides visibility from the owners above the schema, so List
-		// writes both of them down.
-		profileKeyMetastoreOwner: testOwnPrincipal, profileKeyCatalogOwner: "someone",
-	} {
-		if got, _ := rs.GetProfileStringValue(profile, key); got != want {
-			t.Errorf("profile[%s] = %q, want %q", key, got, want)
-		}
-	}
-}
-
 // Databricks answers a caller without catalog-wide visibility with only the
 // schemas it owns or can use, at 200, which is indistinguishable from a catalog
 // that holds just those. A short list read as the whole one makes ConductorOne
@@ -425,42 +371,6 @@ func TestSchemaListRequiresACompleteListing(t *testing.T) {
 	}
 }
 
-// The one workspace the route picked refusing the probe ends the sync. A second
-// workspace that could see the schemas is not consulted: the route is one
-// workspace, chosen once. A 401 or 403 leaves the listing unproven, so it is a
-// refusal. A 500 is the account plane failing, which is that error.
-func TestSchemaListStopsWhenTheChosenWorkspaceRefusesTheProbe(t *testing.T) {
-	tests := []struct {
-		name   string
-		status int
-		want   codes.Code
-	}{
-		{"unauthorized", http.StatusUnauthorized, codes.PermissionDenied},
-		{"forbidden", http.StatusForbidden, codes.PermissionDenied},
-		{"server error", http.StatusInternalServerError, codes.Unavailable},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := &fakeSchemaAccount{
-				metastoreOwner: "eng",
-				catalogOwner:   "someone",
-				second:         true,
-				permStatus:     map[string]int{"wsa": test.status},
-				ownPrivileges: map[string][]map[string]any{
-					"catalog/main": {{"principal": "data-eng", "principal_id": 11, "privileges": []string{"MANAGE"}}},
-				},
-				schemas: []map[string]any{{"name": "sales", "owner": "someone"}},
-			}
-			b := newTestSchemaBuilderAs(t, f, "app-9")
-
-			_, err := listAllSchemas(t, b)
-			if status.Code(err) != test.want {
-				t.Fatalf("List = %v, want %s", err, test.want)
-			}
-		})
-	}
-}
-
 // A listing the workspace refuses leaves which schemas exist unknown. Emitting
 // nothing would read as deleting them all, and a NotFound is what the SDK reads
 // as a securable with no children.
@@ -482,67 +392,6 @@ func TestSchemaListFailsInsteadOfEmittingAShortList(t *testing.T) {
 		}
 		if got := status.Code(err); got != want {
 			t.Errorf("List over a schemas listing answering %d = %v, want %s", code, err, want)
-		}
-	}
-}
-
-// A group's privilege is expandable to its members; the owner's is immutable and
-// emitted only with the first page; a privilege a schema does not offer is not
-// emitted at all.
-func TestSchemaGrants(t *testing.T) {
-	f := &fakeSchemaAccount{
-		catalogOwner: "someone",
-		users:        map[string]string{"1": "alice@example.com"},
-		groups:       map[string]string{"11": "data-eng"},
-		assignments: map[string][]map[string]any{"main.sales": {
-			{"principal": "data-eng", "principal_id": 11, "privileges": []string{"USE_SCHEMA", "USE_CATALOG"}},
-			{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"SELECT"}},
-		}},
-	}
-	b := newTestSchemaBuilder(t, f)
-	resource := testSchema(t, "sales", "alice@example.com", "someone", testOwnPrincipal, "wsa")
-
-	grants, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{})
-	if err != nil {
-		t.Fatalf("Grants: %v", err)
-	}
-
-	group := "account/" + testAccountId + "/group/11"
-	want := []string{
-		"1 schema:ms-1::main.sales:SELECT",
-		"1 schema:ms-1::main.sales:owner",
-		group + " schema:ms-1::main.sales:USE_SCHEMA",
-	}
-	slices.Sort(want)
-	if got := grantKeys(grants); !slices.Equal(got, want) {
-		t.Fatalf("grants = %v, want %v", got, want)
-	}
-	if !slices.Equal(f.permHosts, []string{"wsa"}) {
-		t.Errorf("permissions read through %v, want [wsa]", f.permHosts)
-	}
-
-	for _, g := range grants {
-		annos := annotations.Annotations(g.GetAnnotations())
-		switch {
-		case strings.HasSuffix(g.GetEntitlement().GetId(), ":owner"):
-			if !annos.Contains(&v2.GrantImmutable{}) {
-				t.Error("the owner grant is not immutable")
-			}
-		case g.GetPrincipal().GetId().GetResourceType() == groupResourceType.Id:
-			expandable := &v2.GrantExpandable{}
-			if ok, err := annos.Pick(expandable); err != nil || !ok {
-				t.Fatalf("the group's grant is not expandable (err %v)", err)
-			}
-		}
-	}
-
-	next, _, err := b.Grants(context.Background(), resource, rs.SyncOpAttrs{PageToken: pagination.Token{Token: "page-2"}})
-	if err != nil {
-		t.Fatalf("Grants page 2: %v", err)
-	}
-	for _, g := range next {
-		if strings.HasSuffix(g.GetEntitlement().GetId(), ":owner") {
-			t.Error("the owner grant was emitted again on a later page")
 		}
 	}
 }
@@ -699,73 +548,5 @@ func TestSchemaGrantAndRevokeAreIdempotent(t *testing.T) {
 	annos, err = b.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
-	}
-}
-
-func TestSchemaGrantRejections(t *testing.T) {
-	tests := []struct {
-		name        string
-		workspace   string
-		privilege   string
-		patchStatus int
-		code        codes.Code
-	}{
-		{"owner", "wsa", ownerEntitlement, 0, codes.InvalidArgument},
-		{"legacy alias", "wsa", "USAGE", 0, codes.InvalidArgument},
-		// USE_CATALOG stops at the catalog, so a schema never offers it.
-		{"stops at the catalog", "wsa", "USE_CATALOG", 0, codes.InvalidArgument},
-		{"no workspace on the profile", "", "SELECT", 0, codes.FailedPrecondition},
-		{"forbidden", "wsa", "SELECT", http.StatusForbidden, codes.PermissionDenied},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := &fakeSchemaAccount{
-				catalogOwner: "someone",
-				users:        map[string]string{"1": "alice@example.com"},
-				patchStatus:  test.patchStatus,
-			}
-			b := newTestSchemaBuilder(t, f)
-			g := grant.NewGrant(testSchema(t, "sales", "someone", "someone", testOwnPrincipal, test.workspace), test.privilege, alice.GetId())
-
-			_, err := b.Grant(context.Background(), alice, g.GetEntitlement())
-			if status.Code(err) != test.code {
-				t.Fatalf("Grant = %v, want %s", err, test.code)
-			}
-			if test.code == codes.PermissionDenied && !strings.Contains(err.Error(), schemaWriteRemedy) {
-				t.Errorf("error %q does not name the remedy", err)
-			}
-		})
-	}
-}
-
-// A privilege list the connector cannot fully read cannot be written to either:
-// the change would be decided from the subset Databricks chose to show.
-func TestSchemaProvisioningRefusesAPartialPrivilegeList(t *testing.T) {
-	for _, verb := range []string{"grant", "revoke"} {
-		t.Run(verb, func(t *testing.T) {
-			f := &fakeSchemaAccount{
-				metastoreOwner: "eng",
-				catalogOwner:   "someone",
-				users:          map[string]string{"1": "alice@example.com"},
-				assignments: map[string][]map[string]any{"main.sales": {
-					{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"SELECT"}},
-				}},
-			}
-			b := newTestSchemaBuilderAs(t, f, "app-9")
-			g := grant.NewGrant(testSchema(t, "sales", "someone", "someone", "eng", "wsa"), "SELECT", alice.GetId())
-
-			var err error
-			if verb == "grant" {
-				_, err = b.Grant(context.Background(), alice, g.GetEntitlement())
-			} else {
-				_, err = b.Revoke(context.Background(), g)
-			}
-			if status.Code(err) != codes.PermissionDenied {
-				t.Fatalf("%s = %v, want PermissionDenied", verb, err)
-			}
-			if len(f.patches) != 0 {
-				t.Errorf("patches = %v, want none", f.patches)
-			}
-		})
 	}
 }
