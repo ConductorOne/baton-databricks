@@ -260,6 +260,34 @@ func (c *Client) FindUserID(
 	return users[0].ID, ratelimitData, nil
 }
 
+// GetUserByUsername returns the first user matching username, or nil; like FindUserID the filter is not escaped.
+func (c *Client) GetUserByUsername(
+	ctx context.Context,
+	workspaceId string,
+	username string,
+) (
+	*User,
+	*v2.RateLimitDescription,
+	error,
+) {
+	users, _, ratelimitData, err := c.ListUsers(
+		ctx,
+		workspaceId,
+		&PaginationVars{Count: 1},
+		NewFilterVars(fmt.Sprintf("userName eq '%s'", username)),
+		NewUserAttrVars(),
+	)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	if len(users) == 0 {
+		return nil, ratelimitData, nil
+	}
+
+	return &users[0], ratelimitData, nil
+}
+
 func (c *Client) FindUsername(
 	ctx context.Context,
 	workspaceId string,
