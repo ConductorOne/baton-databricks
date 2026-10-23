@@ -166,13 +166,31 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	return result, nil
 }
 
+// errPrincipalNotFound marks a principal lookup that matched nothing, as opposed to a lookup
+// that failed. Revoke callers use it to treat a vanished principal as already revoked.
+var errPrincipalNotFound = errors.New("principal not found")
+
+// principalNotFoundWrapper is a NotFound status error that also matches errPrincipalNotFound,
+// keeping the status error's message untouched.
+type principalNotFoundWrapper struct {
+	statusErr error
+}
+
+func (e *principalNotFoundWrapper) Error() string { return e.statusErr.Error() }
+
+func (e *principalNotFoundWrapper) Unwrap() []error {
+	return []error{e.statusErr, errPrincipalNotFound}
+}
+
 // principalNotFoundError reports a principal lookup that matched nothing, so callers never
 // write an empty "users/", "groups/" or "servicePrincipals/" principal into a rule set.
 func principalNotFoundError(principalLabel, workspaceId, principalId string) error {
-	return uhttp.WrapErrors(
-		codes.NotFound,
-		fmt.Sprintf("databricks-connector: %s %s/%s not found", principalLabel, workspaceId, principalId),
-	)
+	return &principalNotFoundWrapper{
+		statusErr: uhttp.WrapErrors(
+			codes.NotFound,
+			fmt.Sprintf("databricks-connector: %s %s/%s not found", principalLabel, workspaceId, principalId),
+		),
+	}
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {
