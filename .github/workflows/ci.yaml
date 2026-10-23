@@ -34,3 +34,61 @@ jobs:
           baton-entitlement: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/66271399072731:member'
           baton-principal: '5346803201281760'
           baton-principal-type: 'user'
+  # Runs the incremental sync event feed against the local test server (test-server/), so it
+  # needs no Databricks account or secrets and also runs on pull requests from forks.
+  test-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build connector and test server
+        run: |
+          go build -o baton-databricks ./cmd/baton-databricks
+          go build -o /tmp/databricks-test-server ./test-server
+      - name: Start test server
+        run: |
+          /tmp/databricks-test-server --ca-out /tmp/test-server-ca.pem > test-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf --cacert /tmp/test-server-ca.pem https://localhost:8765/health > /dev/null; then
+              echo "test server is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "test server did not come up in time"; cat test-server.log; exit 1
+      - name: Run incremental sync against the test server
+        env:
+          SSL_CERT_FILE: /tmp/test-server-ca.pem
+        run: |
+          ./baton-databricks \
+            --hostname localhost:8765 --account-hostname localhost:8765 \
+            --account-id test-account \
+            --databricks-client-id test-client --databricks-client-secret test-secret \
+            --sql-warehouse-id wh-serverless \
+            --event-feed true --event-feed-id databricks_audit_log \
+            --event-feed-start-at "$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)" \
+            > events.jsonl
+      - name: Compare events with the expected output
+        run: |
+          normalize() { jq -c -S 'del(.occurredAt)' "$1" | sort; }
+          diff <(normalize test-server/testdata/expected-events.jsonl) <(normalize events.jsonl)
+      - name: Check the cold-start timeout message
+        env:
+          SSL_CERT_FILE: /tmp/test-server-ca.pem
+        run: |
+          if ./baton-databricks \
+            --hostname localhost:8765 --account-hostname localhost:8765 \
+            --account-id test-account \
+            --databricks-client-id test-client --databricks-client-secret test-secret \
+            --sql-warehouse-id wh-broken \
+            --event-feed true --event-feed-id databricks_audit_log \
+            --event-feed-start-at "$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)" 2> err.log; then
+            echo "expected the event feed to fail with a broken warehouse"; exit 1
+          fi
+          grep -q "has not started" err.log
+      - name: Show test server log on failure
+        if: failure()
+        run: cat test-server.log
