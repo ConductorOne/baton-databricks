@@ -452,7 +452,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 		// The workspace SCIM API answers 400 to a remove on an empty members attribute, so a
 		// principal that is not a member is left as is instead of being patched.
 		if !slices.ContainsFunc(group.Members, func(m databricks.Member) bool { return m.ID == principalId }) {
-			return nil, nil
+			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 		}
 
 		_, err = g.client.PatchGroup(ctx, workspaceId, groupId.Resource, removeValueOp("members", principalId))

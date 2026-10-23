@@ -237,7 +237,8 @@ func (c *Client) doRequestWithOptions(
 	}
 	options = append(options, extraOptions...)
 	for _, param := range params {
-		if _, ok := param.(NoCacheVars); ok {
+		switch param.(type) {
+		case NoCacheVars, *NoCacheVars:
 			options = append(options, uhttp.WithNoCache())
 		}
 	}

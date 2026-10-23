@@ -12,6 +12,7 @@ import (
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
@@ -411,44 +412,120 @@ func TestWorkspaceGroupWritesArePatches(t *testing.T) {
 	}
 }
 
-// TestWorkspaceGroupRevokeAbsentValueSkipsWrite: the workspace API answers 400 to a remove on an
-// empty attribute, so revoking a member or entitlement the group does not have must not write.
-func TestWorkspaceGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
+// TestGroupRevokeAbsentValueSkipsWrite: the workspace API answers 400 to a remove on an empty
+// attribute, so revoking a member, role or entitlement the group does not have must not write. It
+// answers GrantAlreadyRevoked so C1 can tell the no-op from a real mutation.
+func TestGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
+	const (
+		accountPath   = "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target"
+		workspacePath = "/api/2.0/preview/scim/v2/Groups/g-target"
+	)
 	tests := []struct {
 		name string
-		run  func(t *testing.T, srv *fakeSCIMGroup) error
+		path string
+		run  func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error)
 	}{
 		{
 			name: "membership",
-			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+			path: workspacePath,
+			run: func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error) {
 				srv.state["members"] = []any{}
 				g := newGroupBuilderWithHandler(t, srv.handler)
-				_, err := g.Revoke(context.Background(), &v2.Grant{
+				return g.Revoke(context.Background(), &v2.Grant{
 					Principal:   testUserPrincipal(t, "u-absent"),
 					Entitlement: ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement),
 				})
-				return err
 			},
 		},
 		{
-			name: "entitlement",
-			run: func(t *testing.T, srv *fakeSCIMGroup) error {
+			name: "workspace entitlement",
+			path: workspacePath,
+			run: func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error) {
 				srv.state["entitlements"] = []any{}
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, true)})
-				return err
+				return r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, true)})
+			},
+		},
+		{
+			name: "account role",
+			path: accountPath,
+			run: func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error) {
+				srv.state["roles"] = []any{}
+				r := newRoleBuilderWithHandler(t, srv.handler)
+				return r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, false)})
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newFakeSCIMGroup(t, "/api/2.0/preview/scim/v2/Groups/g-target")
-			if err := tc.run(t, srv); err != nil {
+			srv := newFakeSCIMGroup(t, tc.path)
+			annos, err := tc.run(t, srv)
+			if err != nil {
 				t.Fatalf("Revoke returned error: %v", err)
+			}
+			if !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+				t.Errorf("annotations = %v, want GrantAlreadyRevoked", annos)
 			}
 			if len(srv.writes) != 0 || srv.puts != 0 {
 				t.Errorf("Revoke wrote to the group (%d PATCH, %d PUT), want no write", len(srv.writes), srv.puts)
+			}
+		})
+	}
+}
+
+// TestRoleGrantToGroup: a group that already holds the role or entitlement is not patched and
+// answers GrantAlreadyExists; a group that lacks it gets exactly one PATCH with the add op.
+func TestRoleGrantToGroup(t *testing.T) {
+	tests := []struct {
+		name          string
+		path          string
+		workspaceRole bool
+		attribute     string
+		held          string
+	}{
+		{name: "account role", path: "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target", attribute: "roles", held: AccountAdminRole},
+		{name: "workspace entitlement", path: "/api/2.0/preview/scim/v2/Groups/g-target", workspaceRole: true, attribute: "entitlements", held: WorkspaceAccessRole},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name+" already held", func(t *testing.T) {
+			srv := newFakeSCIMGroup(t, tc.path)
+			r := newRoleBuilderWithHandler(t, srv.handler)
+
+			annos, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, tc.workspaceRole))
+			if err != nil {
+				t.Fatalf("Grant returned error: %v", err)
+			}
+			if !annos.Contains(&v2.GrantAlreadyExists{}) {
+				t.Errorf("annotations = %v, want GrantAlreadyExists", annos)
+			}
+			if len(srv.writes) != 0 || srv.puts != 0 {
+				t.Errorf("Grant wrote to the group (%d PATCH, %d PUT), want no write", len(srv.writes), srv.puts)
+			}
+		})
+
+		t.Run(tc.name+" not held", func(t *testing.T) {
+			srv := newFakeSCIMGroup(t, tc.path)
+			srv.state[tc.attribute] = []any{}
+			r := newRoleBuilderWithHandler(t, srv.handler)
+
+			annos, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, tc.workspaceRole))
+			if err != nil {
+				t.Fatalf("Grant returned error: %v", err)
+			}
+			if annos.Contains(&v2.GrantAlreadyExists{}) {
+				t.Errorf("annotations = %v, want no GrantAlreadyExists", annos)
+			}
+			if len(srv.writes) != 1 || srv.puts != 0 {
+				t.Fatalf("Grant sent %d PATCH, %d PUT, want exactly 1 PATCH", len(srv.writes), srv.puts)
+			}
+			ops := srv.writes[0].Operations
+			if len(ops) != 1 || ops[0].Op != "add" || ops[0].Path != tc.attribute {
+				t.Errorf("PATCH operations = %+v, want a single %s add", ops, tc.attribute)
+			}
+			if got := srv.values(tc.attribute); !slices.Equal(got, []string{tc.held}) {
+				t.Errorf("group %s = %v, want [%s]", tc.attribute, got, tc.held)
 			}
 		})
 	}

@@ -152,3 +152,48 @@ func TestPatchGroup(t *testing.T) {
 		})
 	}
 }
+
+// TestNoCacheVarsBypassesCache: a GET is cached by the HTTP client unless it carries NoCacheVars,
+// whether passed by value or by pointer.
+func TestNoCacheVarsBypassesCache(t *testing.T) {
+	tests := []struct {
+		name      string
+		vars      []Vars
+		wantCalls int
+	}{
+		{name: "default is cached", wantCalls: 1},
+		{name: "value", vars: []Vars{NoCacheVars{}}, wantCalls: 2},
+		{name: "pointer", vars: []Vars{&NoCacheVars{}}, wantCalls: 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"g1","displayName":"G"}`))
+			}))
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse server url: %v", err)
+			}
+
+			c, err := NewClient(context.Background(), &http.Client{Transport: &rewriteToServer{target: target}},
+				"example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", "", &NoAuth{}, nil)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			for i := 0; i < 2; i++ {
+				if _, _, err := c.GetGroup(context.Background(), "", "g1", tc.vars...); err != nil {
+					t.Fatalf("GetGroup: %v", err)
+				}
+			}
+			if calls != tc.wantCalls {
+				t.Errorf("server saw %d requests for 2 reads, want %d", calls, tc.wantCalls)
+			}
+		})
+	}
+}

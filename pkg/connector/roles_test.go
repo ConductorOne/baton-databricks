@@ -271,17 +271,21 @@ func TestRoleGrantUserPrincipalStillWorks(t *testing.T) {
 func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
 	tests := []struct {
 		name string
-		run  func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error
+		// roles are the group's current roles: a grant needs a group that lacks the role, a revoke one that holds it.
+		roles []map[string]any
+		run   func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error
 	}{
 		{
-			name: "grant",
+			name:  "grant",
+			roles: []map[string]any{},
 			run: func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
 				_, err := r.Grant(context.Background(), principal, entitlement)
 				return err
 			},
 		},
 		{
-			name: "revoke",
+			name:  "revoke",
+			roles: []map[string]any{{"value": AccountAdminRole}},
 			run: func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
 				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
 				return err
@@ -302,7 +306,7 @@ func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
 						"id":          "g-native",
 						"displayName": "Native Group",
 						"members":     []map[string]any{{"value": "existing-member-1"}},
-						"roles":       []map[string]any{{"value": AccountAdminRole}},
+						"roles":       tc.roles,
 						"meta":        map[string]any{"resourceType": "Group"},
 					})
 				case req.Method == http.MethodPatch && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
