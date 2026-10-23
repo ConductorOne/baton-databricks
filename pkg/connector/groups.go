@@ -305,7 +305,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
+		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
@@ -324,7 +324,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 
 		// add the member to the group
 		group.Members = append(group.Members, databricks.Member{
-			ID: principal.Id.Resource,
+			ID: principalId.Resource,
 		})
 
 		_, err = g.client.UpdateGroup(ctx, workspaceId, group)
@@ -448,7 +448,7 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
+		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
@@ -499,6 +499,10 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	}
 
 	principalId, prepareErr := preparePrincipalId(ctx, g.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
+	if errors.Is(prepareErr, errPrincipalNotFound) {
+		// the principal no longer exists, so it does not have the entitlement: the revoke is already satisfied
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+	}
 	if prepareErr != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", prepareErr)
 	}
