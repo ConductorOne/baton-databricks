@@ -160,7 +160,13 @@ func schemaResource(
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+		rs.WithAnnotation(
+			// Without these annotations the table and volume syncers' List is
+			// never invoked.
+			&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: volumeResourceType.Id},
+			&v2.RawId{Id: resourceID},
+		),
 	)
 }
 
@@ -289,7 +295,7 @@ func (b *schemaBuilder) pushRoute(
 	// The catalog listing answers who owns the catalog, which is what the
 	// completeness rule is decided against. A catalog this workspace does not
 	// list has no schemas on this path.
-	catalog, err := b.catalogThrough(ctx, workspace.DeploymentName, metastoreID, catalogName, annos)
+	catalog, err := catalogThrough(ctx, b.client, workspace.DeploymentName, metastoreID, catalogName, annos)
 	if err != nil {
 		return err
 	}
@@ -338,14 +344,15 @@ func (b *schemaBuilder) pushRoute(
 
 // catalogThrough finds one catalog in the listing of workspace, nil when that
 // workspace does not list it.
-func (b *schemaBuilder) catalogThrough(
+func catalogThrough(
 	ctx context.Context,
+	client *databricks.Client,
 	workspace, metastoreID, catalogName string,
 	annos *annotations.Annotations,
 ) (*databricks.Catalog, error) {
 	pageToken := ""
 	for {
-		catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
+		catalogs, next, rateLimit, err := client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
 		noteRateLimit(annos, rateLimit)
 		if err != nil {
 			return nil, catalogListingError(metastoreID, workspace, err)
@@ -366,6 +373,41 @@ func (b *schemaBuilder) catalogThrough(
 			return nil, status.Errorf(codes.Internal,
 				"databricks-connector: the catalogs of metastore %s repeat page token %q through workspace %s",
 				metastoreID, next, workspace)
+		}
+		pageToken = next
+	}
+}
+
+// schemaThrough finds one schema in the listing of workspace, nil when that
+// workspace does not list it. Its caller has already proven the listing holds
+// every schema in the catalog, so an absence here is the schema being gone.
+func schemaThrough(
+	ctx context.Context,
+	client *databricks.Client,
+	workspace, catalogName, schemaName string,
+	annos *annotations.Annotations,
+) (*databricks.Schema, error) {
+	pageToken := ""
+	for {
+		schemas, next, rateLimit, err := client.ListSchemas(ctx, workspace, catalogName, pageToken, ResourcesPageSize)
+		noteRateLimit(annos, rateLimit)
+		if err != nil {
+			return nil, schemaListingError(catalogName, workspace, err)
+		}
+
+		for _, schema := range schemas {
+			if schema.Name == schemaName {
+				return &schema, nil
+			}
+		}
+
+		if next == "" {
+			return nil, nil
+		}
+		if next == pageToken {
+			return nil, status.Errorf(codes.Internal,
+				"databricks-connector: the schemas of catalog %s repeat page token %q through workspace %s",
+				catalogName, next, workspace)
 		}
 		pageToken = next
 	}
