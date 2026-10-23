@@ -3,6 +3,7 @@ package databricks
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 )
 
 type Vars interface {
@@ -165,5 +166,28 @@ func NewNameVars(name string, etag string) *NameVars {
 	return &NameVars{
 		Payload: name,
 		Etag:    etag,
+	}
+}
+
+// Databricks reads max_results=0 as "page at the server-configured length"
+// while an absent max_results asks for the deprecated unpaginated response, so
+// maxResults is a pointer: its presence is the signal.
+type unityCatalogVars struct {
+	principal  string
+	maxResults *uint
+	pageToken  string
+}
+
+func (v *unityCatalogVars) Apply(params *url.Values) {
+	if v.principal != "" {
+		params.Add("principal", v.principal)
+	}
+
+	if v.maxResults != nil {
+		params.Add("max_results", strconv.FormatUint(uint64(*v.maxResults), 10))
+	}
+
+	if v.pageToken != "" {
+		params.Add("page_token", v.pageToken)
 	}
 }

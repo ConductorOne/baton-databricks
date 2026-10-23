@@ -49,9 +49,42 @@ func groupGrantExpansion(ctx context.Context, groupId string, parentResource *v2
 	}, nil
 }
 
+func capabilityPermissions(perms ...string) *v2.CapabilityPermissions {
+	cp := &v2.CapabilityPermissions{Permissions: make([]*v2.CapabilityPermission, 0, len(perms))}
+	for _, perm := range perms {
+		cp.Permissions = append(cp.Permissions, &v2.CapabilityPermission{Permission: perm})
+	}
+
+	return cp
+}
+
+// noteRateLimit puts the descriptor doRequest parsed on the sync annotations,
+// which is the only place the SDK reads it from.
+func noteRateLimit(annos *annotations.Annotations, rateLimit *v2.RateLimitDescription) {
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
+}
+
 func annotationsForUserResourceType() annotations.Annotations {
 	annos := annotations.Annotations{}
 	annos.Update(&v2.SkipEntitlementsAndGrants{})
+	annos.Update(capabilityPermissions(scopeSCIM, permissionAccountAdmin))
+	return annos
+}
+
+func annotationsForSecurableResourceType(perms ...string) annotations.Annotations {
+	annos := annotations.Annotations{}
+	annos.Update(&v2.OptInRequired{})
+	annos.Update(capabilityPermissions(perms...))
+	return annos
+}
+
+// StaticEntitlements is a separate SDK pass, so Entitlements() must not also run.
+// Grants() still runs.
+func annotationsForStaticSecurableResourceType(perms ...string) annotations.Annotations {
+	annos := annotationsForSecurableResourceType(perms...)
+	annos.Update(&v2.SkipEntitlements{})
 	return annos
 }
 

@@ -51,6 +51,7 @@ func wrapTransportAuthError(err error) error {
 // APIError represents an error response from the Databricks API.
 type APIError struct {
 	StatusCode int
+	ErrorCode  string
 	Detail     string
 	Message    string
 	Err        error
@@ -58,8 +59,9 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf(
-		"unexpected status code %d: %s %s %v",
+		"unexpected status code %d: %s %s %s %v",
 		e.StatusCode,
+		e.ErrorCode,
 		e.Detail,
 		e.Message,
 		e.Err,
@@ -88,10 +90,15 @@ func nameWorkspace403Remedy(workspaceId string, err error) error {
 	return err
 }
 
+// invalidArgument marks a malformed request so it does not reach C1 as Unknown and get retried.
+func invalidArgument(format string, args ...any) error {
+	return uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf(format, args...))
+}
+
 func (c *Client) Get(
 	ctx context.Context,
 	urlAddress *url.URL,
-	response interface{},
+	response any,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
 	return c.doRequest(
@@ -100,6 +107,30 @@ func (c *Client) Get(
 		http.MethodGet,
 		nil,
 		response,
+		nil,
+		params...,
+	)
+}
+
+// GetUncached is Get with the uhttp response cache bypassed on the read side.
+// The cache holds a GET 200 for an hour and a PATCH does not invalidate it, so a
+// read that decides whether a write still has to happen must not be served from
+// it: the write would be skipped against a page that predates the last change.
+// uhttp still records the fresh response, so the entry a later reader sees is the
+// one this call just observed.
+func (c *Client) GetUncached(
+	ctx context.Context,
+	urlAddress *url.URL,
+	response any,
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequest(
+		ctx,
+		urlAddress,
+		http.MethodGet,
+		nil,
+		response,
+		[]uhttp.RequestOption{uhttp.WithNoCache()},
 		params...,
 	)
 }
@@ -107,8 +138,8 @@ func (c *Client) Get(
 func (c *Client) Put(
 	ctx context.Context,
 	urlAddress *url.URL,
-	body interface{},
-	response interface{},
+	body any,
+	response any,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
 	return c.doRequest(
@@ -117,6 +148,7 @@ func (c *Client) Put(
 		http.MethodPut,
 		body,
 		response,
+		nil,
 		params...,
 	)
 }
@@ -124,8 +156,8 @@ func (c *Client) Put(
 func (c *Client) Post(
 	ctx context.Context,
 	urlAddress *url.URL,
-	body interface{},
-	response interface{},
+	body any,
+	response any,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
 	return c.doRequest(
@@ -134,6 +166,25 @@ func (c *Client) Post(
 		http.MethodPost,
 		body,
 		response,
+		nil,
+		params...,
+	)
+}
+
+func (c *Client) Patch(
+	ctx context.Context,
+	urlAddress *url.URL,
+	body any,
+	response any,
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequest(
+		ctx,
+		urlAddress,
+		http.MethodPatch,
+		body,
+		response,
+		nil,
 		params...,
 	)
 }
@@ -152,7 +203,7 @@ func (c *Client) Delete(
 	)
 }
 
-func parseJSON(body io.Reader, res interface{}) error {
+func parseJSON(body io.Reader, res any) error {
 	// Databricks seems to return content-type text/plain even though it's json,
 	// so don't check content type.
 	if err := json.NewDecoder(body).Decode(res); err != nil {
@@ -162,52 +213,30 @@ func parseJSON(body io.Reader, res interface{}) error {
 	return nil
 }
 
-// getNoCache is a GET that bypasses the uhttp response cache.
-func (c *Client) getNoCache(
-	ctx context.Context,
-	urlAddress *url.URL,
-	response interface{},
-	params ...Vars,
-) (*v2.RateLimitDescription, error) {
-	return c.doRequestWithOptions(
-		ctx,
-		urlAddress,
-		http.MethodGet,
-		nil,
-		response,
-		[]uhttp.RequestOption{uhttp.WithNoCache()},
-		params...,
-	)
-}
+// cacheScopeHeader pins a cached response to the host it was read from: uhttp
+// keys its cache on path, query and headers with no host component, so two
+// workspace deployments answering the same path share one entry. net/http builds
+// the Host line from the URL and never sends this header on the wire.
+const cacheScopeHeader = "Host"
 
-func (c *Client) doRequest(
+// prepareRequest builds every request this client sends, so none can reach the
+// cache without the scope header. uhttp writes an entry even for a caller that
+// asked not to read one.
+func (c *Client) prepareRequest(
 	ctx context.Context,
 	urlAddress *url.URL,
 	method string,
-	body interface{},
-	response interface{},
+	body any,
+	requestOptions []uhttp.RequestOption,
 	params ...Vars,
-) (*v2.RateLimitDescription, error) {
-	return c.doRequestWithOptions(ctx, urlAddress, method, body, response, nil, params...)
-}
-
-// doRequestWithOptions is doRequest with extra request options appended.
-func (c *Client) doRequestWithOptions(
-	ctx context.Context,
-	urlAddress *url.URL,
-	method string,
-	body interface{},
-	response interface{},
-	extraOptions []uhttp.RequestOption,
-	params ...Vars,
-) (*v2.RateLimitDescription, error) {
+) (*http.Request, error) {
 	// TODO(marcos): Refactor URLs so that we don't have to unescape.
-	u, err := url.PathUnescape(urlAddress.String())
+	unescaped, err := url.PathUnescape(urlAddress.String())
 	if err != nil {
 		return nil, err
 	}
 
-	uri, err := url.Parse(u)
+	requestURL, err := url.Parse(unescaped)
 	if err != nil {
 		return nil, err
 	}
@@ -218,9 +247,9 @@ func (c *Client) doRequestWithOptions(
 	if body != nil {
 		options = append(options, uhttp.WithJSONBody(body))
 	}
-	options = append(options, extraOptions...)
+	options = append(options, requestOptions...)
 
-	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)
+	req, err := c.httpClient.NewRequest(ctx, method, requestURL, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +263,26 @@ func (c *Client) doRequestWithOptions(
 		req.URL.RawQuery = query.Encode()
 	}
 
+	req.Header.Set(cacheScopeHeader, req.URL.Host)
+
 	c.auth.Apply(req)
+
+	return req, nil
+}
+
+func (c *Client) doRequest(
+	ctx context.Context,
+	urlAddress *url.URL,
+	method string,
+	body any,
+	response any,
+	requestOptions []uhttp.RequestOption,
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	req, err := c.prepareRequest(ctx, urlAddress, method, body, requestOptions, params...)
+	if err != nil {
+		return nil, err
+	}
 
 	ratelimitData := &v2.RateLimitDescription{}
 	resp, err := c.httpClient.Do(
@@ -255,8 +303,9 @@ func (c *Client) doRequestWithOptions(
 	}
 
 	var errorResponse struct {
-		Detail  string `json:"detail"`
-		Message string `json:"message"`
+		ErrorCode string `json:"error_code"`
+		Detail    string `json:"detail"`
+		Message   string `json:"message"`
 	}
 	if err := parseJSON(resp.Body, &errorResponse); err != nil {
 		return nil, err
@@ -264,6 +313,7 @@ func (c *Client) doRequestWithOptions(
 
 	return ratelimitData, &APIError{
 		StatusCode: resp.StatusCode,
+		ErrorCode:  errorResponse.ErrorCode,
 		Detail:     errorResponse.Detail,
 		Message:    errorResponse.Message,
 		Err:        err,
@@ -274,42 +324,14 @@ func (c *Client) doRequestNoResponse(
 	ctx context.Context,
 	urlAddress *url.URL,
 	method string,
-	body interface{},
-	response interface{},
+	body any,
+	response any,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
-	u, err := url.PathUnescape(urlAddress.String())
+	req, err := c.prepareRequest(ctx, urlAddress, method, body, nil, params...)
 	if err != nil {
 		return nil, err
 	}
-
-	uri, err := url.Parse(u)
-	if err != nil {
-		return nil, err
-	}
-
-	options := []uhttp.RequestOption{
-		uhttp.WithAcceptJSONHeader(),
-	}
-	if body != nil {
-		options = append(options, uhttp.WithJSONBody(body))
-	}
-
-	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(params) > 0 {
-		query := url.Values{}
-		for _, param := range params {
-			param.Apply(&query)
-		}
-
-		req.URL.RawQuery = query.Encode()
-	}
-
-	c.auth.Apply(req)
 
 	ratelimitData := &v2.RateLimitDescription{}
 	resp, err := c.httpClient.Do(
