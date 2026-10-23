@@ -2,6 +2,7 @@ package databricks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
@@ -33,8 +35,9 @@ const (
 	accountRolesEndpoint             = "/api/2.0/preview/accounts/%s/access-control/assignable-roles"
 	accountRuleSetsEndpoint          = "/api/2.0/preview/accounts/%s/access-control/rule-sets"
 
-	accountWorkspacesEndpoint           = "/api/2.0/accounts/%s/workspaces"
-	accountWorkspaceAssignmentsEndpoint = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
+	accountWorkspacesEndpoint                   = "/api/2.0/accounts/%s/workspaces"
+	accountWorkspaceAssignmentsEndpoint         = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments"
+	accountWorkspacePrincipalAssignmentEndpoint = "/api/2.0/accounts/%s/workspaces/%s/permissionassignments/principals/%s"
 )
 
 type Client struct {
@@ -102,7 +105,10 @@ func NewClient(ctx context.Context, httpClient *http.Client, hostname, accountHo
 		Host:   accountHostname,
 	}
 
-	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient, uhttp.WithCacheKeyHeaders(cacheScopeHeader))
+	// Key the cache on the scope header so two workspaces answering the same path keep
+	// separate entries, and on Cache-Control so a read-before-write no-cache read does
+	// not overwrite the shared sync entry.
+	cli, err := uhttp.NewBaseHttpClientWithContext(ctx, httpClient, uhttp.WithCacheKeyHeaders(cacheScopeHeader, "Cache-Control"))
 	return &Client{
 		httpClient:        cli,
 		auth:              auth,
@@ -260,6 +266,34 @@ func (c *Client) FindUserID(
 	}
 
 	return users[0].ID, ratelimitData, nil
+}
+
+// GetUserByUsername returns the first user matching username, or nil; like FindUserID the filter is not escaped.
+func (c *Client) GetUserByUsername(
+	ctx context.Context,
+	workspaceId string,
+	username string,
+) (
+	*User,
+	*v2.RateLimitDescription,
+	error,
+) {
+	users, _, ratelimitData, err := c.ListUsers(
+		ctx,
+		workspaceId,
+		&PaginationVars{Count: 1},
+		NewFilterVars(fmt.Sprintf("userName eq '%s'", username)),
+		NewUserAttrVars(),
+	)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	if len(users) == 0 {
+		return nil, ratelimitData, nil
+	}
+
+	return &users[0], ratelimitData, nil
 }
 
 func (c *Client) FindUsername(
@@ -612,12 +646,30 @@ func (c *Client) ListWorkspaceMembers(
 	*v2.RateLimitDescription,
 	error,
 ) {
+	return c.listWorkspaceAssignments(ctx, workspaceId, false)
+}
+
+// listWorkspaceAssignments lists the workspace's assignments; noCache skips
+// the uhttp response cache.
+func (c *Client) listWorkspaceAssignments(
+	ctx context.Context,
+	workspaceId string,
+	noCache bool,
+) (
+	[]WorkspaceAssignment,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var res struct {
 		Assignments []WorkspaceAssignment `json:"permission_assignments"`
 	}
 
 	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId))
-	ratelimitData, err := c.Get(ctx, u, &res)
+	get := c.Get
+	if noCache {
+		get = c.GetUncached
+	}
+	ratelimitData, err := get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, err
 	}
@@ -625,31 +677,143 @@ func (c *Client) ListWorkspaceMembers(
 	return res.Assignments, ratelimitData, nil
 }
 
-func (c *Client) CreateOrUpdateWorkspaceMember(
+// validatePrincipalID rejects non-numeric IDs: the assignments API addresses
+// principals by numeric ID, and a group's composite resource ID would never match.
+func validatePrincipalID(principalID string) error {
+	if _, err := strconv.Atoi(principalID); err != nil {
+		return uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("principal ID must be numeric; compound group IDs are not supported here: %q", principalID),
+		)
+	}
+
+	return nil
+}
+
+// workspacePrincipalAssignmentURL is the URL of a single principal's assignment
+// on a workspace.
+func (c *Client) workspacePrincipalAssignmentURL(workspaceId, principalId string) *url.URL {
+	return c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspacePrincipalAssignmentEndpoint, c.accountId, workspaceId, principalId))
+}
+
+// AddWorkspaceMember grants the "USER" workspace permission to a principal.
+//
+// The assignments endpoint is full-replacement, not PATCH. An existing
+// assignment of any kind (USER and/or ADMIN) already grants workspace access,
+// so nothing is written and an existing ADMIN is never touched.
+//
+// GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments, then
+// PUT /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments/principals/{principal_id}.
+func (c *Client) AddWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
-) (
-	*v2.RateLimitDescription,
-	error,
-) {
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	payload := struct {
-		Permission []string `json:"permissions"`
-	}{
-		Permission: []string{"USER"},
+) (bool, *v2.RateLimitDescription, error) {
+	if err := validatePrincipalID(principalId); err != nil {
+		return false, nil, err
 	}
 
-	return c.Put(ctx, u, payload, nil)
+	hasAssignment, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	if err != nil {
+		return false, ratelimitData, fmt.Errorf("failed to read current workspace permission assignment: %w", err)
+	}
+
+	if hasAssignment {
+		return true, ratelimitData, nil
+	}
+
+	payload := struct {
+		Permissions []string `json:"permissions"`
+	}{
+		Permissions: []string{WorkspaceUserPermission},
+	}
+
+	putRatelimitData, err := c.Put(ctx, c.workspacePrincipalAssignmentURL(workspaceId, principalId), payload, nil)
+	if putRatelimitData != nil {
+		ratelimitData = putRatelimitData
+	}
+
+	return false, ratelimitData, err
 }
 
+// RemoveWorkspaceMember removes a principal's workspace assignment.
+//
+// The whole assignment (USER and/or ADMIN) is deleted because C1 models a
+// single "member" grant; this matches the previous behavior of wiping the
+// assignment with an empty PUT.
+// https://docs.databricks.com/api/access-management/v1/delete-workspace-permission-assignment
 func (c *Client) RemoveWorkspaceMember(
 	ctx context.Context,
 	workspaceId string,
 	principalId string,
-) (*v2.RateLimitDescription, error) {
-	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountWorkspaceAssignmentsEndpoint, c.accountId, workspaceId), "principals", principalId)
-	return c.Put(ctx, u, nil, nil)
+) (bool, *v2.RateLimitDescription, error) {
+	if err := validatePrincipalID(principalId); err != nil {
+		return false, nil, err
+	}
+
+	hasAssignment, ratelimitData, err := c.currentWorkspacePermissions(ctx, workspaceId, principalId)
+	if err != nil {
+		return false, ratelimitData, fmt.Errorf("failed to read current workspace permission assignment: %w", err)
+	}
+
+	if !hasAssignment {
+		return true, ratelimitData, nil
+	}
+
+	deleteRatelimitData, err := c.Delete(ctx, c.workspacePrincipalAssignmentURL(workspaceId, principalId))
+	if deleteRatelimitData != nil {
+		ratelimitData = deleteRatelimitData
+	}
+
+	// Removed between the read and the DELETE: already revoked.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return true, ratelimitData, nil
+	}
+
+	return false, ratelimitData, err
+}
+
+// currentWorkspacePermissions reports whether the principal holds any
+// permission on the workspace. It lists every assignment and matches by
+// principal ID: there's no API to fetch a single assignment directly. An entry
+// for the principal carrying an error is returned as an error, so callers
+// never write on top of an assignment that couldn't be read properly.
+//
+// GET /api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments.
+func (c *Client) currentWorkspacePermissions(
+	ctx context.Context,
+	workspaceId string,
+	principalId string,
+) (
+	bool,
+	*v2.RateLimitDescription,
+	error,
+) {
+	// Read-before-write: a cached list would miss earlier PUTs/DELETEs.
+	assignments, ratelimitData, err := c.listWorkspaceAssignments(ctx, workspaceId, true)
+	if err != nil {
+		return false, ratelimitData, err
+	}
+
+	for _, assignment := range assignments {
+		if assignment.Principal == nil {
+			continue
+		}
+		if strconv.Itoa(assignment.Principal.ID) != principalId {
+			continue
+		}
+		if assignment.Error != "" {
+			return false, ratelimitData, uhttp.WrapErrors(
+				codes.Internal,
+				fmt.Sprintf("workspace %s assignment for principal %s has an error: %s", workspaceId, principalId, assignment.Error),
+			)
+		}
+
+		return len(assignment.Permissions) > 0, ratelimitData, nil
+	}
+
+	return false, ratelimitData, nil
 }
 
 func (c *Client) ListRuleSets(
