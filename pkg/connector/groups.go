@@ -318,7 +318,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 					zap.String("entitlement", groupMemberEntitlement),
 				)
 
-				return nil, nil
+				return annotations.New(&v2.GrantAlreadyExists{}), nil
 			}
 		}
 

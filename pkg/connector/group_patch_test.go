@@ -281,8 +281,27 @@ func TestAccountGroupMembershipGrantAlreadyMemberSkipsWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Grant returned error: %v", err)
 	}
-	if annos != nil {
-		t.Errorf("Grant annotations = %v, want nil", annos)
+	if !annos.Contains(&v2.GrantAlreadyExists{}) {
+		t.Errorf("Grant annotations = %v, want GrantAlreadyExists", annos)
+	}
+	if len(srv.writes) != 0 || srv.puts != 0 {
+		t.Errorf("Grant wrote to the group (%d PATCH, %d PUT), want no write", len(srv.writes), srv.puts)
+	}
+}
+
+// TestWorkspaceGroupMembershipGrantAlreadyMemberSkipsWrite is the workspace-scoped twin of the
+// account test above: an existing member is reported as GrantAlreadyExists without any write.
+func TestWorkspaceGroupMembershipGrantAlreadyMemberSkipsWrite(t *testing.T) {
+	srv := newFakeSCIMGroup(t, "/api/2.0/preview/scim/v2/Groups/g-target")
+	g := newGroupBuilderWithHandler(t, srv.handler)
+
+	annos, err := g.Grant(context.Background(), testUserPrincipal(t, "u-new"),
+		ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement))
+	if err != nil {
+		t.Fatalf("Grant returned error: %v", err)
+	}
+	if !annos.Contains(&v2.GrantAlreadyExists{}) {
+		t.Errorf("Grant annotations = %v, want GrantAlreadyExists", annos)
 	}
 	if len(srv.writes) != 0 || srv.puts != 0 {
 		t.Errorf("Grant wrote to the group (%d PATCH, %d PUT), want no write", len(srv.writes), srv.puts)
