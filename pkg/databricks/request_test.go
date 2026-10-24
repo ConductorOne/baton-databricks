@@ -1,9 +1,12 @@
 package databricks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -83,6 +86,113 @@ func TestNameWorkspace403Remedy(t *testing.T) {
 			var apiErr *APIError
 			if !errors.As(got, &apiErr) {
 				t.Errorf("remedy should keep the wrapped APIError reachable")
+			}
+		})
+	}
+}
+
+type rewriteToServer struct {
+	target *url.URL
+}
+
+func (r *rewriteToServer) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Scheme = r.target.Scheme
+	req.URL.Host = r.target.Host
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// TestPatchGroup checks a SCIM PATCH succeeds on the API's empty 204 answer and keeps the
+// error detail on a rejected operation.
+func TestPatchGroup(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantDetail string
+	}{
+		{name: "empty 204", status: http.StatusNoContent},
+		{name: "rejected op", status: http.StatusBadRequest, body: `{"detail":"Unsupported role passed into operation"}`, wantDetail: "Unsupported role passed into operation"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMethod, gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				gotMethod, gotPath = req.Method, req.URL.Path
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse server url: %v", err)
+			}
+
+			c, err := NewClient(context.Background(), &http.Client{Transport: &rewriteToServer{target: target}},
+				"example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", "", &NoAuth{}, nil)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			_, err = c.PatchGroup(context.Background(), "", "g1", PatchOperation{Op: "add", Path: "roles", Value: []PermissionValue{{Value: "account_admin"}}})
+
+			if gotMethod != http.MethodPatch || gotPath != "/api/2.0/accounts/acc-1/scim/v2/Groups/g1" {
+				t.Errorf("request = %s %s, want PATCH /api/2.0/accounts/acc-1/scim/v2/Groups/g1", gotMethod, gotPath)
+			}
+			if tc.wantDetail == "" {
+				if err != nil {
+					t.Fatalf("PatchGroup returned error: %v", err)
+				}
+				return
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tc.status || apiErr.Detail != tc.wantDetail {
+				t.Errorf("PatchGroup error = %v, want APIError %d with detail %q", err, tc.status, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// TestNoCacheVarsBypassesCache: a GET is cached by the HTTP client unless it carries NoCacheVars,
+// whether passed by value or by pointer.
+func TestNoCacheVarsBypassesCache(t *testing.T) {
+	tests := []struct {
+		name      string
+		vars      []Vars
+		wantCalls int
+	}{
+		{name: "default is cached", wantCalls: 1},
+		{name: "value", vars: []Vars{NoCacheVars{}}, wantCalls: 2},
+		{name: "pointer", vars: []Vars{&NoCacheVars{}}, wantCalls: 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"g1","displayName":"G"}`))
+			}))
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse server url: %v", err)
+			}
+
+			c, err := NewClient(context.Background(), &http.Client{Transport: &rewriteToServer{target: target}},
+				"example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", "", &NoAuth{}, nil)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			for i := 0; i < 2; i++ {
+				if _, _, err := c.GetGroup(context.Background(), "", "g1", tc.vars...); err != nil {
+					t.Fatalf("GetGroup: %v", err)
+				}
+			}
+			if calls != tc.wantCalls {
+				t.Errorf("server saw %d requests for 2 reads, want %d", calls, tc.wantCalls)
 			}
 		})
 	}

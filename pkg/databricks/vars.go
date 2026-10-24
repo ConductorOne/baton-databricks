@@ -9,6 +9,12 @@ type Vars interface {
 	Apply(params *url.Values)
 }
 
+// NoCacheVars makes a GET skip the HTTP client's response cache. Reads that decide a write
+// use it, since a cached group can be up to the cache TTL old. It adds no query parameters.
+type NoCacheVars struct{}
+
+func (NoCacheVars) Apply(*url.Values) {}
+
 // Pagination vars are used for paginating results from the API.
 type PaginationVars struct {
 	Start uint `json:"startIndex"`
@@ -112,10 +118,8 @@ func NewGroupRolesAttrVars() *AttrVars {
 	}
 }
 
-// NewGroupUpdateAttrVars requests the attributes of the Group model that UpdateGroup writes back.
-// UpdateGroup is a full-replacement PUT, so a group fetched for a read-modify-write must carry
-// all of them or the omitted ones are wiped. Attributes outside the model (e.g. externalId) are
-// not sent; the account-level SCIM API keeps them on PUT.
+// NewGroupUpdateAttrVars requests the attributes of the Group model that group writes read
+// before patching: members for membership checks, roles and entitlements for permission checks.
 func NewGroupUpdateAttrVars() *AttrVars {
 	return &AttrVars{
 		Attrs: []string{

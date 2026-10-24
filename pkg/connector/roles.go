@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -343,14 +344,17 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
-		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
+		if groupHasPermission(g, isWorkspaceRole, permissionName) {
+			return annotations.New(&v2.GrantAlreadyExists{}), nil
+		}
 
-		_, err = r.client.UpdateGroup(ctx, workspaceId, g)
+		// Account roles and workspace entitlements are patched onto the group, so only the new value is written.
+		_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, addValueOp(groupPermissionAttribute(isWorkspaceRole), permissionName))
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to add role: %w", err)
 		}
@@ -424,14 +428,18 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
-		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)
+		// The workspace SCIM API answers 400 to a remove on an empty attribute, so a role or
+		// entitlement the group does not have is left as is instead of being patched.
+		if !groupHasPermission(g, isWorkspaceRole, permissionName) {
+			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+		}
 
-		_, err = r.client.UpdateGroup(ctx, workspaceId, g)
+		_, err = r.client.PatchGroup(ctx, workspaceId, groupPrincipalId.Resource, removeValueOp(groupPermissionAttribute(isWorkspaceRole), permissionName))
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to remove role: %w", err)
 		}
@@ -454,6 +462,16 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 	}
 
 	return nil, nil
+}
+
+// groupHasPermission reports whether the group already holds the account role, or the workspace
+// entitlement when isWorkspaceRole is set.
+func groupHasPermission(g *databricks.Group, isWorkspaceRole bool, name string) bool {
+	current := g.Roles
+	if isWorkspaceRole {
+		current = g.Entitlements
+	}
+	return slices.ContainsFunc(current, func(p databricks.PermissionValue) bool { return p.Value == name })
 }
 
 // principalLookupError explains a failed principal lookup for a role grant or revoke. The workspace

@@ -305,7 +305,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
+		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
@@ -318,16 +318,12 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 					zap.String("entitlement", groupMemberEntitlement),
 				)
 
-				return nil, nil
+				return annotations.New(&v2.GrantAlreadyExists{}), nil
 			}
 		}
 
-		// add the member to the group
-		group.Members = append(group.Members, databricks.Member{
-			ID: principalId.Resource,
-		})
-
-		_, err = g.client.UpdateGroup(ctx, workspaceId, group)
+		// The group is patched so only the new member is written and the rest of the group is kept.
+		_, err = g.client.PatchGroup(ctx, workspaceId, groupId.Resource, addValueOp("members", principalId.Resource))
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupId.Resource, err)
 		}
@@ -448,24 +444,18 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
+		group, _, err := g.client.GetGroup(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
-		indexToDelete := -1
-		for i, member := range group.Members {
-			if member.ID == principalId {
-				indexToDelete = i
-				break
-			}
+		// The workspace SCIM API answers 400 to a remove on an empty members attribute, so a
+		// principal that is not a member is left as is instead of being patched.
+		if !slices.ContainsFunc(group.Members, func(m databricks.Member) bool { return m.ID == principalId }) {
+			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 		}
 
-		if indexToDelete != -1 {
-			group.Members = slices.Delete(group.Members, indexToDelete, indexToDelete+1)
-		}
-
-		_, err = g.client.UpdateGroup(ctx, workspaceId, group)
+		_, err = g.client.PatchGroup(ctx, workspaceId, groupId.Resource, removeValueOp("members", principalId))
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to update group %s: %w", groupId.Resource, err)
 		}
