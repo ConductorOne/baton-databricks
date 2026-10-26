@@ -53,17 +53,26 @@ func TestGetAccountHostname(t *testing.T) {
 		name     string
 		hostname string
 		want     string
+		// degenerate marks inputs the CLI cannot produce whose result is
+		// knowingly exempt from the keep-in-sync validation below.
+		degenerate bool
 	}{
-		{"azure subdomain", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net"},
-		{"azure bare host", "azuredatabricks.net", "accounts.azuredatabricks.net"},
-		{"azure mixed case", "MyOrg.AzureDatabricks.net", "accounts.azuredatabricks.net"},
-		{"azure trailing dot", "myorg.azuredatabricks.net.", "accounts.azuredatabricks.net"},
-		{"gcp subdomain", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com"},
-		{"aws workspace host normalises to account host", "dbc-1234abcd.cloud.databricks.com", "accounts.cloud.databricks.com"},
-		{"unknown host falls through unnormalised", "myorg.example.com", "accounts.myorg.example.com"},
+		{"azure subdomain", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net", false},
+		{"azure bare host", "azuredatabricks.net", "accounts.azuredatabricks.net", false},
+		{"azure mixed case", "MyOrg.AzureDatabricks.net", "accounts.azuredatabricks.net", false},
+		{"azure trailing dot", "myorg.azuredatabricks.net.", "accounts.azuredatabricks.net", false},
+		{"gcp subdomain", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com", false},
+		{"aws workspace host normalises to account host", "dbc-1234abcd.cloud.databricks.com", "accounts.cloud.databricks.com", false},
+		{"unknown host falls through unnormalised", "myorg.example.com", "accounts.myorg.example.com", false},
 		// CXH-2349: a bare-suffix match would resolve this to the Azure account host.
-		{"azure lookalike does not match", "evilazuredatabricks.net", "accounts.evilazuredatabricks.net"},
-		{"gcp lookalike does not match", "evilgcp.databricks.com", "accounts.evilgcp.databricks.com"},
+		{"azure lookalike does not match", "evilazuredatabricks.net", "accounts.evilazuredatabricks.net", false},
+		{"gcp lookalike does not match", "evilgcp.databricks.com", "accounts.evilgcp.databricks.com", false},
+		// Degenerate case, pinned deliberately: GetAccountHostname("") returns
+		// bare "accounts." (default branch), which ValidateAccountHostname
+		// rejects. The CLI cannot produce this input (hostname has a default);
+		// changing a guard here is a conscious contract decision, not a silent
+		// invariant break.
+		{"empty hostname is degenerate", "", "accounts.", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -72,7 +81,11 @@ func TestGetAccountHostname(t *testing.T) {
 			}
 			// Keep-in-sync contract: every host the derivation produces must pass the
 			// explicit-value validator, or a future derivation change could reject
-			// previously-working configs.
+			// previously-working configs. Degenerate rows are the pinned exceptions.
+			if tt.degenerate {
+				t.Logf("skipping keep-in-sync validation for degenerate input %q (want %q)", tt.hostname, tt.want)
+				return
+			}
 			if err := ValidateAccountHostname(tt.want); err != nil {
 				t.Errorf("ValidateAccountHostname(%q) = %v, want nil", tt.want, err)
 			}

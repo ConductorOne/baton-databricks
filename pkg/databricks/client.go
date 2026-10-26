@@ -72,12 +72,15 @@ func ValidateAccountHostname(host string) error {
 	if strings.HasPrefix(normalized, "accounts.") {
 		return nil
 	}
-	return fmt.Errorf("account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; " +
+	return fmt.Errorf("account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; "+
 		"set account-hostname to the account host, not a workspace host: %w", host, ErrInvalidAccountHostname)
 }
 
-// The derivation below always returns an accounts.-prefixed host; this is the
-// validity rule an explicitly configured value must satisfy — keep them in sync.
+// The derivation below always returns an accounts.-prefixed host for any
+// non-empty hostname; the empty hostname is a degenerate case the CLI cannot
+// produce (hostname has a default) and returns bare "accounts.", which
+// ValidateAccountHostname rejects — the known exception to the keep-in-sync
+// rule, pinned in TestGetAccountHostname.
 func GetAccountHostname(hostname string) string {
 	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
 	switch {
