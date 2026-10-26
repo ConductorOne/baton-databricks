@@ -187,7 +187,8 @@ func prepareClientAuth(cfg *config.Databricks, accountHostname string) databrick
 
 // getAccountHostname returns the account hostname from config if set, otherwise
 // calculates it from hostname. An explicitly set value must have the
-// accounts.-prefixed shape the derivation always produces.
+// accounts.-prefixed shape the derivation always produces, or the
+// accounts-dod.-prefixed GovCloud DoD shape the validator also accepts.
 func getAccountHostname(cfg *config.Databricks, hostname string) (string, error) {
 	if cfg.AccountHostname != "" {
 		if err := databricks.ValidateAccountHostname(cfg.AccountHostname); err != nil {

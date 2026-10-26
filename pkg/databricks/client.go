@@ -60,20 +60,22 @@ func hostMatches(hostname, suffix string) bool {
 }
 
 // ErrInvalidAccountHostname is returned when an explicitly configured
-// account-hostname does not have the accounts.- or accounts-dod.-prefixed
-// shape that GetAccountHostname always produces.
+// account-hostname is not accounts.-prefixed or accounts-dod.-prefixed.
 var ErrInvalidAccountHostname = errors.New("invalid account hostname")
 
 // ValidateAccountHostname reports whether an explicitly configured account
 // hostname has the shape GetAccountHostname always produces: an accounts.-
-// prefixed host. The caller's value is never rewritten.
+// prefixed host. The caller's value is never rewritten. The accounts-dod.
+// prefix is additionally accepted: it is the vendor-documented AWS GovCloud
+// DoD account-console shape, which the derivation does not produce.
 func ValidateAccountHostname(host string) error {
 	normalized := strings.ToLower(strings.TrimSuffix(host, "."))
 	if strings.HasPrefix(normalized, "accounts.") ||
 		strings.HasPrefix(normalized, "accounts-dod.") {
 		return nil
 	}
-	return fmt.Errorf("account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; "+
+	return fmt.Errorf("account-hostname must be an accounts.-prefixed account host (accounts-dod.-prefixed on AWS "+
+		"GovCloud DoD), e.g. accounts.cloud.databricks.com: got %q; "+
 		"set account-hostname to the account host, not a workspace host: %w", host, ErrInvalidAccountHostname)
 }
 
