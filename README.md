@@ -170,7 +170,7 @@ it. The connector never guesses when the answer is unknown:
 | Attached workspace | Result |
 |--------------------|--------|
 | `RUNNING` and in scope | the metastore syncs through it |
-| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and its grants fail with `FailedPrecondition` until the state settles |
+| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and the sync fails with `FailedPrecondition` until a workspace is `RUNNING` |
 | `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
 | assignment list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming the assignment list |
 
