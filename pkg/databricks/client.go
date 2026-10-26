@@ -59,6 +59,24 @@ func hostMatches(hostname, suffix string) bool {
 	return hostname == suffix || strings.HasSuffix(hostname, "."+suffix)
 }
 
+// ErrInvalidAccountHostname is returned when an explicitly configured
+// account-hostname does not have the accounts.-prefixed shape that
+// GetAccountHostname always produces.
+var ErrInvalidAccountHostname = errors.New("invalid account hostname")
+
+// ValidateAccountHostname reports whether an explicitly configured account
+// hostname has the shape GetAccountHostname always produces: an
+// accounts.-prefixed host. The caller's value is never rewritten.
+func ValidateAccountHostname(host string) error {
+	normalized := strings.ToLower(strings.TrimSuffix(host, "."))
+	if strings.HasPrefix(normalized, "accounts.") {
+		return nil
+	}
+	return fmt.Errorf("databricks-connector: account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; set account-hostname to the account host, not a workspace host: %w", host, ErrInvalidAccountHostname)
+}
+
+// The derivation below always returns an accounts.-prefixed host; this is the
+// validity rule an explicitly configured value must satisfy — keep them in sync.
 func GetAccountHostname(hostname string) string {
 	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
 	switch {

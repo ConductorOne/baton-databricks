@@ -2,9 +2,11 @@ package databricks
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +71,44 @@ func TestGetAccountHostname(t *testing.T) {
 				t.Errorf("GetAccountHostname(%q) = %q, want %q", tt.hostname, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateAccountHostname(t *testing.T) {
+	accept := []string{
+		"accounts.cloud.databricks.com",
+		"accounts.azuredatabricks.net",
+		"ACCOUNTS.Cloud.Databricks.com.", // case/trailing-dot leniency, matching GetAccountHostname's normalization
+		// The contract is shape, not domain ownership: an accounts.-prefixed
+		// lookalike passes by design (I2). Validation never rewrites the value.
+		"accounts.evil.com",
+	}
+	for _, host := range accept {
+		if err := ValidateAccountHostname(host); err != nil {
+			t.Errorf("ValidateAccountHostname(%q) = %v, want nil", host, err)
+		}
+	}
+
+	reject := []string{
+		"cloud.databricks.com",
+		"azuredatabricks.net",
+		"gcp.databricks.com",
+		"evilaccounts.cloud.databricks.com",
+		"https://accounts.cloud.databricks.com", // scheme-prefixed is not accounts.-prefixed
+		"",
+	}
+	for _, host := range reject {
+		err := ValidateAccountHostname(host)
+		if err == nil {
+			t.Errorf("ValidateAccountHostname(%q) = nil, want error", host)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidAccountHostname) {
+			t.Errorf("ValidateAccountHostname(%q) error = %v, want errors.Is(ErrInvalidAccountHostname)", host, err)
+		}
+		if !strings.Contains(err.Error(), "account-hostname") {
+			t.Errorf("ValidateAccountHostname(%q) error %q does not mention account-hostname", host, err.Error())
+		}
 	}
 }
 
