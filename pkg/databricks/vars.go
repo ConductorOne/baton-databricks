@@ -9,12 +9,6 @@ type Vars interface {
 	Apply(params *url.Values)
 }
 
-// NoCacheVars makes a GET skip the HTTP client's response cache. Reads that decide a write
-// use it, since a cached group can be up to the cache TTL old. It adds no query parameters.
-type NoCacheVars struct{}
-
-func (NoCacheVars) Apply(*url.Values) {}
-
 // Pagination vars are used for paginating results from the API.
 type PaginationVars struct {
 	Start uint `json:"startIndex"`
@@ -119,7 +113,7 @@ func NewGroupRolesAttrVars() *AttrVars {
 }
 
 // NewGroupUpdateAttrVars requests the attributes of the Group model that group writes read
-// before patching: members for membership checks, roles and entitlements for permission checks.
+// before patching: members for membership checks.
 func NewGroupUpdateAttrVars() *AttrVars {
 	return &AttrVars{
 		Attrs: []string{

@@ -5,11 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
+	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -91,16 +90,6 @@ func TestNameWorkspace403Remedy(t *testing.T) {
 	}
 }
 
-type rewriteToServer struct {
-	target *url.URL
-}
-
-func (r *rewriteToServer) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.URL.Scheme = r.target.Scheme
-	req.URL.Host = r.target.Host
-	return http.DefaultTransport.RoundTrip(req)
-}
-
 // TestPatchGroup checks a SCIM PATCH succeeds on the API's empty 204 answer and keeps the
 // error detail on a rejected operation.
 func TestPatchGroup(t *testing.T) {
@@ -117,24 +106,13 @@ func TestPatchGroup(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotMethod, gotPath string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			c := newServerClient(t, func(w http.ResponseWriter, req *http.Request) {
 				gotMethod, gotPath = req.Method, req.URL.Path
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
-			}))
-			t.Cleanup(srv.Close)
-			target, err := url.Parse(srv.URL)
-			if err != nil {
-				t.Fatalf("parse server url: %v", err)
-			}
+			})
 
-			c, err := NewClient(context.Background(), &http.Client{Transport: &rewriteToServer{target: target}},
-				"example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", "", &NoAuth{}, nil)
-			if err != nil {
-				t.Fatalf("NewClient: %v", err)
-			}
-
-			_, err = c.PatchGroup(context.Background(), "", "g1", PatchOperation{Op: "add", Path: "roles", Value: []PermissionValue{{Value: "account_admin"}}})
+			_, err := c.PatchGroup(context.Background(), "", "g1", PatchOperation{Op: "add", Path: "roles", Value: []PermissionValue{{Value: "account_admin"}}})
 
 			if gotMethod != http.MethodPatch || gotPath != "/api/2.0/accounts/acc-1/scim/v2/Groups/g1" {
 				t.Errorf("request = %s %s, want PATCH /api/2.0/accounts/acc-1/scim/v2/Groups/g1", gotMethod, gotPath)
@@ -153,42 +131,42 @@ func TestPatchGroup(t *testing.T) {
 	}
 }
 
-// TestNoCacheVarsBypassesCache: a GET is cached by the HTTP client unless it carries NoCacheVars,
-// whether passed by value or by pointer.
-func TestNoCacheVarsBypassesCache(t *testing.T) {
+// TestGetGroupCaching: GetGroup is served from the HTTP client's response cache, while
+// GetGroupNoCache always reaches the server.
+func TestGetGroupCaching(t *testing.T) {
 	tests := []struct {
 		name      string
-		vars      []Vars
+		get       func(c *Client) (*Group, *v2.RateLimitDescription, error)
 		wantCalls int
 	}{
-		{name: "default is cached", wantCalls: 1},
-		{name: "value", vars: []Vars{NoCacheVars{}}, wantCalls: 2},
-		{name: "pointer", vars: []Vars{&NoCacheVars{}}, wantCalls: 2},
+		{
+			name: "GetGroup is cached",
+			get: func(c *Client) (*Group, *v2.RateLimitDescription, error) {
+				return c.GetGroup(context.Background(), "", "g1")
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "GetGroupNoCache bypasses the cache",
+			get: func(c *Client) (*Group, *v2.RateLimitDescription, error) {
+				return c.GetGroupNoCache(context.Background(), "", "g1")
+			},
+			wantCalls: 2,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			c := newServerClient(t, func(w http.ResponseWriter, req *http.Request) {
 				calls++
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"id":"g1","displayName":"G"}`))
-			}))
-			t.Cleanup(srv.Close)
-			target, err := url.Parse(srv.URL)
-			if err != nil {
-				t.Fatalf("parse server url: %v", err)
-			}
-
-			c, err := NewClient(context.Background(), &http.Client{Transport: &rewriteToServer{target: target}},
-				"example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", "", &NoAuth{}, nil)
-			if err != nil {
-				t.Fatalf("NewClient: %v", err)
-			}
+			})
 
 			for i := 0; i < 2; i++ {
-				if _, _, err := c.GetGroup(context.Background(), "", "g1", tc.vars...); err != nil {
-					t.Fatalf("GetGroup: %v", err)
+				if _, _, err := tc.get(c); err != nil {
+					t.Fatalf("read %d: %v", i, err)
 				}
 			}
 			if calls != tc.wantCalls {

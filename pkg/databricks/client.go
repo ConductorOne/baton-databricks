@@ -350,6 +350,29 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	*v2.RateLimitDescription,
 	error,
 ) {
+	return c.getGroup(ctx, c.Get, workspaceId, groupId, vars...)
+}
+
+// GetGroupNoCache is GetGroup that bypasses the uhttp response cache. Reads that decide a
+// write use it, since a cached group can be up to the cache TTL old.
+func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
+	*Group,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return c.getGroup(ctx, c.getNoCache, workspaceId, groupId, vars...)
+}
+
+func (c *Client) getGroup(
+	ctx context.Context,
+	get func(context.Context, *url.URL, interface{}, ...Vars) (*v2.RateLimitDescription, error),
+	workspaceId, groupId string,
+	vars ...Vars,
+) (
+	*Group,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var u *url.URL
 	if workspaceId == "" {
 		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), groupId)
@@ -358,7 +381,7 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	}
 
 	var res *Group
-	ratelimitData, err := c.Get(ctx, u, &res, vars...)
+	ratelimitData, err := get(ctx, u, &res, vars...)
 	if err != nil {
 		return nil, ratelimitData, err
 	}

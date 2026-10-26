@@ -265,10 +265,10 @@ func TestRoleGrantUserPrincipalStillWorks(t *testing.T) {
 	}
 }
 
-// TestRoleGroupPrincipalRequestsUpdateAttributes checks role Grant and Revoke to an account
-// group read the group with the update attributes and then PATCH only the role, without
+// TestRoleGroupPrincipalRequestsRolesAttributes checks role Grant and Revoke to an account
+// group read the group with the roles attributes and then PATCH only the role, without
 // sending the group's members, displayName or other permissions back.
-func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
+func TestRoleGroupPrincipalRequestsRolesAttributes(t *testing.T) {
 	tests := []struct {
 		name string
 		// roles are the group's current roles: a grant needs a group that lacks the role, a revoke one that holds it.
@@ -327,7 +327,7 @@ func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
 				t.Fatalf("%s returned error: %v", tc.name, err)
 			}
 
-			if want := databricks.NewGroupUpdateAttrVars().Attrs; !slices.Equal(gotAttrs, want) {
+			if want := databricks.NewGroupRolesAttrVars().Attrs; !slices.Equal(gotAttrs, want) {
 				t.Errorf("GetGroup attributes = %v, want %v", gotAttrs, want)
 			}
 

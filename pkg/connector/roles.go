@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -344,7 +343,7 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
+		g, _, err := r.client.GetGroupNoCache(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupRolesAttrVars())
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
@@ -428,7 +427,7 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
 		}
 
-		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars(), databricks.NoCacheVars{})
+		g, _, err := r.client.GetGroupNoCache(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupRolesAttrVars())
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
@@ -467,11 +466,10 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 // groupHasPermission reports whether the group already holds the account role, or the workspace
 // entitlement when isWorkspaceRole is set.
 func groupHasPermission(g *databricks.Group, isWorkspaceRole bool, name string) bool {
-	current := g.Roles
 	if isWorkspaceRole {
-		current = g.Entitlements
+		return g.HaveEntitlement(name)
 	}
-	return slices.ContainsFunc(current, func(p databricks.PermissionValue) bool { return p.Value == name })
+	return g.HaveRole(name)
 }
 
 // principalLookupError explains a failed principal lookup for a role grant or revoke. The workspace
