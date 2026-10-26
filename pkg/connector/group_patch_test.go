@@ -493,6 +493,99 @@ func TestGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
 	}
 }
 
+// TestGroupRevokeGroupNotFound: a group that is already gone (404 on the read) has nothing left
+// to revoke, so Revoke answers GrantAlreadyRevoked; any other read failure is still an error.
+func TestGroupRevokeGroupNotFound(t *testing.T) {
+	tests := []struct {
+		name        string
+		entitlement func(t *testing.T) *v2.Entitlement
+		statusCode  int
+		wantErr     bool
+	}{
+		{name: "account level 404", entitlement: testGroupMembershipEntitlement, statusCode: http.StatusNotFound},
+		{
+			name: "workspace level 404",
+			entitlement: func(t *testing.T) *v2.Entitlement {
+				return ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement)
+			},
+			statusCode: http.StatusNotFound,
+		},
+		{name: "account level 500", entitlement: testGroupMembershipEntitlement, statusCode: http.StatusInternalServerError, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var writes int
+			g := newGroupBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method != http.MethodGet {
+					writes++
+				}
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(`{"detail":"Group with id g-target not found"}`))
+			})
+			annos, err := g.Revoke(context.Background(), &v2.Grant{
+				Principal:   testUserPrincipal(t, "u-new"),
+				Entitlement: tc.entitlement(t),
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Revoke returned no error, want one (annotations = %v)", annos)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Revoke returned error: %v", err)
+			}
+			if !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+				t.Errorf("annotations = %v, want GrantAlreadyRevoked", annos)
+			}
+			if writes != 0 {
+				t.Errorf("Revoke wrote %d times, want none", writes)
+			}
+		})
+	}
+}
+
+// TestRoleRevokeGroupPrincipalNotFound: same for a role revoked from a group principal that is
+// already gone; the lookup error explanation stays Grant-only.
+func TestRoleRevokeGroupPrincipalNotFound(t *testing.T) {
+	tests := []struct {
+		name          string
+		workspaceRole bool
+	}{
+		{name: "account role", workspaceRole: false},
+		{name: "workspace entitlement", workspaceRole: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"detail":"Group with id g-target not found"}`))
+			})
+			annos, err := r.Revoke(context.Background(), &v2.Grant{
+				Principal:   testTargetGroupPrincipal(t),
+				Entitlement: testRoleEntitlement(t, tc.workspaceRole),
+			})
+			if err != nil {
+				t.Fatalf("Revoke returned error: %v", err)
+			}
+			if !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+				t.Errorf("annotations = %v, want GrantAlreadyRevoked", annos)
+			}
+		})
+	}
+
+	t.Run("500 is still an error", func(t *testing.T) {
+		r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		if _, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, false)}); err == nil {
+			t.Error("Revoke returned no error on a 500 group read, want one")
+		}
+	})
+}
+
 // TestRoleGrantToGroup: a group that already holds the role or entitlement is not patched and
 // answers GrantAlreadyExists; a group that lacks it gets exactly one PATCH with the add op.
 func TestRoleGrantToGroup(t *testing.T) {

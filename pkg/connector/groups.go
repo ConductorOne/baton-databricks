@@ -445,6 +445,10 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
 		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
+		if isNotFoundError(err) {
+			// the group is already gone, so the principal is not a member of it
+			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+		}
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}

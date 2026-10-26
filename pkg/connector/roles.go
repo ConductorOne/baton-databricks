@@ -428,6 +428,10 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 		}
 
 		g, _, err := r.client.GetGroupNoCache(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupRolesAttrVars())
+		if isNotFoundError(err) {
+			// the group is already gone, so it does not have the role
+			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+		}
 		if err != nil {
 			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
