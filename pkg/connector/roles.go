@@ -317,6 +317,10 @@ func (r *roleBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parent
 		return nil, nil, err
 	}
 
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed role",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
 	return resource, nil, nil
 }
 

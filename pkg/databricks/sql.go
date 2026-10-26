@@ -104,6 +104,7 @@ func (c *Client) ExecuteStatement(
 	statement string,
 	params ...StatementParameter,
 ) (*StatementResult, *v2.RateLimitDescription, error) {
+	l := ctxzap.Extract(ctx)
 	u := c.workspaceUrl(workspaceId).JoinPath(statementsEndpoint)
 
 	body := statementRequestBody{
@@ -120,6 +121,12 @@ func (c *Client) ExecuteStatement(
 	if err != nil {
 		return nil, rateLimit, fmt.Errorf("failed to submit statement: %w", err)
 	}
+	l.Debug("ExecuteStatement: submitted sql statement",
+		zap.String("workspace_id", workspaceId),
+		zap.String("warehouse_id", warehouseId),
+		zap.String("statement_id", res.StatementID),
+		zap.String("state", string(res.Status.State)),
+	)
 
 	res, polledRateLimit, err := c.pollStatement(ctx, workspaceId, warehouseId, res)
 	if polledRateLimit != nil {
@@ -146,7 +153,16 @@ func (c *Client) ExecuteStatement(
 	if resultRateLimit != nil {
 		rateLimit = resultRateLimit
 	}
-	return result, rateLimit, err
+	if err != nil {
+		return nil, rateLimit, err
+	}
+
+	l.Debug("ExecuteStatement: sql statement succeeded",
+		zap.String("statement_id", res.StatementID),
+		zap.Int("column_count", len(result.Columns)),
+		zap.Int("row_count", len(result.Rows)),
+	)
+	return result, rateLimit, nil
 }
 
 // pollStatement blocks until the statement reaches a terminal state, for the case of a
@@ -285,6 +301,11 @@ func (c *Client) collectStatementResult(ctx context.Context, workspaceId string,
 		if err != nil {
 			return nil, rateLimit, fmt.Errorf("failed to fetch statement result chunk %d: %w", *nextChunk, err)
 		}
+		ctxzap.Extract(ctx).Debug("collectStatementResult: fetched sql statement result chunk",
+			zap.String("statement_id", res.StatementID),
+			zap.Int("chunk_index", *nextChunk),
+			zap.Int("row_count", len(chunk.DataArray)),
+		)
 		rows = append(rows, chunk.DataArray...)
 		nextChunk = chunk.NextChunkIndex
 	}
@@ -302,10 +323,18 @@ func (c *Client) WarehouseExists(ctx context.Context, workspaceId, warehouseId s
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			ctxzap.Extract(ctx).Debug("WarehouseExists: sql warehouse not found in workspace",
+				zap.String("workspace_id", workspaceId),
+				zap.String("warehouse_id", warehouseId),
+			)
 			return false, rateLimit, nil
 		}
 		return false, rateLimit, err
 	}
 
+	ctxzap.Extract(ctx).Debug("WarehouseExists: sql warehouse found in workspace",
+		zap.String("workspace_id", workspaceId),
+		zap.String("warehouse_id", warehouseId),
+	)
 	return true, rateLimit, nil
 }

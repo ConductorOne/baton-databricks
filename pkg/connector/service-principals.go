@@ -242,6 +242,10 @@ func (s *servicePrincipalBuilder) Get(ctx context.Context, resourceId *v2.Resour
 		return nil, nil, err
 	}
 
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed service principal",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
 	return resource, annos, nil
 }
 

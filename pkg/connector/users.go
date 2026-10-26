@@ -11,6 +11,8 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -294,6 +296,10 @@ func (u *userBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parent
 		return nil, nil, err
 	}
 
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed user",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
 	return resource, annos, nil
 }
 

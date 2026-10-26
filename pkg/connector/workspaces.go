@@ -259,6 +259,10 @@ func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, p
 		return nil, annos, err
 	}
 
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed workspace",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
 	return resource, annos, nil
 }
 

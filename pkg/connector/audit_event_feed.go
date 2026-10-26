@@ -255,7 +255,12 @@ func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, allWorkspa
 	f.queryWorkspaceMu.Lock()
 	defer f.queryWorkspaceMu.Unlock()
 
+	l := ctxzap.Extract(ctx)
 	if f.queryWorkspaceID != "" {
+		l.Debug("databricks-connector: resolveQueryWorkspaceID: using cached sql warehouse workspace",
+			zap.String("warehouse_id", f.sqlWarehouseID),
+			zap.String("workspace_id", f.queryWorkspaceID),
+		)
 		return f.queryWorkspaceID, nil, nil
 	}
 
@@ -264,6 +269,11 @@ func (f *auditEventFeed) resolveQueryWorkspaceID(ctx context.Context, allWorkspa
 		return "", rateLimit, err
 	}
 
+	l.Debug("databricks-connector: resolveQueryWorkspaceID: discovered sql warehouse workspace",
+		zap.String("warehouse_id", f.sqlWarehouseID),
+		zap.String("workspace_id", id),
+		zap.Int("candidate_workspace_count", len(allWorkspaces)),
+	)
 	f.queryWorkspaceID = id
 	return id, rateLimit, nil
 }
@@ -320,7 +330,17 @@ func (f *auditEventFeed) ListEvents(
 	// is already past it (e.g. right after bootstrap, where the lookback is narrower than the
 	// lag), there's nothing to query yet.
 	lagCutoff := now.Add(-auditLogTrailingLag)
+	l.Debug("databricks-connector: ListEvents: poll started",
+		zap.Bool("resumed_from_cursor", pToken.Cursor != ""),
+		zap.Time("window_start", cursor.StartAt),
+		zap.String("window_start_after_event_id", cursor.StartAfterEventID),
+		zap.Time("window_end", lagCutoff),
+	)
 	if !cursor.StartAt.Before(lagCutoff) {
+		l.Debug("databricks-connector: ListEvents: nothing to query yet, window start is within the trailing lag",
+			zap.Time("window_start", cursor.StartAt),
+			zap.Time("window_end", lagCutoff),
+		)
 		encoded, err := encodeEventCursor(cursor)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("databricks-connector: failed to encode event cursor: %w", err)
@@ -339,6 +359,10 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, annos, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 	scopedWorkspaces := filterConfiguredWorkspaces(allWorkspaces, f.workspaces)
+	l.Debug("databricks-connector: ListEvents: listed workspaces",
+		zap.Int("workspace_count", len(allWorkspaces)),
+		zap.Int("in_scope_workspace_count", len(scopedWorkspaces)),
+	)
 	if len(scopedWorkspaces) == 0 {
 		return nil, nil, annos, uhttp.WrapErrors(codes.FailedPrecondition, "databricks-connector: no workspace available to query system.access.audit")
 	}
@@ -369,6 +393,7 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	var events []*v2.Event
+	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents int
 	principalTypes := principalTypeCache{}
 	for _, row := range rows {
 		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
@@ -390,9 +415,11 @@ func (f *auditEventFeed) ListEvents(
 					zap.Error(err),
 				)
 			}
+			skippedLookupRows++
 			continue
 		}
 		if len(affected) == 0 {
+			unmappedRows++
 			l.Debug("databricks-connector: skipping audit row with no resource mapping",
 				zap.String("action_name", row.ActionName),
 				zap.String("event_id", row.EventID),
@@ -400,6 +427,12 @@ func (f *auditEventFeed) ListEvents(
 			continue
 		}
 
+		l.Debug("databricks-connector: ListEvents: mapped audit row to events",
+			zap.String("event_id", row.EventID),
+			zap.String("service_name", row.ServiceName),
+			zap.String("action_name", row.ActionName),
+			zap.Int("event_count", len(affected)),
+		)
 		for i, a := range affected {
 			event := &v2.Event{
 				Id:         fmt.Sprintf("%s/%d", row.EventID, i),
@@ -407,14 +440,17 @@ func (f *auditEventFeed) ListEvents(
 			}
 			switch {
 			case a.grant != nil && a.grant.revoke:
+				revokeEvents++
 				event.Event = &v2.Event_CreateRevokeEvent{
 					CreateRevokeEvent: &v2.CreateRevokeEvent{Entitlement: a.grant.entitlement, Principal: a.grant.principal},
 				}
 			case a.grant != nil:
+				grantEvents++
 				event.Event = &v2.Event_CreateGrantEvent{
 					CreateGrantEvent: &v2.CreateGrantEvent{Entitlement: a.grant.entitlement, Principal: a.grant.principal},
 				}
 			default:
+				resourceChangeEvents++
 				event.Event = &v2.Event_ResourceChangeEvent{
 					ResourceChangeEvent: &v2.ResourceChangeEvent{ResourceId: a.resourceId, ParentResourceId: a.parentResourceId},
 				}
@@ -434,6 +470,19 @@ func (f *auditEventFeed) ListEvents(
 		return nil, nil, annos, fmt.Errorf("databricks-connector: failed to encode event cursor: %w", err)
 	}
 
+	l.Debug("databricks-connector: ListEvents: poll finished",
+		zap.Int("audit_rows_fetched", rawRowCount),
+		zap.Int("audit_rows_parsed", len(rows)),
+		zap.Int("audit_rows_unmapped", unmappedRows),
+		zap.Int("audit_rows_skipped_lookup_failure", skippedLookupRows),
+		zap.Int("events_total", len(events)),
+		zap.Int("events_resource_change", resourceChangeEvents),
+		zap.Int("events_create_grant", grantEvents),
+		zap.Int("events_create_revoke", revokeEvents),
+		zap.Bool("has_more", hasMore),
+		zap.Time("next_window_start", nextCursor.StartAt),
+		zap.String("next_window_start_after_event_id", nextCursor.StartAfterEventID),
+	)
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
 }
 
@@ -643,11 +692,18 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, princi
 			return nil, rateLimit, fmt.Errorf("failed to check principal %s: %w", nativeId, err)
 		}
 		if found {
+			ctxzap.Extract(ctx).Debug("databricks-connector: resolvePrincipalType: resolved audit principal",
+				zap.String("principal_id", nativeId),
+				zap.String("resource_type", candidate.resourceType.Id),
+			)
 			principalTypes[nativeId] = candidate.resourceType
 			return candidate.resourceType, rateLimit, nil
 		}
 	}
 
+	ctxzap.Extract(ctx).Debug("databricks-connector: resolvePrincipalType: audit principal matched no user, group or service principal",
+		zap.String("principal_id", nativeId),
+	)
 	principalTypes[nativeId] = nil
 	return nil, rateLimit, nil
 }
@@ -775,7 +831,18 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 	}
 
 	rows, lastRawBoundary, err := parseAuditLogRows(ctx, result)
-	return rows, len(result.Rows), lastRawBoundary, rateLimit, err
+	if err != nil {
+		return nil, len(result.Rows), lastRawBoundary, rateLimit, err
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: queryAuditLog: audit log query succeeded",
+		zap.String("workspace_id", workspaceId),
+		zap.String("warehouse_id", f.sqlWarehouseID),
+		zap.Int("audit_rows_fetched", len(result.Rows)),
+		zap.Int("audit_rows_parsed", len(rows)),
+		zap.Int("audit_rows_malformed", len(result.Rows)-len(rows)),
+	)
+	return rows, len(result.Rows), lastRawBoundary, rateLimit, nil
 }
 
 func quotedInClause(values []string) string {
