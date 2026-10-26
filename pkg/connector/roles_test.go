@@ -167,27 +167,24 @@ func TestRoleGrantAccountPrincipalNotFound(t *testing.T) {
 
 // TestRoleGrantGroupPrincipalParsesCompoundID is the regression test for CXH-2347 symptom B:
 // granting a role to a group principal must parse the compound resource id down to the
-// native group id before calling GetGroup/UpdateGroup (the mock server here only answers
+// native group id before calling GetGroup/PatchGroup (the mock server here only answers
 // requests for the native id "g-native"; sending the unparsed compound id 404s). It also
-// asserts the outgoing PUT body never drops the group's existing members or displayName,
-// which is what NewGroupUpdateAttrVars requesting "members"/"displayName" guards against.
+// asserts the outgoing PATCH adds only the granted role.
 func TestRoleGrantGroupPrincipalParsesCompoundID(t *testing.T) {
-	var capturedPutBody []byte
+	var capturedPatch *databricks.PatchRequest
 
 	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"g-native","displayName":"Native Group","members":[{"value":"existing-member-1","display":"Existing","$ref":"Users/existing-member-1"}],"roles":[]}`))
-		case req.Method == http.MethodPut && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+		case req.Method == http.MethodPatch && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
+			capturedPatch = &databricks.PatchRequest{}
+			if err := json.NewDecoder(req.Body).Decode(capturedPatch); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			capturedPutBody = body
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"detail":"not found"}`))
@@ -200,45 +197,16 @@ func TestRoleGrantGroupPrincipalParsesCompoundID(t *testing.T) {
 		t.Fatalf("Grant returned error (likely means the compound id reached GetGroup unparsed): %v", err)
 	}
 
-	if capturedPutBody == nil {
-		t.Fatal("expected a PUT request updating the group, got none")
+	if capturedPatch == nil {
+		t.Fatal("expected a PATCH request updating the group, got none")
 	}
 
-	var put struct {
-		DisplayName string `json:"displayName"`
-		Members     []struct {
-			Value string `json:"value"`
-		} `json:"members"`
-		Roles []struct {
-			Value string `json:"value"`
-		} `json:"roles"`
+	if len(capturedPatch.Operations) != 1 || capturedPatch.Operations[0].Op != "add" || capturedPatch.Operations[0].Path != "roles" {
+		t.Fatalf("PATCH operations = %+v, want a single roles add", capturedPatch.Operations)
 	}
-	if err := json.Unmarshal(capturedPutBody, &put); err != nil {
-		t.Fatalf("unmarshal PUT body: %v", err)
-	}
-
-	if put.DisplayName == "" {
-		t.Error("PUT body has empty displayName; a full-replacement PUT like this would wipe it")
-	}
-
-	foundExisting := false
-	for _, m := range put.Members {
-		if m.Value == "existing-member-1" {
-			foundExisting = true
-		}
-	}
-	if !foundExisting {
-		t.Errorf("PUT body dropped the group's existing member, members = %+v", put.Members)
-	}
-
-	foundRole := false
-	for _, role := range put.Roles {
-		if role.Value == AccountAdminRole {
-			foundRole = true
-		}
-	}
-	if !foundRole {
-		t.Errorf("PUT body missing the newly granted role, roles = %+v", put.Roles)
+	added, _ := capturedPatch.Operations[0].Value.([]any)
+	if len(added) != 1 || added[0].(map[string]any)["value"] != AccountAdminRole {
+		t.Errorf("PATCH added roles = %+v, want only %s", added, AccountAdminRole)
 	}
 }
 
@@ -297,23 +265,27 @@ func TestRoleGrantUserPrincipalStillWorks(t *testing.T) {
 	}
 }
 
-// TestRoleGroupPrincipalRequestsUpdateAttributes checks role Grant and Revoke to a group read
-// the group with every attribute the full-replacement PUT writes back, so the PUT keeps the
-// group's members and displayName.
-func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
+// TestRoleGroupPrincipalRequestsRolesAttributes checks role Grant and Revoke to an account
+// group read the group with the roles attributes and then PATCH only the role, without
+// sending the group's members, displayName or other permissions back.
+func TestRoleGroupPrincipalRequestsRolesAttributes(t *testing.T) {
 	tests := []struct {
 		name string
-		run  func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error
+		// roles are the group's current roles: a grant needs a group that lacks the role, a revoke one that holds it.
+		roles []map[string]any
+		run   func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error
 	}{
 		{
-			name: "grant",
+			name:  "grant",
+			roles: []map[string]any{},
 			run: func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
 				_, err := r.Grant(context.Background(), principal, entitlement)
 				return err
 			},
 		},
 		{
-			name: "revoke",
+			name:  "revoke",
+			roles: []map[string]any{{"value": AccountAdminRole}},
 			run: func(r *roleBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
 				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
 				return err
@@ -324,7 +296,7 @@ func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotAttrs []string
-			var capturedPutBody []byte
+			var capturedPatchBody []byte
 
 			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
 				switch {
@@ -334,18 +306,17 @@ func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
 						"id":          "g-native",
 						"displayName": "Native Group",
 						"members":     []map[string]any{{"value": "existing-member-1"}},
-						"roles":       []map[string]any{{"value": AccountAdminRole}},
+						"roles":       tc.roles,
 						"meta":        map[string]any{"resourceType": "Group"},
 					})
-				case req.Method == http.MethodPut && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
+				case req.Method == http.MethodPatch && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-native":
 					body, err := io.ReadAll(req.Body)
 					if err != nil {
 						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
-					capturedPutBody = body
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write(body)
+					capturedPatchBody = body
+					w.WriteHeader(http.StatusNoContent)
 				default:
 					w.WriteHeader(http.StatusNotFound)
 					_, _ = w.Write([]byte(`{"detail":"not found"}`))
@@ -356,23 +327,20 @@ func TestRoleGroupPrincipalRequestsUpdateAttributes(t *testing.T) {
 				t.Fatalf("%s returned error: %v", tc.name, err)
 			}
 
-			if want := databricks.NewGroupUpdateAttrVars().Attrs; !slices.Equal(gotAttrs, want) {
+			if want := databricks.NewGroupRolesAttrVars().Attrs; !slices.Equal(gotAttrs, want) {
 				t.Errorf("GetGroup attributes = %v, want %v", gotAttrs, want)
 			}
 
-			if capturedPutBody == nil {
-				t.Fatal("expected a PUT request updating the group, got none")
+			if capturedPatchBody == nil {
+				t.Fatal("expected a PATCH request updating the group, got none")
 			}
 
-			var put capturedGroupPut
-			if err := json.Unmarshal(capturedPutBody, &put); err != nil {
-				t.Fatalf("unmarshal PUT body: %v", err)
+			var patch capturedGroupPut
+			if err := json.Unmarshal(capturedPatchBody, &patch); err != nil {
+				t.Fatalf("unmarshal PATCH body: %v", err)
 			}
-			if put.DisplayName != "Native Group" {
-				t.Errorf("PUT body displayName = %q, want %q", put.DisplayName, "Native Group")
-			}
-			if len(put.Members) != 1 || put.Members[0].Value != "existing-member-1" {
-				t.Errorf("PUT body members = %+v, want the group's existing member", put.Members)
+			if patch.DisplayName != "" || patch.Members != nil || patch.Roles != nil || patch.Entitlements != nil {
+				t.Errorf("PATCH body carries group attributes beside its operation: %s", capturedPatchBody)
 			}
 		})
 	}

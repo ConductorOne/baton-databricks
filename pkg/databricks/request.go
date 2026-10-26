@@ -121,6 +121,23 @@ func (c *Client) Put(
 	)
 }
 
+func (c *Client) Patch(
+	ctx context.Context,
+	urlAddress *url.URL,
+	body interface{},
+	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequest(
+		ctx,
+		urlAddress,
+		http.MethodPatch,
+		body,
+		response,
+		params...,
+	)
+}
+
 func (c *Client) Post(
 	ctx context.Context,
 	urlAddress *url.URL,
@@ -237,11 +254,12 @@ func (c *Client) doRequestWithOptions(
 	c.auth.Apply(req)
 
 	ratelimitData := &v2.RateLimitDescription{}
-	resp, err := c.httpClient.Do(
-		req,
-		uhttp.WithAlwaysJSONResponse(&response),
-		uhttp.WithRatelimitData(ratelimitData),
-	)
+	doOptions := []uhttp.DoOption{uhttp.WithRatelimitData(ratelimitData)}
+	// A nil response means the caller ignores the body, which may be empty (SCIM PATCH answers 204).
+	if response != nil {
+		doOptions = append(doOptions, uhttp.WithAlwaysJSONResponse(&response))
+	}
+	resp, err := c.httpClient.Do(req, doOptions...)
 	if resp == nil {
 		return ratelimitData, wrapTransportAuthError(err)
 	}

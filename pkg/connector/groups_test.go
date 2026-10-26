@@ -57,30 +57,10 @@ func testTargetGroupResource(t *testing.T, nativeGroupID string) *v2.Resource {
 // native id, not the compound "account/<acct>/group/<id>" resource id, so the write matches
 // the already-exists check a few lines above it.
 func TestGroupGrantMembershipUsesNativePrincipalID(t *testing.T) {
-	var capturedPutBody []byte
+	srv := newFakeSCIMGroup(t, "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target")
+	g := newGroupBuilderWithHandler(t, srv.handler)
 
-	g := newGroupBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"g-target","displayName":"Target Group","members":[]}`))
-		case req.Method == http.MethodPut && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target":
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			capturedPutBody = body
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"detail":"not found"}`))
-		}
-	})
-
-	targetGroup := testTargetGroupResource(t, "g-target")
-	entitlement := ent.NewAssignmentEntitlement(targetGroup, groupMemberEntitlement)
+	entitlement := testGroupMembershipEntitlement(t)
 
 	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
 	compoundPrincipalID := groupResourceId(context.Background(), "g-member-native", parent)
@@ -95,22 +75,14 @@ func TestGroupGrantMembershipUsesNativePrincipalID(t *testing.T) {
 		t.Fatalf("Grant returned error: %v", err)
 	}
 
-	if capturedPutBody == nil {
-		t.Fatal("expected a PUT request updating the group, got none")
+	if len(srv.writes) != 1 || len(srv.writes[0].Operations) != 1 {
+		t.Fatalf("expected one PATCH with one operation adding the member, got %+v", srv.writes)
 	}
 
-	var put struct {
-		Members []struct {
-			Value string `json:"value"`
-		} `json:"members"`
-	}
-	if err := json.Unmarshal(capturedPutBody, &put); err != nil {
-		t.Fatalf("unmarshal PUT body: %v", err)
-	}
-
-	if len(put.Members) != 1 || put.Members[0].Value != "g-member-native" {
-		t.Errorf("PUT body members = %+v, want a single member with native id %q (not the compound principal id %q)",
-			put.Members, "g-member-native", compoundPrincipalID)
+	added, _ := srv.writes[0].Operations[0].Value.([]any)
+	if len(added) != 1 || added[0].(map[string]any)["value"] != "g-member-native" {
+		t.Errorf("PATCH added members = %+v, want a single member with native id %q (not the compound principal id %q)",
+			added, "g-member-native", compoundPrincipalID)
 	}
 }
 
@@ -134,19 +106,6 @@ func writeSCIMGroup(t *testing.T, w http.ResponseWriter, req *http.Request, grou
 	}
 }
 
-// testSCIMGroupWithPermissions is an account group that already has a member, a role and an
-// entitlement, so tests can check a membership PUT carries all of them back.
-func testSCIMGroupWithPermissions() map[string]any {
-	return map[string]any{
-		"id":           "g-target",
-		"displayName":  "Target Group",
-		"members":      []map[string]any{{"value": "existing-member-1"}, {"value": "u-new"}},
-		"roles":        []map[string]any{{"value": "account_admin"}},
-		"entitlements": []map[string]any{{"value": "workspace-access"}},
-		"meta":         map[string]any{"resourceType": "Group"},
-	}
-}
-
 type capturedGroupPut struct {
 	DisplayName string `json:"displayName"`
 	Members     []struct {
@@ -167,97 +126,6 @@ func testUserPrincipal(t *testing.T, id string) *v2.Resource {
 		t.Fatalf("NewUserResource: %v", err)
 	}
 	return r
-}
-
-// TestGroupMembershipPutPreservesPermissions covers the CXH-2347 PUT-wipe: membership Grant
-// and Revoke read the group and PUT it back in full, so the read must request roles and
-// entitlements too or the PUT silently strips them from the group.
-func TestGroupMembershipPutPreservesPermissions(t *testing.T) {
-	tests := []struct {
-		name        string
-		principalID string
-		run         func(g *groupBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error
-		wantMembers []string
-	}{
-		{
-			name:        "grant",
-			principalID: "u-added",
-			run: func(g *groupBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
-				_, err := g.Grant(context.Background(), principal, entitlement)
-				return err
-			},
-			wantMembers: []string{"existing-member-1", "u-new", "u-added"},
-		},
-		{
-			name:        "revoke",
-			principalID: "u-new",
-			run: func(g *groupBuilder, principal *v2.Resource, entitlement *v2.Entitlement) error {
-				_, err := g.Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
-				return err
-			},
-			wantMembers: []string{"existing-member-1"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var capturedPutBody []byte
-
-			g := newGroupBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
-				switch {
-				case req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target":
-					writeSCIMGroup(t, w, req, testSCIMGroupWithPermissions())
-				case req.Method == http.MethodPut && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target":
-					body, err := io.ReadAll(req.Body)
-					if err != nil {
-						http.Error(w, err.Error(), http.StatusInternalServerError)
-						return
-					}
-					capturedPutBody = body
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write(body)
-				default:
-					w.WriteHeader(http.StatusNotFound)
-					_, _ = w.Write([]byte(`{"detail":"not found"}`))
-				}
-			})
-
-			targetGroup := testTargetGroupResource(t, "g-target")
-			entitlement := ent.NewAssignmentEntitlement(targetGroup, groupMemberEntitlement)
-
-			if err := tc.run(g, testUserPrincipal(t, tc.principalID), entitlement); err != nil {
-				t.Fatalf("%s returned error: %v", tc.name, err)
-			}
-
-			if capturedPutBody == nil {
-				t.Fatal("expected a PUT request updating the group, got none")
-			}
-
-			var put capturedGroupPut
-			if err := json.Unmarshal(capturedPutBody, &put); err != nil {
-				t.Fatalf("unmarshal PUT body: %v", err)
-			}
-
-			if put.DisplayName != "Target Group" {
-				t.Errorf("PUT body displayName = %q, want %q", put.DisplayName, "Target Group")
-			}
-
-			var members []string
-			for _, m := range put.Members {
-				members = append(members, m.Value)
-			}
-			if !slices.Equal(members, tc.wantMembers) {
-				t.Errorf("PUT body members = %v, want %v", members, tc.wantMembers)
-			}
-
-			if len(put.Roles) != 1 || put.Roles[0].Value != "account_admin" {
-				t.Errorf("PUT body roles = %+v, want the group's existing role account_admin", put.Roles)
-			}
-			if len(put.Entitlements) != 1 || put.Entitlements[0].Value != "workspace-access" {
-				t.Errorf("PUT body entitlements = %+v, want the group's existing entitlement workspace-access", put.Entitlements)
-			}
-		})
-	}
 }
 
 // TestGroupRuleSetCompoundGroupPrincipal covers the CXH-2347 rule-set path: granting or
