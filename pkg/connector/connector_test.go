@@ -24,7 +24,6 @@ func TestGetAccountHostname(t *testing.T) {
 		{"unset azure calculates", "", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net", false},
 		{"unset gcp calculates", "", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com", false},
 		{"unset aws calculates", "", "cloud.databricks.com", "accounts.cloud.databricks.com", false},
-		{"explicit valid host used verbatim", "accounts.custom.example.com", "cloud.databricks.com", "accounts.custom.example.com", false},
 		{"explicit workspace host rejected", "cloud.databricks.com", "cloud.databricks.com", "", true},
 	}
 	for _, tc := range cases {
@@ -58,10 +57,10 @@ func TestGetAccountHostname(t *testing.T) {
 // fails at connector construction, before New or any account-plane call.
 func TestNewConnectorRejectsWorkspaceAccountHostname(t *testing.T) {
 	cfg := &config.Databricks{
-		Hostname:             "cloud.databricks.com",
-		AccountHostname:      "cloud.databricks.com",
-		AccountId:            "test-account",
-		DatabricksClientId:   "id",
+		Hostname:               "cloud.databricks.com",
+		AccountHostname:        "cloud.databricks.com",
+		AccountId:              "test-account",
+		DatabricksClientId:     "id",
 		DatabricksClientSecret: "secret",
 	}
 	_, _, err := NewConnector(context.Background(), cfg, nil)

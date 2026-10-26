@@ -72,7 +72,7 @@ func ValidateAccountHostname(host string) error {
 	if strings.HasPrefix(normalized, "accounts.") {
 		return nil
 	}
-	return fmt.Errorf("databricks-connector: account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; set account-hostname to the account host, not a workspace host: %w", host, ErrInvalidAccountHostname)
+	return fmt.Errorf("account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; set account-hostname to the account host, not a workspace host: %w", host, ErrInvalidAccountHostname)
 }
 
 // The derivation below always returns an accounts.-prefixed host; this is the

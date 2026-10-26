@@ -70,6 +70,12 @@ func TestGetAccountHostname(t *testing.T) {
 			if got := GetAccountHostname(tt.hostname); got != tt.want {
 				t.Errorf("GetAccountHostname(%q) = %q, want %q", tt.hostname, got, tt.want)
 			}
+			// Keep-in-sync contract: every host the derivation produces must pass the
+			// explicit-value validator, or a future derivation change could reject
+			// previously-working configs.
+			if err := ValidateAccountHostname(tt.want); err != nil {
+				t.Errorf("ValidateAccountHostname(%q) = %v, want nil", tt.want, err)
+			}
 		})
 	}
 }
@@ -95,6 +101,7 @@ func TestValidateAccountHostname(t *testing.T) {
 		"gcp.databricks.com",
 		"evilaccounts.cloud.databricks.com",
 		"https://accounts.cloud.databricks.com", // scheme-prefixed is not accounts.-prefixed
+		"accounts.",                             // bare prefix has no host; would reproduce the opaque remote failure
 		"",
 	}
 	for _, host := range reject {
