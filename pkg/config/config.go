@@ -34,7 +34,7 @@ var (
 	)
 	AccountHostnameField = field.StringField(
 		"account-hostname",
-		field.WithDescription("The hostname used to connect to the Databricks account API. If not set, it will be calculated from the hostname field."),
+		field.WithDescription("The hostname used to connect to the Databricks account API. If set, it must be an accounts.-prefixed account host (e.g. accounts.cloud.databricks.com); if not set, it will be calculated from the hostname field."),
 		field.WithDisplayName("Account Hostname"),
 	)
 	HostnameField = field.StringField(

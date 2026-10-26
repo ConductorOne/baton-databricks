@@ -153,10 +153,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		return nil, nil, fmt.Errorf("databricks-connector: %w", err)
 	}
 
-	auth, err := prepareClientAuth(cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: %w", err)
-	}
+	auth := prepareClientAuth(cfg, accountHostname)
 
 	cb, err := New(
 		ctx,
@@ -175,21 +172,17 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 	return cb, nil, nil
 }
 
-func prepareClientAuth(cfg *config.Databricks) (databricks.Auth, error) {
+func prepareClientAuth(cfg *config.Databricks, accountHostname string) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
 	databricksClientSecret := cfg.DatabricksClientSecret
-	accountHostname, err := getAccountHostname(cfg, cfg.Hostname)
-	if err != nil {
-		return nil, err
-	}
 
 	return databricks.NewOAuth2(
 		accountID,
 		databricksClientId,
 		databricksClientSecret,
 		accountHostname,
-	), nil
+	)
 }
 
 // getAccountHostname returns the account hostname from config if set, otherwise
