@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -370,6 +371,10 @@ func (s *servicePrincipalBuilder) Revoke(ctx context.Context, grant *v2.Grant) (
 	}
 
 	principalID, err := preparePrincipalId(ctx, s.client, workspaceId, principal.Id.ResourceType, principal.Id.Resource)
+	if errors.Is(err, errPrincipalNotFound) {
+		// the principal no longer exists, so it does not have the entitlement: the revoke is already satisfied
+		return annotations.New(&v2.GrantAlreadyRevoked{}), nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to prepare principal id: %w", err)
 	}

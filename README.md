@@ -181,6 +181,13 @@ A workspace entitlement can only be granted to a principal that is already
 assigned to that workspace. Otherwise the grant fails with a
 `FailedPrecondition` error; grant the workspace membership first.
 
+Revoking workspace membership deletes the principal's whole workspace
+assignment, so a principal that is also a workspace admin loses admin access
+to that workspace too. This also applies to groups: revoking workspace
+membership from a group removes the group's entire workspace assignment,
+including admin access if the group is a workspace admin, so its members lose
+it.
+
 # Contributing, Support and Issues
 
 We started Baton because we were tired of taking screenshots and manually

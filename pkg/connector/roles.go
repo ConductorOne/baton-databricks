@@ -361,9 +361,14 @@ func (r *roleBuilder) Grant(ctx context.Context, principal *v2.Resource, entitle
 		}
 
 	case groupResourceType.Id:
-		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource, databricks.NewGroupRolesAttrVars())
+		_, groupPrincipalId, err := parseResourceId(principal.Id.Resource)
 		if err != nil {
-			return nil, principalLookupError(err, "group", principal.Id.Resource, isWorkspaceRole, workspaceId)
+			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
+		}
+
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
+		if err != nil {
+			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		addPermissions(isWorkspaceRole, &g.Permissions, permissionName)
@@ -437,9 +442,14 @@ func (r *roleBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.
 		}
 
 	case groupResourceType.Id:
-		g, _, err := r.client.GetGroup(ctx, workspaceId, principal.Id.Resource, databricks.NewGroupRolesAttrVars())
+		_, groupPrincipalId, err := parseResourceId(principal.Id.Resource)
 		if err != nil {
-			return nil, principalLookupError(err, "group", principal.Id.Resource, isWorkspaceRole, workspaceId)
+			return nil, fmt.Errorf("databricks-connector: failed to parse principal resource id: %w", err)
+		}
+
+		g, _, err := r.client.GetGroup(ctx, workspaceId, groupPrincipalId.Resource, databricks.NewGroupUpdateAttrVars())
+		if err != nil {
+			return nil, principalLookupError(err, "group", groupPrincipalId.Resource, isWorkspaceRole, workspaceId)
 		}
 
 		removePermissions(isWorkspaceRole, &g.Permissions, permissionName)

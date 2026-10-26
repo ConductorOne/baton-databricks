@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/conductorone/baton-sdk/internal/atomicfile"
 	c1zv3 "github.com/conductorone/baton-sdk/pb/c1/c1z/v3"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	reader_v2 "github.com/conductorone/baton-sdk/pb/c1/reader/v2"
@@ -489,6 +490,12 @@ func (s *pebbleStore) EndSync(ctx context.Context) error {
 	return s.markDirty(s.Engine.EndSync(ctx))
 }
 
+// Seal is the ledger lifecycle's Sealing → Sealed transition; EndSyncWithStats
+// is the same call under the store's older name.
+func (s *pebbleStore) Seal(ctx context.Context, stats c1zstore.SyncStats) error {
+	return s.markDirty(s.Engine.EndSyncWithStats(ctx, stats))
+}
+
 func (s *pebbleStore) EndSyncWithStats(ctx context.Context, stats c1zstore.SyncStats) error {
 	return s.markDirty(s.Engine.EndSyncWithStats(ctx, stats))
 }
@@ -540,6 +547,36 @@ func (s *pebbleStore) DeleteEntitlementGraphBlob(ctx context.Context) error {
 // to the SyncMeta sub-store's MarkSyncSupportsDiff.
 func (s *pebbleStore) SetSupportsDiff(ctx context.Context, syncID string) error {
 	return s.markDirty(s.SyncMeta().MarkSyncSupportsDiff(ctx, syncID))
+}
+
+// RollbackExpansion is the Pebble form of (*C1File).RollbackExpansion.
+// WithSyncTokenRewrite is ignored: a replay re-expands a finished ledgered
+// sync through a new ledger pass, not through its token.
+func (s *pebbleStore) RollbackExpansion(ctx context.Context, syncID string, dryRun bool, opts ...RollbackOption) (*RollbackResult, error) {
+	cfg := &rollbackConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+	res, err := s.Engine.RollbackExpansion(ctx, syncID, dryRun, cfg.preserveSuspect)
+	switch {
+	case errors.Is(err, pebble.ErrNothingToRollBack):
+		return nil, fmt.Errorf("%w: %w", ErrSyncNotExpanded, err)
+	case errors.Is(err, pebble.ErrRollbackIncompleteCollection):
+		return nil, fmt.Errorf("%w: %w", ErrSyncNotFinished, err)
+	case err != nil:
+		return nil, err
+	}
+	if !dryRun {
+		s.MarkDirty()
+	}
+	return &RollbackResult{
+		SyncID:                  syncID,
+		GrantsDeleted:           res.GrantsDeleted,
+		SourcesCleared:          res.SourcesCleared,
+		SuspectConnectorSourced: res.SuspectConnectorSourced,
+		SuspectPreserved:        res.SuspectPreserved,
+		DryRun:                  dryRun,
+	}, nil
 }
 
 func (s *pebbleStore) PutGrants(ctx context.Context, grants ...*v2.Grant) error {
@@ -602,6 +639,13 @@ func (s *pebbleStore) LedgerFacts(ctx context.Context) (map[string]string, error
 	return s.Engine.Ledger().Facts(ctx)
 }
 
+func (s *pebbleStore) FoldLedgerCounters(ctx context.Context, currentRunID string) error {
+	if err := s.writeHook(ctx, "FoldLedgerCounters"); err != nil {
+		return err
+	}
+	return s.markDirty(s.Engine.Ledger().FoldCounters(ctx, currentRunID))
+}
+
 func (s *pebbleStore) LedgerCounters(ctx context.Context) (c1zstore.LedgerCounters, error) {
 	return s.Engine.Ledger().Counters(ctx)
 }
@@ -615,13 +659,20 @@ type dirtyPageWriter struct {
 	store *pebbleStore
 }
 
+func (w *dirtyPageWriter) SetTrustedImport() error {
+	writer, ok := w.PageWriter.(c1zstore.TrustedImportPageWriter)
+	if !ok {
+		return errors.New("pebble page writer does not support trusted import")
+	}
+	return writer.SetTrustedImport()
+}
+
 func (w *dirtyPageWriter) Commit(ctx context.Context, id c1zstore.LedgerActionIdentity, row *c1zstore.LedgerRow) error {
 	return w.store.markDirty(w.PageWriter.Commit(ctx, id, row))
 }
 
-func (s *pebbleStore) TakeoverToken(ctx context.Context, runID string, facts []string, counters c1zstore.LedgerCounters) (string, error) {
-	state, err := s.Engine.Ledger().Takeover(ctx, runID, facts, counters)
-	return state, s.markDirty(err)
+func (s *pebbleStore) State(ctx context.Context) (c1zstore.LedgerState, error) {
+	return s.LedgerState(ctx)
 }
 
 func (s *pebbleStore) PutCounterBucket(ctx context.Context, runID string, worker uint32, counters c1zstore.LedgerCounters) error {
@@ -926,20 +977,11 @@ func (s *pebbleStore) save(ctx context.Context) error {
 	}
 	checkpointDur := time.Since(saveStart)
 
-	tmpPath := s.outputFilePath + ".tmp"
-	out, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	staged, err := atomicfile.Create(s.outputFilePath)
 	if err != nil {
 		return err
 	}
-	success := false
-	defer func() {
-		if out != nil {
-			_ = out.Close()
-		}
-		if !success {
-			_ = os.Remove(tmpPath)
-		}
-	}()
+	defer staged.Cleanup()
 
 	manifest, err := pebble.BuildManifestWithSyncRuns(ctx, s.Engine, s.payloadEncoding)
 	if err != nil {
@@ -949,23 +991,77 @@ func (s *pebbleStore) save(ctx context.Context) error {
 		manifest.SetFoldDeadBytes(s.foldDeadBytes)
 	}
 	encodeStart := time.Now()
-	if _, err := formatv3.WriteEnvelopeWithReuse(out, manifest, checkpointDir, s.payloadReuse); err != nil {
+	if _, err := formatv3.WriteEnvelopeWithReuse(staged, manifest, checkpointDir, s.payloadReuse); err != nil {
 		return err
 	}
 	ctxzap.Extract(ctx).Debug("pebble save: envelope written",
 		zap.Duration("checkpoint", checkpointDur),
 		zap.Duration("envelope_encode", time.Since(encodeStart)),
 	)
-	if err := out.Sync(); err != nil {
+	return staged.CloseAtomicallyReplace()
+}
+
+func (s *pebbleStore) PutLedgerFacts(ctx context.Context, facts map[string]string) error {
+	if err := s.writeHook(ctx, "PutLedgerFacts"); err != nil {
 		return err
 	}
-	if err := out.Close(); err != nil {
+	return s.markDirty(s.Engine.Ledger().PutFacts(ctx, facts))
+}
+
+func (s *pebbleStore) BeginExpanding(ctx context.Context) error {
+	if err := s.writeHook(ctx, "BeginExpanding"); err != nil {
 		return err
 	}
-	out = nil
-	if err := os.Rename(tmpPath, s.outputFilePath); err != nil {
+	return s.markDirty(s.Engine.Ledger().BeginExpanding(ctx))
+}
+
+func (s *pebbleStore) BeginPass(ctx context.Context, seeds []c1zstore.LedgerWork, clearFacts []string) error {
+	if err := s.writeHook(ctx, "BeginPass"); err != nil {
 		return err
 	}
-	success = true
-	return nil
+	return s.markDirty(s.Engine.Ledger().BeginPass(ctx, seeds, clearFacts))
+}
+
+func (s *pebbleStore) ArchiveLedgerReport(ctx context.Context) ([]byte, error) {
+	if err := s.writeHook(ctx, "ArchiveLedgerReport"); err != nil {
+		return nil, err
+	}
+	s.MarkDirty()
+	return s.Engine.ArchiveLedgerReport(ctx)
+}
+
+func (s *pebbleStore) PendingWork(ctx context.Context, beforeID uint64, limit int) ([]c1zstore.LedgerWork, c1zstore.LedgerQueuePhase, error) {
+	return s.Engine.Ledger().PendingWork(ctx, beforeID, limit)
+}
+
+func (s *pebbleStore) BeginCollecting(ctx context.Context, work []c1zstore.LedgerWork, facts map[string]string) error {
+	if err := s.writeHook(ctx, "BeginCollecting"); err != nil {
+		return err
+	}
+	return s.markDirty(s.Engine.Ledger().BeginCollecting(ctx, work, facts))
+}
+
+func (s *pebbleStore) BeginFromToken(
+	ctx context.Context, runID, expectedToken string, facts map[string]string, counters c1zstore.LedgerCounters, work []c1zstore.LedgerWork, phase c1zstore.LedgerQueuePhase,
+) (string, error) {
+	if err := s.writeHook(ctx, "BeginFromToken"); err != nil {
+		return "", err
+	}
+	state, err := s.Engine.Ledger().BeginFromToken(ctx, runID, expectedToken, facts, counters, work, phase)
+	return state, s.markDirty(err)
+}
+
+func (s *pebbleStore) PendingWorkAfter(ctx context.Context, afterID uint64, limit int) ([]c1zstore.LedgerWork, c1zstore.LedgerQueuePhase, error) {
+	return s.Engine.Ledger().PendingWorkAfter(ctx, afterID, limit)
+}
+
+func (s *pebbleStore) CompletePendingWork(ctx context.Context, work c1zstore.LedgerWork, runID string, counters c1zstore.LedgerCounters) error {
+	if err := s.writeHook(ctx, "CompletePendingWork"); err != nil {
+		return err
+	}
+	return s.markDirty(s.Engine.Ledger().CompletePendingWork(ctx, work, runID, counters))
+}
+
+func (s *pebbleStore) HasScheduledWork(ctx context.Context, key string) (bool, error) {
+	return s.Engine.Ledger().HasScheduledWork(ctx, key)
 }

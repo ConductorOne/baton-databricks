@@ -175,12 +175,43 @@ func parseJSON(body io.Reader, res interface{}) error {
 	return nil
 }
 
+// getNoCache is a GET that bypasses the uhttp response cache.
+func (c *Client) getNoCache(
+	ctx context.Context,
+	urlAddress *url.URL,
+	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequestWithOptions(
+		ctx,
+		urlAddress,
+		http.MethodGet,
+		nil,
+		response,
+		[]uhttp.RequestOption{uhttp.WithNoCache()},
+		params...,
+	)
+}
+
 func (c *Client) doRequest(
 	ctx context.Context,
 	urlAddress *url.URL,
 	method string,
 	body interface{},
 	response interface{},
+	params ...Vars,
+) (*v2.RateLimitDescription, error) {
+	return c.doRequestWithOptions(ctx, urlAddress, method, body, response, nil, params...)
+}
+
+// doRequestWithOptions is doRequest with extra request options appended.
+func (c *Client) doRequestWithOptions(
+	ctx context.Context,
+	urlAddress *url.URL,
+	method string,
+	body interface{},
+	response interface{},
+	extraOptions []uhttp.RequestOption,
 	params ...Vars,
 ) (*v2.RateLimitDescription, error) {
 	// TODO(marcos): Refactor URLs so that we don't have to unescape.
@@ -203,6 +234,7 @@ func (c *Client) doRequest(
 	if method == http.MethodGet && isNoCache(ctx) {
 		options = append(options, uhttp.WithNoCache())
 	}
+	options = append(options, extraOptions...)
 
 	req, err := c.httpClient.NewRequest(ctx, method, uri, options...)
 	if err != nil {
