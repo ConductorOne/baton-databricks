@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -14,7 +15,6 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
-	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
 
 // fakeSCIMGroup is an account group held by a test server that applies SCIM PATCH operations
@@ -126,18 +126,6 @@ func testGroupMembershipEntitlement(t *testing.T) *v2.Entitlement {
 	return ent.NewAssignmentEntitlement(testTargetGroupResource(t, "g-target"), groupMemberEntitlement)
 }
 
-func testTargetGroupPrincipal(t *testing.T) *v2.Resource {
-	t.Helper()
-	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
-	r, err := rs.NewGroupResource("Target Group", groupResourceType, groupResourceId(context.Background(), "g-target", parent), nil,
-		rs.WithParentResourceID(parent),
-	)
-	if err != nil {
-		t.Fatalf("NewGroupResource: %v", err)
-	}
-	return r
-}
-
 // TestAccountGroupWritesArePatches covers CXH-2347 item 4: each account-group write sends a
 // single SCIM PATCH operation for its own change, never a full-replacement PUT, so the rest of
 // the group (displayName, externalId, other members, roles, entitlements) cannot be wiped.
@@ -178,7 +166,7 @@ func TestAccountGroupWritesArePatches(t *testing.T) {
 			run: func(t *testing.T, srv *fakeSCIMGroup) error {
 				srv.state["roles"] = []any{}
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				_, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, false))
+				_, err := r.Grant(context.Background(), testGroupPrincipal(t, "g-target"), testRoleEntitlement(t, false))
 				return err
 			},
 			wantOp:    databricks.PatchOperation{Op: "add", Path: "roles", Value: []any{map[string]any{"value": AccountAdminRole}}},
@@ -189,7 +177,7 @@ func TestAccountGroupWritesArePatches(t *testing.T) {
 			name: "account role revoke",
 			run: func(t *testing.T, srv *fakeSCIMGroup) error {
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, false)})
+				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testGroupPrincipal(t, "g-target"), Entitlement: testRoleEntitlement(t, false)})
 				return err
 			},
 			wantOp:    databricks.PatchOperation{Op: "remove", Path: `roles[value eq "account_admin"]`},
@@ -365,7 +353,7 @@ func TestWorkspaceGroupWritesArePatches(t *testing.T) {
 			run: func(t *testing.T, srv *fakeSCIMGroup) error {
 				srv.state["entitlements"] = []any{}
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				_, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, true))
+				_, err := r.Grant(context.Background(), testGroupPrincipal(t, "g-target"), testRoleEntitlement(t, true))
 				return err
 			},
 			wantOp:    databricks.PatchOperation{Op: "add", Path: "entitlements", Value: []any{map[string]any{"value": WorkspaceAccessRole}}},
@@ -376,7 +364,7 @@ func TestWorkspaceGroupWritesArePatches(t *testing.T) {
 			name: "workspace entitlement revoke",
 			run: func(t *testing.T, srv *fakeSCIMGroup) error {
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, true)})
+				_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testGroupPrincipal(t, "g-target"), Entitlement: testRoleEntitlement(t, true)})
 				return err
 			},
 			wantOp:    databricks.PatchOperation{Op: "remove", Path: `entitlements[value eq "workspace-access"]`},
@@ -462,7 +450,7 @@ func TestGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
 			run: func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error) {
 				srv.state["entitlements"] = []any{}
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				return r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, true)})
+				return r.Revoke(context.Background(), &v2.Grant{Principal: testGroupPrincipal(t, "g-target"), Entitlement: testRoleEntitlement(t, true)})
 			},
 		},
 		{
@@ -471,7 +459,7 @@ func TestGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
 			run: func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error) {
 				srv.state["roles"] = []any{}
 				r := newRoleBuilderWithHandler(t, srv.handler)
-				return r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, false)})
+				return r.Revoke(context.Background(), &v2.Grant{Principal: testGroupPrincipal(t, "g-target"), Entitlement: testRoleEntitlement(t, false)})
 			},
 		},
 	}
@@ -547,7 +535,8 @@ func TestGroupRevokeGroupNotFound(t *testing.T) {
 }
 
 // TestRoleRevokeGroupPrincipalNotFound: same for a role revoked from a group principal that is
-// already gone; the lookup error explanation stays Grant-only.
+// already gone. Only group principals are a no-op; user and service principal Revoke still
+// return the lookup error.
 func TestRoleRevokeGroupPrincipalNotFound(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -564,7 +553,7 @@ func TestRoleRevokeGroupPrincipalNotFound(t *testing.T) {
 				_, _ = w.Write([]byte(`{"detail":"Group with id g-target not found"}`))
 			})
 			annos, err := r.Revoke(context.Background(), &v2.Grant{
-				Principal:   testTargetGroupPrincipal(t),
+				Principal:   testGroupPrincipal(t, "g-target"),
 				Entitlement: testRoleEntitlement(t, tc.workspaceRole),
 			})
 			if err != nil {
@@ -579,9 +568,12 @@ func TestRoleRevokeGroupPrincipalNotFound(t *testing.T) {
 	t.Run("500 is still an error", func(t *testing.T) {
 		r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"internal error"}`))
 		})
-		if _, err := r.Revoke(context.Background(), &v2.Grant{Principal: testTargetGroupPrincipal(t), Entitlement: testRoleEntitlement(t, false)}); err == nil {
-			t.Error("Revoke returned no error on a 500 group read, want one")
+		_, err := r.Revoke(context.Background(), &v2.Grant{Principal: testGroupPrincipal(t, "g-target"), Entitlement: testRoleEntitlement(t, false)})
+		var apiErr *databricks.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError {
+			t.Errorf("Revoke error = %v, want APIError with status 500", err)
 		}
 	})
 }
@@ -605,7 +597,7 @@ func TestRoleGrantToGroup(t *testing.T) {
 			srv := newFakeSCIMGroup(t, tc.path)
 			r := newRoleBuilderWithHandler(t, srv.handler)
 
-			annos, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, tc.workspaceRole))
+			annos, err := r.Grant(context.Background(), testGroupPrincipal(t, "g-target"), testRoleEntitlement(t, tc.workspaceRole))
 			if err != nil {
 				t.Fatalf("Grant returned error: %v", err)
 			}
@@ -622,7 +614,7 @@ func TestRoleGrantToGroup(t *testing.T) {
 			srv.state[tc.attribute] = []any{}
 			r := newRoleBuilderWithHandler(t, srv.handler)
 
-			annos, err := r.Grant(context.Background(), testTargetGroupPrincipal(t), testRoleEntitlement(t, tc.workspaceRole))
+			annos, err := r.Grant(context.Background(), testGroupPrincipal(t, "g-target"), testRoleEntitlement(t, tc.workspaceRole))
 			if err != nil {
 				t.Fatalf("Grant returned error: %v", err)
 			}

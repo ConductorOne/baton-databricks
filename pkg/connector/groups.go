@@ -305,7 +305,7 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
+		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
@@ -444,9 +444,9 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
-		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupUpdateAttrVars())
+		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if isNotFoundError(err) {
-			// the group is already gone, so the principal is not a member of it
+			// group not found (deleted, or not assigned to this workspace)
 			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 		}
 		if err != nil {

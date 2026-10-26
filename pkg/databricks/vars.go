@@ -112,21 +112,6 @@ func NewGroupRolesAttrVars() *AttrVars {
 	}
 }
 
-// NewGroupUpdateAttrVars requests the attributes of the Group model that group writes read
-// before patching: members for membership checks.
-func NewGroupUpdateAttrVars() *AttrVars {
-	return &AttrVars{
-		Attrs: []string{
-			"id",
-			"displayName",
-			"members",
-			"roles",
-			"entitlements",
-			"meta",
-		},
-	}
-}
-
 func NewServicePrincipalAttrVars() *AttrVars {
 	return &AttrVars{
 		Attrs: []string{
