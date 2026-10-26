@@ -101,6 +101,11 @@ func TestValidateAccountHostname(t *testing.T) {
 		// The contract is shape, not domain ownership: an accounts.-prefixed
 		// lookalike passes by design (I2). Validation never rewrites the value.
 		"accounts.evil.com",
+		// The real AWS GovCloud DoD account console per vendor docs:
+		// https://docs.databricks.com/aws/en/security/privacy/gov-cloud
+		"accounts-dod.cloud.databricks.mil",
+		// AWS GovCloud (non-DoD) account console, same docs page.
+		"accounts.cloud.databricks.us",
 	}
 	for _, host := range accept {
 		if err := ValidateAccountHostname(host); err != nil {

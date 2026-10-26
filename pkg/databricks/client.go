@@ -60,16 +60,17 @@ func hostMatches(hostname, suffix string) bool {
 }
 
 // ErrInvalidAccountHostname is returned when an explicitly configured
-// account-hostname does not have the accounts.-prefixed shape that
-// GetAccountHostname always produces.
+// account-hostname does not have the accounts.- or accounts-dod.-prefixed
+// shape that GetAccountHostname always produces.
 var ErrInvalidAccountHostname = errors.New("invalid account hostname")
 
 // ValidateAccountHostname reports whether an explicitly configured account
-// hostname has the shape GetAccountHostname always produces: an
-// accounts.-prefixed host. The caller's value is never rewritten.
+// hostname has the shape GetAccountHostname always produces: an accounts.-
+// prefixed host. The caller's value is never rewritten.
 func ValidateAccountHostname(host string) error {
 	normalized := strings.ToLower(strings.TrimSuffix(host, "."))
-	if strings.HasPrefix(normalized, "accounts.") {
+	if strings.HasPrefix(normalized, "accounts.") ||
+		strings.HasPrefix(normalized, "accounts-dod.") {
 		return nil
 	}
 	return fmt.Errorf("account-hostname must be an accounts.-prefixed host (e.g. accounts.cloud.databricks.com): got %q; "+
@@ -81,6 +82,10 @@ func ValidateAccountHostname(host string) error {
 // produce (hostname has a default) and returns bare "accounts.", which
 // ValidateAccountHostname rejects — the known exception to the keep-in-sync
 // rule, pinned in TestGetAccountHostname.
+//
+// accounts-dod. is the vendor-documented AWS GovCloud DoD account-console
+// shape the derivation does not produce, but ValidateAccountHostname keeps
+// accepting it on an explicitly configured account-hostname.
 func GetAccountHostname(hostname string) string {
 	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
 	switch {
