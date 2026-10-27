@@ -14,6 +14,8 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 )
 
 type Databricks struct {
@@ -21,10 +23,12 @@ type Databricks struct {
 	clientID   string
 	workspaces []string
 	opts       *cli.ConnectorOpts
+	// sqlWarehouseID enables incremental sync when non-empty.
+	sqlWarehouseID string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
-func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.ResourceSyncerV2 {
 	workspaces := configuredWorkspaceSet(d.workspaces)
 	principals := syncPrincipals{
 		groups:            d.willSyncResourceType(groupResourceType.Id),
@@ -55,14 +59,22 @@ func (d *Databricks) willSyncResourceType(resourceTypeID string) bool {
 	return d.opts.WillSyncResourceType(resourceTypeID)
 }
 
+// EventFeeds registers the audit-log event feed unconditionally; whether sql-warehouse-id
+// is set gates its behavior inside ListEvents instead.
+func (d *Databricks) EventFeeds(_ context.Context) []connectorbuilder.EventFeed {
+	return []connectorbuilder.EventFeed{
+		newAuditEventFeed(d.client, d.workspaces, d.sqlWarehouseID),
+	}
+}
+
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
 // It streams a response, always starting with a metadata object, following by chunked payloads for the asset.
-func (d *Databricks) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.ReadCloser, error) {
+func (d *Databricks) Asset(_ context.Context, _ *v2.AssetRef) (string, io.ReadCloser, error) {
 	return "", nil, nil
 }
 
 // Metadata returns metadata about the connector.
-func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
+func (d *Databricks) Metadata(_ context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton, " +
@@ -136,19 +148,31 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// Workspace enumeration is the other account-plane call every sync depends on.
 	// Per-workspace probing is deliberately not done here: a workspace the service
 	// principal can't reach is skipped during sync rather than failing validation.
-	workspaces, _, err := d.client.ListWorkspaces(ctx)
+	annos := annotations.Annotations{}
+	workspaces, rateLimit, err := d.client.ListWorkspaces(ctx)
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		return annos, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
 	if len(d.workspaces) > 0 && !slices.ContainsFunc(workspaces, func(w databricks.Workspace) bool {
 		_, ok := matchConfiguredWorkspace(configuredWorkspaceSet(d.workspaces), w.DeploymentName, w.Name, strconv.Itoa(w.ID))
 		return ok
 	}) {
-		return nil, fmt.Errorf("databricks-connector: none of the configured workspaces (%s) exists on the account", strings.Join(d.workspaces, ", "))
+		return annos, fmt.Errorf("databricks-connector: none of the configured workspaces (%s) exists on the account", strings.Join(d.workspaces, ", "))
 	}
 
-	return nil, nil
+	l := ctxzap.Extract(ctx)
+	if d.sqlWarehouseID == "" {
+		l.Info("databricks-connector: incremental sync disabled (sql-warehouse-id not set)")
+		return annos, nil
+	}
+
+	l.Info("databricks-connector: incremental sync enabled", zap.String("sql_warehouse_id", d.sqlWarehouseID))
+
+	return annos, nil
 }
 
 // New returns a new instance of the connector. clientID is the application id of
@@ -163,6 +187,7 @@ func New(
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
+	sqlWarehouseID string,
 	opts *cli.ConnectorOpts,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
@@ -180,6 +205,8 @@ func New(
 		clientID:   clientID,
 		workspaces: workspaces,
 		opts:       opts,
+		// Trimmed so a whitespace-only value counts as unset (incremental sync off).
+		sqlWarehouseID: strings.TrimSpace(sqlWarehouseID),
 	}, nil
 }
 
@@ -198,6 +225,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
+		cfg.SqlWarehouseId,
 		opts,
 	)
 	if err != nil {

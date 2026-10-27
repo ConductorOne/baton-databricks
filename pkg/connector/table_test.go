@@ -36,6 +36,12 @@ type fakeSchemaChildAccount struct {
 	volumes []map[string]any
 	// childStatus fails the tables and volumes listings with that status.
 	childStatus int
+	// catalogStatus fails the catalog read on that deployment name.
+	catalogStatus map[string]int
+	// permNotFound answers the permissions endpoint with a 404 carrying
+	// permErrorCode, which may be empty.
+	permNotFound  bool
+	permErrorCode string
 	// assignments maps a securable's full name to the privilege assignments on it.
 	assignments map[string][]map[string]any
 	// ownPrivileges answers a read filtered by principal, keyed by
@@ -53,6 +59,7 @@ type fakeSchemaChildAccount struct {
 	childPages    int
 	schemaPages   int
 	catalogPages  int
+	catalogReads  int
 	patches       []map[string]any
 	permHosts     []string
 	memberLists   []string
@@ -103,6 +110,14 @@ func (f *fakeSchemaChildAccount) handler(t *testing.T) http.HandlerFunc {
 			encode(map[string]any{"catalogs": []map[string]any{
 				{"name": "main", "metastore_id": "ms-1", "owner": f.catalogOwner},
 			}})
+		case strings.Contains(path, "/unity-catalog/catalogs/"):
+			f.catalogReads++
+			if code, ok := f.catalogStatus[r.Header.Get("X-Test-Workspace")]; ok {
+				http.Error(w, `{"message":"refused"}`, code)
+
+				return
+			}
+			encode(map[string]any{"name": "main", "metastore_id": "ms-1", "owner": f.catalogOwner})
 		case strings.HasSuffix(path, "/unity-catalog/schemas"):
 			f.schemaPages++
 			encode(map[string]any{"schemas": []map[string]any{
@@ -150,6 +165,11 @@ func (f *fakeSchemaChildAccount) serveChildren(w http.ResponseWriter, r *http.Re
 func (f *fakeSchemaChildAccount) servePermissions(w http.ResponseWriter, r *http.Request, securable string) {
 	workspace := r.Header.Get("X-Test-Workspace")
 	f.permHosts = append(f.permHosts, workspace)
+	if f.permNotFound {
+		http.Error(w, fmt.Sprintf(`{"error_code":%q,"message":"not found"}`, f.permErrorCode), http.StatusNotFound)
+
+		return
+	}
 	if principal := r.URL.Query().Get("principal"); principal != "" {
 		f.filteredReads = append(f.filteredReads, securable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"privilege_assignments": f.ownPrivileges[securable]})

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
@@ -72,6 +73,25 @@ func (e *APIError) Unwrap() error {
 	return e.Err
 }
 
+// HasErrorCode reports a 404 whose body named one of the given error codes.
+func (e *APIError) HasErrorCode(errorCodes ...string) bool {
+	if e == nil || e.StatusCode != http.StatusNotFound || e.ErrorCode == "" {
+		return false
+	}
+
+	return slices.Contains(errorCodes, e.ErrorCode)
+}
+
+// IsSecurableGone reports a 404 for a named securable that no longer exists.
+// A 404 with any other error_code, or with none, is a routing or permission
+// miss: Databricks answers an unbound workspace with an error too, so only the
+// code proves the securable is gone.
+func IsSecurableGone(err error, errorCodes ...string) bool {
+	var apiErr *APIError
+
+	return errors.As(err, &apiErr) && apiErr.HasErrorCode(errorCodes...)
+}
+
 // nameWorkspace403Remedy enriches a 403 from a workspace-scoped call with the
 // fix: excluding the workspace scopes it out of the sync. workspaceId is empty
 // for account-scoped calls, where a 403 is not a per-workspace access problem,
@@ -93,6 +113,19 @@ func nameWorkspace403Remedy(workspaceId string, err error) error {
 // invalidArgument marks a malformed request so it does not reach C1 as Unknown and get retried.
 func invalidArgument(format string, args ...any) error {
 	return uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf(format, args...))
+}
+
+type noCacheKey struct{}
+
+// WithoutCache marks ctx so GETs made with it bypass the uhttp response cache, for
+// callers that need fresh data (statement polling, incremental-sync refreshes).
+func WithoutCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noCacheKey{}, true)
+}
+
+func isNoCache(ctx context.Context) bool {
+	v, _ := ctx.Value(noCacheKey{}).(bool)
+	return v
 }
 
 func (c *Client) Get(
@@ -246,6 +279,9 @@ func (c *Client) prepareRequest(
 	}
 	if body != nil {
 		options = append(options, uhttp.WithJSONBody(body))
+	}
+	if method == http.MethodGet && isNoCache(ctx) {
+		options = append(options, uhttp.WithNoCache())
 	}
 	options = append(options, requestOptions...)
 

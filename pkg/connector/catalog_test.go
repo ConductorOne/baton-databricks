@@ -41,9 +41,11 @@ type fakeCatalogAccount struct {
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
 	permStatus       int
-	patchStatus      int
-	users            map[string]string
-	groups           map[string]string
+	// permErrorCode is the vendor error_code that rides along with permStatus.
+	permErrorCode string
+	patchStatus   int
+	users         map[string]string
+	groups        map[string]string
 
 	routed        int
 	catalogPages  int
@@ -88,6 +90,8 @@ func (f *fakeCatalogAccount) handler(t *testing.T) http.HandlerFunc {
 			})
 		case strings.HasSuffix(path, "/unity-catalog/catalogs"):
 			f.serveCatalogs(w, r)
+		case strings.Contains(path, "/unity-catalog/catalogs/"):
+			f.serveCatalog(w, r, path[strings.LastIndex(path, "/")+1:])
 		case strings.Contains(path, "/unity-catalog/permissions/catalog/"):
 			f.servePermissions(w, r, path[strings.LastIndex(path, "/")+1:])
 		default:
@@ -118,10 +122,30 @@ func (f *fakeCatalogAccount) serveCatalogs(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": all[start : start+size], "next_page_token": next})
 }
 
+// serveCatalog answers GET /catalogs/{name} from the same per-workspace listing,
+// so a catalog bound elsewhere 404s here exactly as the workspace would answer.
+func (f *fakeCatalogAccount) serveCatalog(w http.ResponseWriter, r *http.Request, name string) {
+	workspace := r.Header.Get("X-Test-Workspace")
+	if code, ok := f.listStatus[workspace]; ok {
+		http.Error(w, `{"message":"denied"}`, code)
+
+		return
+	}
+	for _, catalog := range f.listed[workspace] {
+		if catalog["name"] == name {
+			_ = json.NewEncoder(w).Encode(catalog)
+
+			return
+		}
+	}
+
+	http.Error(w, `{"error_code":"CATALOG_DOES_NOT_EXIST","message":"not found"}`, http.StatusNotFound)
+}
+
 func (f *fakeCatalogAccount) servePermissions(w http.ResponseWriter, r *http.Request, catalog string) {
 	f.permHosts = append(f.permHosts, r.Header.Get("X-Test-Workspace"))
 	if f.permStatus != 0 {
-		http.Error(w, `{"message":"nope"}`, f.permStatus)
+		http.Error(w, fmt.Sprintf(`{"error_code":%q,"message":"nope"}`, f.permErrorCode), f.permStatus)
 		return
 	}
 	if principal := r.URL.Query().Get("principal"); principal != "" {
@@ -302,9 +326,11 @@ func TestCatalogListReadsEveryWorkspace(t *testing.T) {
 	}
 }
 
-// A catalog the caller cannot fully read is left out. Failing the sync here
-// would take users, groups and every other catalog down with it.
-func TestCatalogListSkipsACatalogItCannotFullyRead(t *testing.T) {
+// A catalog whose privilege list is partial fails the sync instead of being left
+// out. Leaving it out is not the quiet half: ConductorOne deletes every resource
+// a sync stops emitting, so the catalog, its grants and its whole subtree would
+// go, where failing keeps the state C1 already holds.
+func TestCatalogListFailsOnACatalogItCannotFullyRead(t *testing.T) {
 	f := &fakeCatalogAccount{
 		attached: []int{1},
 		listed:   map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
@@ -316,11 +342,14 @@ func TestCatalogListSkipsACatalogItCannotFullyRead(t *testing.T) {
 	b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
 
 	resources, err := listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List: %v", err)
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("List = %v, want PermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), "main") || !strings.Contains(err.Error(), catalogTrustRemedy) {
+		t.Errorf("error %q does not name the catalog and the remedy", err)
 	}
 	if len(resources) != 0 {
-		t.Fatalf("listed %d catalogs, want none", len(resources))
+		t.Errorf("listed %d catalogs, want none", len(resources))
 	}
 }
 
@@ -512,5 +541,72 @@ func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
 	annos, err = b.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+}
+
+// Only the error_code proves the catalog is gone. A bare 404 on the privilege
+// read also comes back from a workspace the catalog is not bound to, where the
+// privilege is still held, so that one stays an error.
+func TestCatalogRevokeTellsADeletedCatalogFromAnUnreachableOne(t *testing.T) {
+	tests := []struct {
+		name      string
+		errorCode string
+		wantGone  bool
+	}{
+		{name: "deleted catalog", errorCode: errorCodeCatalogGone, wantGone: true},
+		{name: "unbound workspace", errorCode: ""},
+		{name: "some other 404", errorCode: "RESOURCE_DOES_NOT_EXIST"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := catalogProvisioningAccount()
+			f.permStatus = http.StatusNotFound
+			f.permErrorCode = test.errorCode
+			b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+			g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
+
+			annos, err := b.Revoke(context.Background(), g)
+			switch {
+			case test.wantGone:
+				if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+				}
+			default:
+				if err == nil {
+					t.Fatalf("Revoke returned %v and no error; want the revoke to fail", annos)
+				}
+				if annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Error("a 404 without the gone code reported GrantAlreadyRevoked")
+				}
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
+	}
+}
+
+// A catalog no workspace in scope lists is not a catalog proven gone: an ISOLATED
+// catalog bound to an excluded workspace, and one the connector lost USE_CATALOG
+// on, both read the same way and still hold the privilege. Reporting
+// GrantAlreadyRevoked would leave that privilege in Databricks while
+// ConductorOne recorded it as revoked.
+func TestCatalogRevokeOnAnUnlistedCatalogDoesNotReportAlreadyRevoked(t *testing.T) {
+	f := catalogProvisioningAccount()
+	// 403, not a 404 naming the catalog: this workspace does not serve the
+	// catalog, which says nothing about whether it exists.
+	f.listStatus = map[string]int{"wsa": http.StatusForbidden}
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+	g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
+
+	annos, err := b.Revoke(context.Background(), g)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Revoke = %v, want FailedPrecondition", err)
+	}
+	if annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Error("an unlisted catalog reported GrantAlreadyRevoked")
+	}
+	if len(f.patches) != 0 {
+		t.Errorf("patches = %v, want none", f.patches)
 	}
 }
