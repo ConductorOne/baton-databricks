@@ -180,7 +180,7 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
 
 Skip this section if you are not syncing catalogs, or if the service principal is already the **Metastore Admin**. Databricks shows a catalog's full privilege list only to the metastore admin, the catalog owner, or a holder of **MANAGE** on it. Workspace **Admin** is enough only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`).
 
-Otherwise, grant **MANAGE** on each catalog you want synced:
+Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced. **MANAGE** alone is not enough: Databricks does not return a catalog at all unless the caller is the metastore admin, owns it, or holds **USE CATALOG** on it, and a catalog it does not return is one ConductorOne removes.
 
 <Steps>
   <Step>
@@ -190,14 +190,14 @@ Otherwise, grant **MANAGE** on each catalog you want synced:
   Select **Permissions**, then click **Grant**.
   </Step>
   <Step>
-  Select the service principal, check **MANAGE**, and confirm.
+  Select the service principal, check **MANAGE** and **USE CATALOG**, and confirm.
   </Step>
 </Steps>
 
 <Warning>
 Without this, that catalog is left out of the sync. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and ConductorOne would delete the grants it cannot read.
 
-The catalog list has the same limit. A service principal that is not the metastore admin receives only the catalogs it owns or holds **USE CATALOG** on. The connector asks every running workspace in scope, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not.
+The connector asks every running workspace in scope, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not, and ConductorOne removes it with everything under it.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:

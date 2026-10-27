@@ -514,3 +514,26 @@ func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
 	}
 }
+
+// A catalog no workspace in scope lists is not a catalog proven gone: an ISOLATED
+// catalog bound to an excluded workspace, and one the connector lost USE_CATALOG
+// on, both read the same way and still hold the privilege. Reporting
+// GrantAlreadyRevoked would leave that privilege in Databricks while
+// ConductorOne recorded it as revoked.
+func TestCatalogRevokeOnAnUnlistedCatalogDoesNotReportAlreadyRevoked(t *testing.T) {
+	f := catalogProvisioningAccount()
+	f.listed = map[string][]map[string]any{"wsa": {}}
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+	g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
+
+	annos, err := b.Revoke(context.Background(), g)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Revoke = %v, want FailedPrecondition", err)
+	}
+	if annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Error("an unlisted catalog reported GrantAlreadyRevoked")
+	}
+	if len(f.patches) != 0 {
+		t.Errorf("patches = %v, want none", f.patches)
+	}
+}

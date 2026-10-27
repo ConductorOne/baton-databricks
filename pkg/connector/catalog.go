@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -531,11 +530,6 @@ func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	annos := annotations.Annotations{}
 	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
 	if err != nil {
-		if errors.Is(err, errCatalogGone) {
-			return annos, status.Errorf(codes.NotFound,
-				"databricks-connector: catalog %s is no longer listed", entitlement.GetResource().GetId().GetResource())
-		}
-
 		return annos, err
 	}
 
@@ -544,13 +538,12 @@ func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 
 func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
+	// A catalog no workspace lists is not a catalog proven gone, so this does not
+	// answer GrantAlreadyRevoked: the privilege would stay in Databricks while
+	// ConductorOne recorded it as revoked. A failed revoke is retried, and a
+	// catalog that really was deleted leaves C1 through the next sync.
 	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
 	if err != nil {
-		if errors.Is(err, errCatalogGone) {
-			annos.Update(&v2.GrantAlreadyRevoked{})
-			return annos, nil
-		}
-
 		return annos, err
 	}
 
