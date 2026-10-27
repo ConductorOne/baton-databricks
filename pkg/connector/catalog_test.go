@@ -361,6 +361,7 @@ func TestCatalogListSkipsOnlyTheSystemCatalog(t *testing.T) {
 		attached: []int{1},
 		listed: map[string][]map[string]any{"wsa": {
 			catalogEntry(systemCatalog, "someone"),
+			{"name": "samples", "metastore_id": "ms-1", "owner": "System user", "catalog_type": "SYSTEM_CATALOG"},
 			catalogEntry("owned", "app-9"),
 		}},
 		workspaceMembers: map[string]any{"1": []map[string]any{{

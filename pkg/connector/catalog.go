@@ -265,11 +265,13 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if !trustworthy {
-			// system is built in and read-only, and this connector has never synced
-			// it, so leaving it out deletes nothing. Every other catalog was synced
-			// in full before, which is why losing standing on one stops the sync.
-			if catalog.Name == systemCatalog {
-				ctxzap.Extract(ctx).Debug("databricks-connector: skipping the system catalog, whose privilege list is partial",
+			// system and samples are built in, owned by System user, and this
+			// connector has never synced them. Databricks refuses a MANAGE grant
+			// on them, so leaving them out deletes nothing. Every other catalog
+			// was synced in full before, which is why losing standing on one stops the sync.
+			if catalog.Name == systemCatalog || catalog.CatalogType == "SYSTEM_CATALOG" {
+				ctxzap.Extract(ctx).Debug("databricks-connector: skipping a built-in catalog whose privilege list is partial",
+					zap.String("catalog", catalog.Name),
 					zap.String("workspace", route.Workspace))
 
 				continue
