@@ -353,6 +353,33 @@ func TestCatalogListFailsOnACatalogItCannotFullyRead(t *testing.T) {
 	}
 }
 
+// system and samples are built in, owned by System user, and Databricks refuses
+// a MANAGE grant on them. Leaving them out deletes nothing this connector has
+// synced. A catalog beside them that the caller owns still syncs.
+func TestCatalogListSkipsBuiltInCatalogs(t *testing.T) {
+	f := &fakeCatalogAccount{
+		attached: []int{1},
+		listed: map[string][]map[string]any{"wsa": {
+			catalogEntry(systemCatalog, "System user"),
+			{"name": "samples", "metastore_id": "ms-1", "owner": "System user", "catalog_type": "SYSTEM_CATALOG"},
+			catalogEntry("owned", "app-9"),
+		}},
+		workspaceMembers: map[string]any{"1": []map[string]any{{
+			"principal":   map[string]any{"service_principal_name": "app-9"},
+			"permissions": []string{"ADMIN"},
+		}}},
+	}
+	b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+	resources, err := listAllCatalogs(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 || resources[0].GetDisplayName() != "owned" {
+		t.Fatalf("listed %d catalogs, want only the one it owns", len(resources))
+	}
+}
+
 // Which workspaces serve the metastore decides which catalogs are in scope, so an
 // assignment list the connector cannot read is unknown, not empty. Listing no
 // catalogs would make ConductorOne delete the metastore's whole subtree.
