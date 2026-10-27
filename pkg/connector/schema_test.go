@@ -254,8 +254,8 @@ func listAllSchemas(t *testing.T, b *schemaBuilder) ([]*v2.Resource, error) {
 // Databricks answers a caller without catalog-wide visibility with only the
 // schemas it owns or can use, at 200, which is indistinguishable from a catalog
 // that holds just those. A short list read as the whole one makes ConductorOne
-// delete the schemas it did not see and every grant under them, so the sync fails
-// on a catalog whose listing it cannot prove complete.
+// delete the schemas it did not see and every grant under them, so that catalog
+// is left out of the sync.
 func TestSchemaListRequiresACompleteListing(t *testing.T) {
 	adminOfTheWorkspace := []map[string]any{
 		{"principal": map[string]any{"service_principal_name": "app-9"}, "permissions": []string{"ADMIN"}},
@@ -342,14 +342,11 @@ func TestSchemaListRequiresACompleteListing(t *testing.T) {
 			case test.wantSchemas && len(resources) != 1:
 				t.Fatalf("listed %d schemas, want 1", len(resources))
 			case !test.wantSchemas:
-				if status.Code(err) != codes.PermissionDenied {
-					t.Fatalf("List = %v, want PermissionDenied", err)
+				if err != nil {
+					t.Fatalf("List = %v, want the catalog left out", err)
 				}
 				if len(resources) != 0 {
 					t.Errorf("listed %d schemas, want none", len(resources))
-				}
-				if !strings.Contains(err.Error(), "main") || !strings.Contains(err.Error(), schemaListRemedy) {
-					t.Errorf("error %q does not name the catalog and the remedy", err)
 				}
 			}
 			if len(f.memberLists) != test.wantMemberLists {
