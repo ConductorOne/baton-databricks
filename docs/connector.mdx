@@ -195,7 +195,7 @@ Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced.
 </Steps>
 
 <Warning>
-Without this, that catalog is left out of the sync. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and ConductorOne would delete the grants it cannot read.
+Without this, the sync fails naming that catalog. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and reporting that short list would make ConductorOne delete the grants it cannot read. Failing keeps what ConductorOne already has.
 
 The connector asks every running workspace in scope, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not, and ConductorOne removes it with everything under it.
 </Warning>

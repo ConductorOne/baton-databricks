@@ -233,16 +233,21 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 		return nil, &rs.SyncOpResults{Annotations: annos}, catalogListingError(metastoreID, route.Workspace, err)
 	}
 
-	l := ctxzap.Extract(ctx)
 	var rv []*v2.Resource
 	for _, catalog := range catalogs {
 		if catalog.Name == "" || (catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID) {
 			continue
 		}
 
-		// A partial privilege list is indistinguishable from an empty one. Leaving
-		// the catalog out keeps the rest of the sync running; reporting it would
-		// make ConductorOne delete the grants the caller cannot see.
+		key := catalogResourceID(metastoreID, catalog.Name)
+		if _, ok := b.seen[key]; ok {
+			continue
+		}
+
+		// A partial privilege list is indistinguishable from an empty one, and
+		// leaving the catalog out is not the safe half: ConductorOne deletes every
+		// resource a sync stops emitting, so the catalog, its grants, and its
+		// schemas, tables and volumes all go. The sync stops instead and keeps them.
 		trustworthy, err := catalogGrantsAreTrustworthy(ctx, b.client, securableTrust{
 			ownPrincipal:   b.clientID,
 			owner:          catalog.Owner,
@@ -255,16 +260,11 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if !trustworthy {
-			l.Debug("databricks-connector: skipping a catalog whose privilege list is partial",
-				zap.String("catalog", catalog.Name),
-				zap.String("workspace", route.Workspace))
-			continue
+			return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.PermissionDenied,
+				"databricks-connector: cannot read every privilege on catalog %s through workspace %s; %s",
+				catalog.Name, route.Workspace, catalogTrustRemedy)
 		}
 
-		key := catalogResourceID(metastoreID, catalog.Name)
-		if _, ok := b.seen[key]; ok {
-			continue
-		}
 		if b.seen == nil {
 			b.seen = map[string]struct{}{}
 		}
