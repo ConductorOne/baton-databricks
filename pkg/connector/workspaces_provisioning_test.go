@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -416,6 +417,9 @@ func TestWorkspaceGrantsSkipAssignmentsWithoutUsablePrincipal(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	ctx := ctxzap.ToContext(context.Background(), zap.New(core))
 
+	// The package-level warn sampler persists across tests in one binary.
+	resetWorkspaceSkipWarnOccurrencesForTest()
+
 	resource, err := workspaceResource(ctx,
 		&databricks.Workspace{ID: testProvisioningWorkspaceID, Name: "ws", DeploymentName: "ws-deploy"},
 		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
@@ -500,6 +504,7 @@ func TestWorkspaceGrantsSkipAssignmentsWithoutUsablePrincipal(t *testing.T) {
 		t.Errorf("summary level = %v, want Warn", we.Level)
 	}
 	var skippedCount, assignmentsCount int
+	var totalOccurrences uint64
 	var wsID, wsName string
 	for _, f := range we.Context {
 		switch f.Key {
@@ -507,14 +512,60 @@ func TestWorkspaceGrantsSkipAssignmentsWithoutUsablePrincipal(t *testing.T) {
 			skippedCount = int(f.Integer)
 		case "assignments_count":
 			assignmentsCount = int(f.Integer)
+		case "total_occurrences":
+			totalOccurrences = uint64(f.Integer)
 		case "workspace_id":
 			wsID = f.String
 		case "workspace_name":
 			wsName = f.String
 		}
 	}
-	if skippedCount != 3 || assignmentsCount != 5 || wsID != "123" || wsName != "ws" {
-		t.Errorf("Warn summary fields: skipped_count=%d assignments_count=%d workspace_id=%q workspace_name=%q",
-			skippedCount, assignmentsCount, wsID, wsName)
+	if skippedCount != 3 || assignmentsCount != 5 || totalOccurrences != 1 || wsID != "123" || wsName != "ws" {
+		t.Errorf("Warn summary fields: skipped_count=%d assignments_count=%d total_occurrences=%d workspace_id=%q workspace_name=%q",
+			skippedCount, assignmentsCount, totalOccurrences, wsID, wsName)
+	}
+}
+
+// TestWorkspaceGrantsAllAssignmentsUnusable: when EVERY permission assignment
+// in the API response lacks a usable principal, Grants() fails instead of
+// silently emitting zero grants (which C1 would bucket as deletions).
+func TestWorkspaceGrantsAllAssignmentsUnusable(t *testing.T) {
+	m := &workspaceAssignmentsServer{assignments: []map[string]any{
+		{}, // no principal key at all
+		{"principal": map[string]any{}},
+		{"error": "failed to resolve principal 200"}, // principal-less despite the Error field
+	}}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	ctx := ctxzap.ToContext(context.Background(), zap.New(core))
+	resetWorkspaceSkipWarnOccurrencesForTest()
+
+	resource, err := workspaceResource(ctx,
+		&databricks.Workspace{ID: testProvisioningWorkspaceID, Name: "ws", DeploymentName: "ws-deploy"},
+		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+	)
+	if err != nil {
+		t.Fatalf("workspaceResource: %v", err)
+	}
+
+	grants, results, err := w.Grants(ctx, resource, rs.SyncOpAttrs{})
+	if err == nil {
+		t.Fatalf("expected error when all assignments are principal-less, got grants=%d results=%v", len(grants), results)
+	}
+	if !strings.HasPrefix(err.Error(), "databricks-connector: ") {
+		t.Errorf("error = %q, want databricks-connector: prefix", err.Error())
+	}
+	if !strings.Contains(err.Error(), "all 3 permission assignments lack a usable principal") {
+		t.Errorf("error = %q, want all-assignments-unusable message", err.Error())
+	}
+	if len(grants) != 0 {
+		t.Errorf("grants = %d, want 0 (nothing emitted)", len(grants))
+	}
+
+	// The Warn summary still fired for the sampled skip count before the guard.
+	warns := logs.FilterMessage("skipped workspace permission assignments without a usable principal")
+	if warns.Len() != 1 {
+		t.Fatalf("expected exactly 1 Warn summary, got %d", warns.Len())
 	}
 }
