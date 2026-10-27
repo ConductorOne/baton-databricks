@@ -11,10 +11,10 @@ import (
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
-	"google.golang.org/grpc/codes"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -658,6 +658,30 @@ func (c *Client) ListWorkspaces(
 	)
 
 	return filtered, ratelimitData, nil
+}
+
+// GetWorkspace finds a single workspace by deployment name from the account's
+// workspace list (there is no single-workspace GET endpoint).
+func (c *Client) GetWorkspace(
+	ctx context.Context,
+	deploymentName string,
+) (
+	*Workspace,
+	*v2.RateLimitDescription,
+	error,
+) {
+	workspaces, ratelimitData, err := c.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, ratelimitData, err
+	}
+
+	for _, w := range workspaces {
+		if w.DeploymentName == deploymentName {
+			return &w, ratelimitData, nil
+		}
+	}
+
+	return nil, ratelimitData, uhttp.WrapErrors(codes.NotFound, fmt.Sprintf("workspace %s not found", deploymentName))
 }
 
 func (c *Client) ListWorkspaceMembers(
