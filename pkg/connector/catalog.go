@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -32,6 +31,10 @@ const (
 	// privilegeManage is the only privilege that lets its holder read every
 	// privilege assignment on a catalog without owning it.
 	privilegeManage = "MANAGE"
+
+	// errorCodeCatalogGone is what Databricks names in error_code when the
+	// catalog a request addresses does not exist.
+	errorCodeCatalogGone = "CATALOG_DOES_NOT_EXIST"
 
 	// workspaceAdminsGroupPrefix starts the name of the system group Databricks
 	// creates for a workspace, _workspace_admins_<workspace>_<workspace id>.
@@ -103,6 +106,7 @@ var catalogLevel = securableLevel{
 	trustRemedy:     catalogTrustRemedy,
 	permissionsName: catalogPermissionsName,
 	trusts:          catalogGrantsAreTrustworthy,
+	goneErrorCodes:  []string{errorCodeCatalogGone},
 }
 
 type catalogBuilder struct {
@@ -366,40 +370,35 @@ func metastoreOwner(
 	return "", nil
 }
 
-// catalogThrough finds one catalog in the listing of workspace, nil when that
-// workspace does not list it.
+// catalogThrough reads one catalog through workspace, nil when that workspace
+// does not serve it. A single GET replaces draining the listing, which cost one
+// page walk per catalog per workspace, and it separates the two answers the
+// listing ran together: a refusal naming the catalog as nonexistent is an
+// absence, and anything else is this workspace not seeing a catalog that may
+// well exist.
 func catalogThrough(
 	ctx context.Context,
 	client *databricks.Client,
 	workspace, metastoreID, catalogName string,
 	annos *annotations.Annotations,
 ) (*databricks.Catalog, error) {
-	pageToken := ""
-	for {
-		catalogs, next, rateLimit, err := client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
-		noteRateLimit(annos, rateLimit)
-		if err != nil {
-			return nil, catalogListingError(metastoreID, workspace, err)
-		}
-
-		for _, catalog := range catalogs {
-			if catalog.Name == catalogName && (catalog.MetastoreID == "" || catalog.MetastoreID == metastoreID) {
-				return &catalog, nil
-			}
-		}
-
-		if next == "" {
-			return nil, nil
-		}
-		// Databricks ignores a page token it cannot deserialize and restarts at
-		// page one, which would walk the same page forever.
-		if next == pageToken {
-			return nil, status.Errorf(codes.Internal,
-				"databricks-connector: the catalogs of metastore %s repeat page token %q through workspace %s",
-				metastoreID, next, workspace)
-		}
-		pageToken = next
+	catalog, rateLimit, err := client.GetCatalog(ctx, workspace, catalogName)
+	noteRateLimit(annos, rateLimit)
+	switch {
+	case err == nil:
+	case databricks.IsSecurableGone(err, errorCodeCatalogGone), deniesTrust(err):
+		return nil, nil
+	default:
+		return nil, catalogListingError(metastoreID, workspace, err)
 	}
+
+	// A catalog served by this workspace but belonging to another metastore is
+	// not this metastore's catalog.
+	if catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID {
+		return nil, nil
+	}
+
+	return catalog, nil
 }
 
 // catalogListingError reads a workspace that refuses the catalog listing as
@@ -486,11 +485,6 @@ func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	annos := annotations.Annotations{}
 	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
 	if err != nil {
-		if errors.Is(err, errCatalogGone) {
-			return annos, status.Errorf(codes.NotFound,
-				"databricks-connector: catalog %s is no longer listed", entitlement.GetResource().GetId().GetResource())
-		}
-
 		return annos, err
 	}
 
@@ -499,13 +493,12 @@ func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 
 func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
+	// A catalog no workspace lists is not a catalog proven gone, so this does not
+	// answer GrantAlreadyRevoked: the privilege would stay in Databricks while
+	// ConductorOne recorded it as revoked. A failed revoke is retried, and a
+	// catalog that really was deleted leaves C1 through the next sync.
 	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
 	if err != nil {
-		if errors.Is(err, errCatalogGone) {
-			annos.Update(&v2.GrantAlreadyRevoked{})
-			return annos, nil
-		}
-
 		return annos, err
 	}
 

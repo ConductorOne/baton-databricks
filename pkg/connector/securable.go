@@ -48,6 +48,11 @@ type securableLevel struct {
 	// the securable by.
 	permissionsName func(resourceID string) (string, error)
 
+	// goneErrorCodes are the error_code values Databricks returns when the
+	// securable, or a parent of it, no longer exists. They are the only proof
+	// of absence: an unbound or unprivileged workspace answers 404 too.
+	goneErrorCodes []string
+
 	// trusts reports whether the connector reads every privilege assignment on
 	// the securable. What proves that differs per level, so the rule travels
 	// with the level rather than being decided by the shared path.
@@ -145,15 +150,17 @@ func syncSecurableGrants(
 	}
 
 	annos := annotations.Annotations{}
+	pageToken := attr.PageToken.Token
 	// A metastore's route was already chosen as a workspace the connector can fully
-	// read. Other levels still have to prove it here.
-	if level.securableType != databricks.SecurableMetastore {
+	// read. Other levels still have to prove it here, once per securable: the proof
+	// is an uncached read, and a transient refusal on a later page would otherwise
+	// reverse a verdict the earlier pages were already emitted under.
+	if level.securableType != databricks.SecurableMetastore && pageToken == "" {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 	}
 
-	pageToken := attr.PageToken.Token
 	assignments, nextPageToken, rateLimit, err := client.ListPermissions(ctx, workspace, level.securableType, fullName, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
@@ -184,9 +191,17 @@ func syncSecurableGrants(
 
 		options := groupSecurableGrantOptions(principalId)
 		for _, privilege := range assignment.Privileges {
-			if slices.Contains(level.privileges, privilege) {
-				rv = append(rv, grant.NewGrant(resource, privilege, principalId, options...))
+			if !slices.Contains(level.privileges, privilege) {
+				// A privilege Databricks added after this connector shipped is not
+				// an entitlement, so it cannot be emitted. Say so rather than
+				// dropping it without a trace.
+				l.Debug("databricks-connector: the securable reports a privilege this connector does not model",
+					zap.String("securable", resourceID),
+					zap.String("privilege", privilege))
+
+				continue
 			}
+			rv = append(rv, grant.NewGrant(resource, privilege, principalId, options...))
 		}
 	}
 
@@ -387,6 +402,15 @@ func revokeSecurable(
 		})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		// Databricks names the missing securable in error_code. That is the only
+		// answer that proves it is gone, so there is nothing left to revoke: a
+		// bare 404 also comes back from a workspace the securable is not bound to.
+		if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
+
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w", level.noun, change.fullName, err)
 	}
 
