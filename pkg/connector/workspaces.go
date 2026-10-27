@@ -24,14 +24,15 @@ import (
 
 const workspaceMemberEntitlement = "member"
 
-// workspaceSkipWarnOccurrences counts every per-workspace "skipped workspace
-// permission assignments without a usable principal" Warn emitted by this
-// process. ci-review §L7 mandates logarithmic sampling for recurring
-// per-resource warns so repeated syncs do not flood logs: the summary emits at
-// occurrence 1, 10, 100, then every 1000. This is logging bookkeeping only —
-// not connector sync state — and it is process-local: in Lambda mode the
-// counter restarts per invocation, so the warn fires at most once per process,
-// which is bounded and intentional. Tests reset it via
+// workspaceSkipWarnOccurrences counts workspace permission assignments
+// skipped for lack of a usable principal, process-wide, for the L7 sampling
+// of the per-workspace "skipped workspace permission assignments without a
+// usable principal" Warn: the summary emits at skip-occurrence 1, 10, 100,
+// then every 1000, so warn volume is logarithmic in the number of skips,
+// not one-per-affected-workspace. The counter is process-local logging
+// bookkeeping, not connector sync state; a warm Lambda execution environment
+// keeps the process (and this counter) alive across invocations, while a
+// fresh process starts it at zero. Tests reset it via
 // resetWorkspaceSkipWarnOccurrencesForTest.
 var workspaceSkipWarnOccurrences atomic.Uint64
 
