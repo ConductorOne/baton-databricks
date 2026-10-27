@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -145,16 +147,17 @@ func syncSecurableGrants(
 	profile := rs.GetProfile(resource)
 	workspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
 	if workspace == "" {
-		l.Debug("databricks-connector: securable has no workspace on its profile; returning no grants",
-			zap.String("securable_type", level.securableType),
-			zap.String("securable", resourceID))
-
-		return nil, nil, nil
+		return nil, nil, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: %s %s has no workspace on its profile", level.noun, fullName)
 	}
 
 	annos := annotations.Annotations{}
-	if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	// A metastore's route was already chosen as a workspace the connector can fully
+	// read. Other levels still have to prove it here.
+	if level.securableType != databricks.SecurableMetastore {
+		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
 	}
 
 	pageToken := attr.PageToken.Token
@@ -282,11 +285,13 @@ func resolveChange(
 
 	principalName, err := unityPrincipalName(ctx, client, principalID)
 	if err != nil {
-		return change{}, fmt.Errorf("databricks-connector: failed to resolve principal %s: %w", principalID.GetResource(), err)
-	}
-	// Revoke can still remove a deleted principal's row by its id.
-	if isGrant && principalName == "" {
-		return change{}, status.Errorf(codes.NotFound, "databricks-connector: principal %s no longer exists in Databricks", scimID)
+		if !errors.Is(err, errPrincipalNotFound) {
+			return change{}, fmt.Errorf("databricks-connector: failed to resolve principal %s: %w", principalID.GetResource(), err)
+		}
+		// Revoke addresses a vanished principal's rows by id.
+		if isGrant {
+			return change{}, status.Errorf(codes.NotFound, "databricks-connector: principal %s no longer exists in Databricks", scimID)
+		}
 	}
 
 	return change{
@@ -392,15 +397,14 @@ func revokeSecurable(
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w", level.noun, change.fullName, err)
 	}
 
+	// A missed row can be a partial read, and removing a privilege nobody holds is a no-op.
 	held, ok := change.matchHeld(seen)
-	if !ok {
-		annos.Update(&v2.GrantAlreadyRevoked{})
-		return annos, nil
-	}
-
 	removal := databricks.PermissionsChange{Principal: change.principalName, Remove: []string{change.privilege}}
-	if heldID := held.PrincipalID.String(); heldID != "" && heldID != "0" {
+	switch heldID := held.PrincipalID.String(); {
+	case ok && heldID != "" && heldID != "0":
 		removal = databricks.PermissionsChange{PrincipalID: held.PrincipalID, Remove: []string{change.privilege}}
+	case change.principalName == "":
+		removal = databricks.PermissionsChange{PrincipalID: json.Number(change.scimID), Remove: []string{change.privilege}}
 	}
 
 	result, rateLimit, err := client.UpdatePermissions(ctx, change.workspace, level.securableType, change.fullName,
@@ -412,6 +416,9 @@ func revokeSecurable(
 	if _, stillHeld := change.matchHeld(result); stillHeld {
 		return annos, status.Errorf(codes.Internal,
 			"databricks-connector: revoking %s on %s %s was accepted but not applied", change.privilege, level.noun, change.fullName)
+	}
+	if !ok {
+		annos.Update(&v2.GrantAlreadyRevoked{})
 	}
 
 	return annos, nil

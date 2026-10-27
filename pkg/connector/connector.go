@@ -17,7 +17,7 @@ import (
 )
 
 type Databricks struct {
-	client *databricks.Client
+	client     *databricks.Client
 	clientID   string
 	workspaces []string
 	opts       *cli.ConnectorOpts

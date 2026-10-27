@@ -2,7 +2,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -16,6 +18,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*metastoreBuilder)(nil)
@@ -134,7 +137,10 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			continue
 		}
 
-		workspace := usable[0]
+		workspace, err := pickReadableWorkspace(ctx, m.client, m.clientID, metastore.Owner, metastore.MetastoreID, usable, &annos)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
 		mr, err := metastoreResource(ctx, &metastore, parentResourceID, workspace.DeploymentName, strconv.Itoa(workspace.ID), workspace.Name)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
@@ -171,9 +177,88 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 }
 
 func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return grantSecurable(ctx, m.client, m.clientID, metastoreLevel, principal, entitlement)
+	annos := annotations.Annotations{}
+	routed, err := m.entitlementOnLiveRoute(ctx, entitlement, &annos)
+	if err != nil {
+		if errors.Is(err, errMetastoreGone) {
+			return annos, status.Errorf(codes.NotFound,
+				"databricks-connector: metastore %s is no longer on the account", entitlement.GetResource().GetId().GetResource())
+		}
+
+		return annos, err
+	}
+
+	return grantSecurable(ctx, m.client, m.clientID, metastoreLevel, principal, routed)
 }
 
 func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return revokeSecurable(ctx, m.client, m.clientID, metastoreLevel, revoked)
+	annos := annotations.Annotations{}
+	routed, err := m.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
+	if err != nil {
+		if errors.Is(err, errMetastoreGone) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+			return annos, nil
+		}
+
+		return annos, err
+	}
+
+	grantCopy := proto.Clone(revoked).(*v2.Grant)
+	grantCopy.Entitlement = routed
+
+	return revokeSecurable(ctx, m.client, m.clientID, metastoreLevel, grantCopy)
+}
+
+// entitlementOnLiveRoute copies the entitlement with the workspace resolved from
+// the metastore id. A provisioning call carries ids, not the profile List wrote.
+func (m *metastoreBuilder) entitlementOnLiveRoute(
+	ctx context.Context,
+	entitlement *v2.Entitlement,
+	annos *annotations.Annotations,
+) (*v2.Entitlement, error) {
+	resource := entitlement.GetResource()
+	metastoreID := resource.GetId().GetResource()
+	metastores, rateLimit, err := m.client.ListMetastores(ctx)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
+	}
+
+	found := slices.IndexFunc(metastores, func(metastore databricks.Metastore) bool {
+		return metastore.MetastoreID == metastoreID
+	})
+	if found < 0 {
+		return nil, errMetastoreGone
+	}
+
+	scope, err := scopedWorkspaces(ctx, m.client, m.workspaces, annos)
+	if err != nil {
+		return nil, err
+	}
+	usable, _, err := scope.attached(ctx, m.client, metastoreID, annos)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
+			metastoreID, err)
+	}
+	if len(usable) == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+	}
+
+	workspace, err := pickReadableWorkspace(ctx, m.client, m.clientID, metastores[found].Owner, metastoreID, usable, annos)
+	if err != nil {
+		return nil, err
+	}
+
+	routed, err := metastoreResource(ctx, &metastores[found], resource.GetParentResourceId(),
+		workspace.DeploymentName, strconv.Itoa(workspace.ID), workspace.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	copyEntitlement := proto.Clone(entitlement).(*v2.Entitlement)
+	copyEntitlement.Resource = routed
+
+	return copyEntitlement, nil
 }

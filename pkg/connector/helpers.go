@@ -12,6 +12,8 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -156,12 +158,27 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 		if err != nil {
 			return "", fmt.Errorf("failed to find user %s/%s: %w", workspaceId, principalId, err)
 		}
+		if username == "" {
+			return "", principalNotFoundError("user", workspaceId, principalId)
+		}
 
 		result = fmt.Sprintf("%s/%s", UsersType, username)
 	case groupResourceType.Id:
+		// group resource ids are compound ("[<parent type>/<parent id>/]group/<id>"), the API needs the native id
+		if strings.Contains(principalId, "/") {
+			_, groupId, err := parseResourceId(principalId)
+			if err != nil {
+				return "", fmt.Errorf("failed to parse group principal id: %w", err)
+			}
+			principalId = groupId.Resource
+		}
+
 		displayName, _, err := c.FindGroupDisplayName(ctx, workspaceId, principalId)
 		if err != nil {
 			return "", fmt.Errorf("failed to find group %s/%s: %w", workspaceId, principalId, err)
+		}
+		if displayName == "" {
+			return "", principalNotFoundError("group", workspaceId, principalId)
 		}
 
 		result = fmt.Sprintf("%s/%s", GroupsType, displayName)
@@ -170,6 +187,9 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 		if err != nil {
 			return "", fmt.Errorf("failed to find service principal %s/%s: %w", workspaceId, principalId, err)
 		}
+		if appID == "" {
+			return "", principalNotFoundError("service principal", workspaceId, principalId)
+		}
 
 		result = fmt.Sprintf("%s/%s", ServicePrincipalsType, appID)
 	default:
@@ -177,6 +197,33 @@ func preparePrincipalId(ctx context.Context, c *databricks.Client, workspaceId, 
 	}
 
 	return result, nil
+}
+
+// errPrincipalNotFound marks a principal lookup that matched nothing, as opposed to a lookup
+// that failed. Revoke callers use it to treat a vanished principal as already revoked.
+var errPrincipalNotFound = errors.New("principal not found")
+
+// principalNotFoundWrapper is a NotFound status error that also matches errPrincipalNotFound,
+// keeping the status error's message untouched.
+type principalNotFoundWrapper struct {
+	statusErr error
+}
+
+func (e *principalNotFoundWrapper) Error() string { return e.statusErr.Error() }
+
+func (e *principalNotFoundWrapper) Unwrap() []error {
+	return []error{e.statusErr, errPrincipalNotFound}
+}
+
+// principalNotFoundError reports a principal lookup that matched nothing, so callers never
+// write an empty "users/", "groups/" or "servicePrincipals/" principal into a rule set.
+func principalNotFoundError(principalLabel, workspaceId, principalId string) error {
+	return &principalNotFoundWrapper{
+		statusErr: uhttp.WrapErrors(
+			codes.NotFound,
+			fmt.Sprintf("databricks-connector: %s %s/%s not found", principalLabel, workspaceId, principalId),
+		),
+	}
 }
 
 func isValidPrincipal(principal *v2.ResourceId) bool {
@@ -227,6 +274,32 @@ func removePermissions(isWorkspaceRole bool, perms *databricks.Permissions, enti
 			}
 		}
 	}
+}
+
+// addValueOp and removeValueOp build SCIM PATCH operations that touch a single value of a
+// multi-valued group attribute (members, roles, entitlements) and leave the rest of the group as is.
+func addValueOp(attribute, value string) databricks.PatchOperation {
+	return databricks.PatchOperation{
+		Op:    "add",
+		Path:  attribute,
+		Value: []databricks.PermissionValue{{Value: value}},
+	}
+}
+
+func removeValueOp(attribute, value string) databricks.PatchOperation {
+	return databricks.PatchOperation{
+		Op:   "remove",
+		Path: fmt.Sprintf("%s[value eq %q]", attribute, value),
+	}
+}
+
+// groupPermissionAttribute is the group attribute a role lives in: workspace roles are
+// entitlements, account roles are roles.
+func groupPermissionAttribute(isWorkspaceRole bool) string {
+	if isWorkspaceRole {
+		return "entitlements"
+	}
+	return "roles"
 }
 
 func isNotFoundError(err error) bool {

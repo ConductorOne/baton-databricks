@@ -138,7 +138,10 @@ assigned to that workspace. Otherwise the grant fails with a
 
 Revoking workspace membership deletes the principal's whole workspace
 assignment, so a principal that is also a workspace admin loses admin access
-to that workspace too.
+to that workspace too. This also applies to groups: revoking workspace
+membership from a group removes the group's entire workspace assignment,
+including admin access if the group is a workspace admin, so its members lose
+it.
 
 ## Unity Catalog
 
@@ -168,7 +171,10 @@ members as holders.
 metastore level.
 
 A metastore lives on the account plane, but its privileges are read through a
-workspace attached to it.
+workspace attached to it. The connector picks that workspace itself: the first
+running one in scope where it can read every privilege, which it proves by
+owning the metastore or by holding Admin directly on that workspace. Grant and
+Revoke resolve the same route from the metastore id.
 
 A metastore is synced only while a workspace this sync can use is attached to
 it. The connector never guesses when the answer is unknown:
@@ -176,7 +182,7 @@ it. The connector never guesses when the answer is unknown:
 | Attached workspace | Result |
 |--------------------|--------|
 | `RUNNING` and in scope | the metastore syncs through it |
-| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and its grants fail with `FailedPrecondition` until the state settles |
+| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and the sync fails with `FailedPrecondition` until a workspace is `RUNNING` |
 | `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
 | assignment list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming the assignment list |
 
@@ -194,12 +200,13 @@ read-only: granting or revoking it fails with an `InvalidArgument` error.
 ## Unity Catalog permissions
 
 The service principal must own the metastore, or be assigned **Admin** directly
-on the workspace the metastore is read through. Admin inherited only through a
-group is not enough. Listing every schema, table, or volume also takes ownership
-of the catalog, or `MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that catalog.
-Databricks answers an under-permissioned read with HTTP 200 and only the rows
-the caller may see. The connector refuses that read, so the sync fails and
-ConductorOne keeps the grants it already has.
+on at least one running workspace attached to it. Admin inherited only through a
+group is not enough. The connector reads a metastore only through a workspace
+that passes that check. Listing every schema, table, or volume also takes
+ownership of the catalog, or `MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that
+catalog. Databricks answers an under-permissioned read with HTTP 200 and only
+the rows the caller may see. The connector refuses that read, so the sync fails
+and ConductorOne keeps the grants it already has.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
