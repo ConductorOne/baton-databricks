@@ -326,9 +326,11 @@ func TestCatalogListReadsEveryWorkspace(t *testing.T) {
 	}
 }
 
-// A catalog the caller cannot fully read is left out. Failing the sync here
-// would take users, groups and every other catalog down with it.
-func TestCatalogListSkipsACatalogItCannotFullyRead(t *testing.T) {
+// A catalog whose privilege list is partial fails the sync instead of being left
+// out. Leaving it out is not the quiet half: ConductorOne deletes every resource
+// a sync stops emitting, so the catalog, its grants and its whole subtree would
+// go, where failing keeps the state C1 already holds.
+func TestCatalogListFailsOnACatalogItCannotFullyRead(t *testing.T) {
 	f := &fakeCatalogAccount{
 		attached: []int{1},
 		listed:   map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
@@ -340,11 +342,14 @@ func TestCatalogListSkipsACatalogItCannotFullyRead(t *testing.T) {
 	b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
 
 	resources, err := listAllCatalogs(t, b)
-	if err != nil {
-		t.Fatalf("List: %v", err)
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("List = %v, want PermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), "main") || !strings.Contains(err.Error(), catalogTrustRemedy) {
+		t.Errorf("error %q does not name the catalog and the remedy", err)
 	}
 	if len(resources) != 0 {
-		t.Fatalf("listed %d catalogs, want none", len(resources))
+		t.Errorf("listed %d catalogs, want none", len(resources))
 	}
 }
 
