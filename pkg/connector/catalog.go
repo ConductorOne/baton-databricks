@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*catalogBuilder)(nil)
@@ -109,6 +111,8 @@ type catalogBuilder struct {
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 	sync       syncPrincipals
+	// seen drops a catalog an earlier workspace in this sync already emitted.
+	seen map[string]struct{}
 }
 
 func newCatalogBuilder(client *databricks.Client, clientID string, workspaces map[string]struct{}, sync syncPrincipals) *catalogBuilder {
@@ -256,6 +260,15 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			continue
 		}
 
+		key := catalogResourceID(metastoreID, catalog.Name)
+		if _, ok := b.seen[key]; ok {
+			continue
+		}
+		if b.seen == nil {
+			b.seen = map[string]struct{}{}
+		}
+		b.seen[key] = struct{}{}
+
 		built, err := catalogResource(&catalog, metastoreID, parentResourceID, route)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
@@ -277,22 +290,19 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// pushRoute records the one workspace the catalogs are read through: the first
-// running workspace attached to the metastore. A catalog bound only to some
-// other workspace is outside that path. An empty stack means no workspace this
-// sync can use serves the metastore, which metastore List already settled.
+// pushRoute records every running in-scope workspace the catalogs are read
+// through. A catalog bound to only one of them is absent from the others, so
+// listing a single workspace would make ConductorOne delete it. An empty stack
+// means no workspace this sync can use serves the metastore.
 func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag *pagination.Bag, annos *annotations.Annotations) error {
 	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
 	if err != nil {
 		return err
 	}
 
-	// A 404 here does not mean the metastore is gone. Listing nothing would make ConductorOne delete its catalogs.
 	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
-		return fmt.Errorf(
-			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
-			metastoreID, err)
+		return assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
 		if inScope {
@@ -308,20 +318,22 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 		return err
 	}
 
-	workspace, err := pickReadableWorkspace(ctx, b.client, b.clientID, owner, metastoreID, usable, annos)
-	if err != nil {
-		return err
+	// The bag pops the last state first, so push the later workspaces first.
+	// A catalog listed by more than one workspace is then kept from the
+	// earliest one in assignment order.
+	for i := len(usable) - 1; i >= 0; i-- {
+		workspace := usable[i]
+		encoded, err := json.Marshal(catalogRoute{
+			Workspace:      workspace.DeploymentName,
+			WorkspaceID:    strconv.Itoa(workspace.ID),
+			WorkspaceName:  workspace.Name,
+			MetastoreOwner: owner,
+		})
+		if err != nil {
+			return err
+		}
+		bag.Push(pagination.PageState{ResourceTypeID: catalogResourceType.Id, ResourceID: string(encoded)})
 	}
-	encoded, err := json.Marshal(catalogRoute{
-		Workspace:      workspace.DeploymentName,
-		WorkspaceID:    strconv.Itoa(workspace.ID),
-		WorkspaceName:  workspace.Name,
-		MetastoreOwner: owner,
-	})
-	if err != nil {
-		return err
-	}
-	bag.Push(pagination.PageState{ResourceTypeID: catalogResourceType.Id, ResourceID: string(encoded)})
 
 	return nil
 }
@@ -352,6 +364,42 @@ func metastoreOwner(
 		zap.String("metastore", metastoreID))
 
 	return "", nil
+}
+
+// catalogThrough finds one catalog in the listing of workspace, nil when that
+// workspace does not list it.
+func catalogThrough(
+	ctx context.Context,
+	client *databricks.Client,
+	workspace, metastoreID, catalogName string,
+	annos *annotations.Annotations,
+) (*databricks.Catalog, error) {
+	pageToken := ""
+	for {
+		catalogs, next, rateLimit, err := client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
+		noteRateLimit(annos, rateLimit)
+		if err != nil {
+			return nil, catalogListingError(metastoreID, workspace, err)
+		}
+
+		for _, catalog := range catalogs {
+			if catalog.Name == catalogName && (catalog.MetastoreID == "" || catalog.MetastoreID == metastoreID) {
+				return &catalog, nil
+			}
+		}
+
+		if next == "" {
+			return nil, nil
+		}
+		// Databricks ignores a page token it cannot deserialize and restarts at
+		// page one, which would walk the same page forever.
+		if next == pageToken {
+			return nil, status.Errorf(codes.Internal,
+				"databricks-connector: the catalogs of metastore %s repeat page token %q through workspace %s",
+				metastoreID, next, workspace)
+		}
+		pageToken = next
+	}
 }
 
 // catalogListingError reads a workspace that refuses the catalog listing as
@@ -435,9 +483,86 @@ func (b *catalogBuilder) Grants(ctx context.Context, resource *v2.Resource, attr
 }
 
 func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return grantSecurable(ctx, b.client, b.clientID, catalogLevel, principal, entitlement)
+	annos := annotations.Annotations{}
+	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
+	if err != nil {
+		if errors.Is(err, errCatalogGone) {
+			return annos, status.Errorf(codes.NotFound,
+				"databricks-connector: catalog %s is no longer listed", entitlement.GetResource().GetId().GetResource())
+		}
+
+		return annos, err
+	}
+
+	return grantSecurable(ctx, b.client, b.clientID, catalogLevel, principal, routed)
 }
 
 func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return revokeSecurable(ctx, b.client, b.clientID, catalogLevel, revoked)
+	annos := annotations.Annotations{}
+	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
+	if err != nil {
+		if errors.Is(err, errCatalogGone) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+			return annos, nil
+		}
+
+		return annos, err
+	}
+
+	grantCopy := proto.Clone(revoked).(*v2.Grant)
+	grantCopy.Entitlement = routed
+
+	return revokeSecurable(ctx, b.client, b.clientID, catalogLevel, grantCopy)
+}
+
+// entitlementOnLiveRoute copies the entitlement with the workspace resolved from
+// the catalog id. A provisioning call carries ids, not the profile List wrote,
+// and that profile can name a workspace that no longer lists the catalog.
+func (b *catalogBuilder) entitlementOnLiveRoute(
+	ctx context.Context,
+	entitlement *v2.Entitlement,
+	annos *annotations.Annotations,
+) (*v2.Entitlement, error) {
+	resource := entitlement.GetResource()
+	metastoreID, catalogName, err := parseCatalogID(resource.GetId().GetResource())
+	if err != nil {
+		return nil, err
+	}
+
+	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
+	if err != nil {
+		return nil, err
+	}
+	usable, _, err := scope.attached(ctx, b.client, metastoreID, annos)
+	if err != nil {
+		return nil, assignmentListError(metastoreID, err)
+	}
+	if len(usable) == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+	}
+
+	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, annos)
+	if err != nil {
+		return nil, err
+	}
+
+	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
+	if err != nil {
+		return nil, err
+	}
+	routed, err := catalogResource(catalog, metastoreID, resource.GetParentResourceId(), catalogRoute{
+		Workspace:      workspace.DeploymentName,
+		WorkspaceID:    strconv.Itoa(workspace.ID),
+		WorkspaceName:  workspace.Name,
+		MetastoreOwner: owner,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	copyEntitlement := proto.Clone(entitlement).(*v2.Entitlement)
+	copyEntitlement.Resource = routed
+
+	return copyEntitlement, nil
 }

@@ -23,6 +23,13 @@ import (
 
 const workspaceMemberEntitlement = "member"
 
+func principalID(a databricks.WorkspaceAssignment) int {
+	if a.Principal == nil {
+		return 0
+	}
+	return a.Principal.ID
+}
+
 type workspaceBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
@@ -166,7 +173,7 @@ func (w *workspaceBuilder) Entitlements(_ context.Context, resource *v2.Resource
 
 // Grants returns slice of grants representing workspace members.
 // To get workspace members, we can only use the account API.
-func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	l := ctxzap.Extract(ctx)
 
 	if !w.client.IsAccountAPIAvailable() {
@@ -178,6 +185,11 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	workspaceId, ok := rs.GetProfileInt64Value(profile, "workspace_id")
 	if !ok {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to get workspace ID")
+	}
+
+	bag, cursor, err := parseCursorToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: workspaceResourceType.Id})
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to parse page token: %w", err)
 	}
 
 	workspace := strconv.Itoa(int(workspaceId))
@@ -212,9 +224,20 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: failed to list workspace members: %w", err)
 	}
 
+	// The API returns every assignment at once, so they are paged locally to keep each
+	// response under the Lambda payload limit.
+	assignmentsPage, nextCursor := pageAfter(assignments, func(a databricks.WorkspaceAssignment) string {
+		return strconv.Itoa(principalID(a))
+	}, cursor)
+
 	var rv []*v2.Grant
-	l.Debug("grants: workspace resource", zap.String("workspace_id", workspace), zap.Int("assignments_count", len(assignments)))
-	for _, assignment := range assignments {
+	l.Debug("grants: workspace resource",
+		zap.String("workspace_id", workspace),
+		zap.Int("assignments_count", len(assignments)),
+		zap.Int("page_assignments_count", len(assignmentsPage)),
+		zap.String("cursor", cursor),
+	)
+	for _, assignment := range assignmentsPage {
 		resourceType, err := prepareResourceType(assignment.Principal)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource type: %w", err)
@@ -238,7 +261,12 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
 	}
 
-	return rv, nil, nil
+	nextPage, err := bag.NextToken(nextCursor)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
+	}
+
+	return rv, &rs.SyncOpResults{NextPageToken: nextPage, Annotations: annos}, nil
 }
 
 // workspacePrincipalID returns the numeric principal ID the permission assignments API expects.
