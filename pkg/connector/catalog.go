@@ -228,9 +228,31 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 		return nil, &rs.SyncOpResults{Annotations: annos}, catalogListingError(metastoreID, route.Workspace, err)
 	}
 
+	l := ctxzap.Extract(ctx)
 	var rv []*v2.Resource
 	for _, catalog := range catalogs {
 		if catalog.Name == "" || (catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID) {
+			continue
+		}
+
+		// A partial privilege list is indistinguishable from an empty one. Leaving
+		// the catalog out keeps the rest of the sync running; reporting it would
+		// make ConductorOne delete the grants the caller cannot see.
+		trustworthy, err := catalogGrantsAreTrustworthy(ctx, b.client, securableTrust{
+			ownPrincipal:   b.clientID,
+			owner:          catalog.Owner,
+			metastoreOwner: route.MetastoreOwner,
+			fullName:       catalog.Name,
+			workspace:      route.Workspace,
+			workspaceID:    route.WorkspaceID,
+		}, &annos)
+		if err != nil {
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
+		}
+		if !trustworthy {
+			l.Debug("databricks-connector: skipping a catalog whose privilege list is partial",
+				zap.String("catalog", catalog.Name),
+				zap.String("workspace", route.Workspace))
 			continue
 		}
 
