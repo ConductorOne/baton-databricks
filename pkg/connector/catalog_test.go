@@ -41,9 +41,11 @@ type fakeCatalogAccount struct {
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
 	permStatus       int
-	patchStatus      int
-	users            map[string]string
-	groups           map[string]string
+	// permErrorCode is the vendor error_code that rides along with permStatus.
+	permErrorCode string
+	patchStatus   int
+	users         map[string]string
+	groups        map[string]string
 
 	routed        int
 	catalogPages  int
@@ -121,7 +123,7 @@ func (f *fakeCatalogAccount) serveCatalogs(w http.ResponseWriter, r *http.Reques
 func (f *fakeCatalogAccount) servePermissions(w http.ResponseWriter, r *http.Request, catalog string) {
 	f.permHosts = append(f.permHosts, r.Header.Get("X-Test-Workspace"))
 	if f.permStatus != 0 {
-		http.Error(w, `{"message":"nope"}`, f.permStatus)
+		http.Error(w, fmt.Sprintf(`{"error_code":%q,"message":"nope"}`, f.permErrorCode), f.permStatus)
 		return
 	}
 	if principal := r.URL.Query().Get("principal"); principal != "" {
@@ -512,6 +514,48 @@ func TestCatalogRevokeRemovesByIDAndIsIdempotent(t *testing.T) {
 	annos, err = b.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+}
+
+// Only the error_code proves the catalog is gone. A bare 404 on the privilege
+// read also comes back from a workspace the catalog is not bound to, where the
+// privilege is still held, so that one stays an error.
+func TestCatalogRevokeTellsADeletedCatalogFromAnUnreachableOne(t *testing.T) {
+	tests := []struct {
+		name      string
+		errorCode string
+		wantGone  bool
+	}{
+		{name: "deleted catalog", errorCode: errorCodeCatalogGone, wantGone: true},
+		{name: "unbound workspace", errorCode: ""},
+		{name: "some other 404", errorCode: "RESOURCE_DOES_NOT_EXIST"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := catalogProvisioningAccount()
+			f.permStatus = http.StatusNotFound
+			f.permErrorCode = test.errorCode
+			b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+			g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
+
+			annos, err := b.Revoke(context.Background(), g)
+			switch {
+			case test.wantGone:
+				if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+				}
+			default:
+				if err == nil {
+					t.Fatalf("Revoke returned %v and no error; want the revoke to fail", annos)
+				}
+				if annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Error("a 404 without the gone code reported GrantAlreadyRevoked")
+				}
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
@@ -70,6 +71,25 @@ func (e *APIError) Error() string {
 
 func (e *APIError) Unwrap() error {
 	return e.Err
+}
+
+// HasErrorCode reports a 404 whose body named one of the given error codes.
+func (e *APIError) HasErrorCode(errorCodes ...string) bool {
+	if e == nil || e.StatusCode != http.StatusNotFound || e.ErrorCode == "" {
+		return false
+	}
+
+	return slices.Contains(errorCodes, e.ErrorCode)
+}
+
+// IsSecurableGone reports a 404 for a named securable that no longer exists.
+// A 404 with any other error_code, or with none, is a routing or permission
+// miss: Databricks answers an unbound workspace with an error too, so only the
+// code proves the securable is gone.
+func IsSecurableGone(err error, errorCodes ...string) bool {
+	var apiErr *APIError
+
+	return errors.As(err, &apiErr) && apiErr.HasErrorCode(errorCodes...)
 }
 
 // nameWorkspace403Remedy enriches a 403 from a workspace-scoped call with the

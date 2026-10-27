@@ -48,6 +48,11 @@ type securableLevel struct {
 	// the securable by.
 	permissionsName func(resourceID string) (string, error)
 
+	// goneErrorCodes are the error_code values Databricks returns when the
+	// securable, or a parent of it, no longer exists. They are the only proof
+	// of absence: an unbound or unprivileged workspace answers 404 too.
+	goneErrorCodes []string
+
 	// trusts reports whether the connector reads every privilege assignment on
 	// the securable. What proves that differs per level, so the rule travels
 	// with the level rather than being decided by the shared path.
@@ -389,6 +394,15 @@ func revokeSecurable(
 		})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		// Databricks names the missing securable in error_code. That is the only
+		// answer that proves it is gone, so there is nothing left to revoke: a
+		// bare 404 also comes back from a workspace the securable is not bound to.
+		if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
+
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on %s %s: %w", level.noun, change.fullName, err)
 	}
 

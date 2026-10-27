@@ -33,6 +33,10 @@ const (
 	// privilege assignment on a catalog without owning it.
 	privilegeManage = "MANAGE"
 
+	// errorCodeCatalogGone is what Databricks names in error_code when the
+	// catalog a request addresses does not exist.
+	errorCodeCatalogGone = "CATALOG_DOES_NOT_EXIST"
+
 	// workspaceAdminsGroupPrefix starts the name of the system group Databricks
 	// creates for a workspace, _workspace_admins_<workspace>_<workspace id>.
 	workspaceAdminsGroupPrefix = "_workspace_admins_"
@@ -103,6 +107,7 @@ var catalogLevel = securableLevel{
 	trustRemedy:     catalogTrustRemedy,
 	permissionsName: catalogPermissionsName,
 	trusts:          catalogGrantsAreTrustworthy,
+	goneErrorCodes:  []string{errorCodeCatalogGone},
 }
 
 type catalogBuilder struct {
