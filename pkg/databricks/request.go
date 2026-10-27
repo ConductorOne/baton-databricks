@@ -95,6 +95,19 @@ func invalidArgument(format string, args ...any) error {
 	return uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf(format, args...))
 }
 
+type noCacheKey struct{}
+
+// WithoutCache marks ctx so GETs made with it bypass the uhttp response cache, for
+// callers that need fresh data (statement polling, incremental-sync refreshes).
+func WithoutCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noCacheKey{}, true)
+}
+
+func isNoCache(ctx context.Context) bool {
+	v, _ := ctx.Value(noCacheKey{}).(bool)
+	return v
+}
+
 func (c *Client) Get(
 	ctx context.Context,
 	urlAddress *url.URL,
@@ -246,6 +259,9 @@ func (c *Client) prepareRequest(
 	}
 	if body != nil {
 		options = append(options, uhttp.WithJSONBody(body))
+	}
+	if method == http.MethodGet && isNoCache(ctx) {
+		options = append(options, uhttp.WithNoCache())
 	}
 	options = append(options, requestOptions...)
 

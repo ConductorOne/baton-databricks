@@ -21,6 +21,7 @@
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
       "permissions": {
@@ -60,6 +61,7 @@
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
       "permissions": {
@@ -166,6 +168,7 @@
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
       "permissions": {
@@ -205,6 +208,7 @@
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
       "permissions": {
@@ -247,6 +251,7 @@
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_ACCOUNT_PROVISIONING",
         "CAPABILITY_RESOURCE_DELETE"
       ],
@@ -287,6 +292,7 @@
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
       "permissions": {
@@ -308,7 +314,10 @@
     "CAPABILITY_PROVISION",
     "CAPABILITY_SYNC",
     "CAPABILITY_ACCOUNT_PROVISIONING",
-    "CAPABILITY_RESOURCE_DELETE"
+    "CAPABILITY_RESOURCE_DELETE",
+    "CAPABILITY_TARGETED_SYNC",
+    "CAPABILITY_EVENT_FEED_V2",
+    "CAPABILITY_SERVICE_MODE_TARGETED_SYNC"
   ],
   "credentialDetails": {
     "capabilityAccountProvisioning": {
