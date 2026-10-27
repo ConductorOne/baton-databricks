@@ -248,6 +248,9 @@ func workspaceIsUsable(workspaceStatus string) bool {
 	}
 }
 
+// errMetastoreGone marks a metastore the account no longer lists.
+var errMetastoreGone = errors.New("metastore is no longer on the account")
+
 // attached lists the running in-scope workspaces the metastore is assigned to,
 // in assignment order. inScope reports whether any in-scope workspace is
 // attached at all, running or not: that is what tells "outside this sync" apart
@@ -278,6 +281,43 @@ func (s workspaceScope) attached(
 	}
 
 	return usable, inScope, nil
+}
+
+// pickReadableWorkspace is the first running workspace the connector can read
+// every privilege through. An owner sees them all; otherwise it is the first
+// workspace where the connector is a direct Admin.
+func pickReadableWorkspace(
+	ctx context.Context,
+	client *databricks.Client,
+	ownPrincipal, owner, metastoreID string,
+	usable []databricks.Workspace,
+	annos *annotations.Annotations,
+) (*databricks.Workspace, error) {
+	if ownsPrincipal(ownPrincipal, owner) {
+		return &usable[0], nil
+	}
+
+	for i := range usable {
+		admin, err := isWorkspaceAdmin(ctx, client, ownPrincipal, strconv.Itoa(usable[i].ID), annos)
+		if err != nil {
+			return nil, err
+		}
+		if admin {
+			return &usable[i], nil
+		}
+	}
+
+	names := make([]string, 0, len(usable))
+	for _, workspace := range usable {
+		names = append(names, workspace.DeploymentName)
+	}
+
+	return nil, status.Errorf(codes.PermissionDenied,
+		"databricks-connector: cannot read every privilege on metastore %s through any workspace attached to it (%s), "+
+			"and Databricks answers a partial read with 200, "+
+			"so reporting it would revoke the access ConductorOne cannot see; "+
+			"the connector's service principal must own the metastore or be assigned Admin directly on one of those workspaces",
+		metastoreID, strings.Join(names, ", "))
 }
 
 // metastoreGrantsAreTrustworthy is true when the connector owns the metastore

@@ -283,7 +283,10 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 		return err
 	}
 
-	workspace := usable[0]
+	workspace, err := pickReadableWorkspace(ctx, b.client, b.clientID, owner, metastoreID, usable, annos)
+	if err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(catalogRoute{
 		Workspace:      workspace.DeploymentName,
 		WorkspaceID:    strconv.Itoa(workspace.ID),
