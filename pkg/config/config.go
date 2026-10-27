@@ -17,12 +17,23 @@ var (
 		field.WithDisplayName("OAuth2 Client ID"),
 		field.WithRequired(true),
 	)
+	// Not required: FieldsMutuallyExclusive rejects a Required field.
 	DatabricksClientSecretField = field.StringField(
 		"databricks-client-secret",
 		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
 		field.WithIsSecret(true),
-		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client Secret"),
+	)
+	DatabricksTokenField = field.StringField(
+		"databricks-token",
+		field.WithDescription("An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token."),
+		field.WithIsSecret(true),
+		field.WithDisplayName("Workload Identity Token"),
+	)
+	DatabricksTokenFileField = field.StringField(
+		"databricks-token-file",
+		field.WithDescription("Path to a file holding an externally issued JWT identifying the workload. Read again on every token refresh."),
+		field.WithDisplayName("Workload Identity Token File"),
 	)
 	WorkspacesField = field.StringSliceField(
 		"workspaces",
@@ -59,6 +70,8 @@ var (
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
+		DatabricksTokenField,
+		DatabricksTokenFileField,
 		HostnameField,
 		WorkspacesField,
 		BaseURLField,
@@ -74,5 +87,7 @@ var Config = field.NewConfiguration(
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
 	field.WithConstraints(
 		field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField),
+		field.FieldsMutuallyExclusive(DatabricksClientSecretField, DatabricksTokenField, DatabricksTokenFileField),
+		field.FieldsAtLeastOneUsed(DatabricksClientSecretField, DatabricksTokenField, DatabricksTokenFileField),
 	),
 )

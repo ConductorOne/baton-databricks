@@ -29,7 +29,12 @@ Revoking the workspace **member** entitlement removes the principal's entire wor
 
 ## Authentication methods
 
-The connector authenticates with **OAuth** — an account-level service principal's client ID and secret. This is the only authentication method the connector supports.
+The connector authenticates as an account-level service principal, named by its client ID. It proves it is that service principal in one of two ways:
+
+- **OAuth client secret** (default): the service principal's client ID and secret.
+- **Workload identity federation**: the connector presents an externally issued JWT that identifies the workload, such as a SPIFFE JWT-SVID or a Kubernetes projected service account token, and Databricks exchanges it for a short-lived token. No long-lived secret is stored, and the Databricks administrator controls access through a service principal federation policy. This fits a deployment where the platform running the connector already issues it a workload identity token.
+
+Exactly one of the two credentials is supplied. There is no personal access token (PAT), workspace token, or username and password option.
 
 ## Gather Databricks credentials
 
@@ -55,7 +60,7 @@ A user with the **Account admin** role in each Databricks workspace you want to 
 
 ### Generate Databricks credentials
 
-The Databricks connector authenticates with OAuth, which syncs info from all Databricks workspaces the service principal can access.
+The Databricks connector authenticates as a service principal, which syncs info from all Databricks workspaces that service principal can access.
 
 <Steps>
   <Step>
@@ -71,6 +76,24 @@ The Databricks connector authenticates with OAuth, which syncs info from all Dat
 - Account ID
 - OAuth client ID
 - OAuth client secret
+
+### Use workload identity federation instead of a secret
+
+You can skip the OAuth secret and have the connector present an externally issued JWT instead. The connector must be able to read that JWT where it runs, so this suits a deployment whose platform injects a workload identity token.
+
+<Steps>
+  <Step>
+  Create the service principal as described above, but do not generate an OAuth secret.
+  </Step>
+  <Step>
+  Follow the [Databricks OAuth token federation documentation](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange) to add a service principal federation policy that trusts the issuer, subject and audience of the JWT your workload receives.
+  </Step>
+  <Step>
+  Make the JWT available to the connector, ideally as a file that your platform rotates.
+  </Step>
+</Steps>
+
+**Done.** In this case the credentials are the account ID, the OAuth client ID, and the JWT, in place of the OAuth client secret.
 
 Next, move on to the instructions for your chosen setup method.
 
@@ -204,6 +227,13 @@ stringData:
   BATON_DATABRICKS_CLIENT_ID: <OAuth client ID>
   BATON_DATABRICKS_CLIENT_SECRET: <OAuth client secret>
 
+  # Alternative to BATON_DATABRICKS_CLIENT_SECRET: workload identity federation.
+  # Point this at a projected service account token, or any other externally
+  # issued JWT your federation policy trusts. The connector reads the file again
+  # on every token refresh, so a rotated token needs no restart.
+  # Set either the client secret or one of the token options, never more than one.
+  # BATON_DATABRICKS_TOKEN_FILE: /var/run/secrets/databricks/token
+
   # Optional: limit the sync to specific workspaces
   # (workspace name, deployment name, or numeric ID).
   # Mutually exclusive with BATON_DATABRICKS_EXCLUDE_WORKSPACES — set one or the other, never both.
@@ -223,7 +253,7 @@ stringData:
 </Warning>
 
 <Note>
-OAuth requires a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
+Both credential options require a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
 </Note>
 
 See the connector's README or run `--help` to see all available configuration flags and environment variables.

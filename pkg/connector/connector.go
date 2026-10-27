@@ -168,16 +168,27 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 	return cb, nil, nil
 }
 
+// prepareClientAuth uses the client secret by default and switches to workload
+// identity federation when one of the token fields is set.
 func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
-	databricksClientSecret := cfg.DatabricksClientSecret
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+
+	if cfg.DatabricksToken != "" || cfg.DatabricksTokenFile != "" {
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			cfg.DatabricksToken,
+			cfg.DatabricksTokenFile,
+			accountHostname,
+		)
+	}
 
 	return databricks.NewOAuth2(
 		accountID,
 		databricksClientId,
-		databricksClientSecret,
+		cfg.DatabricksClientSecret,
 		accountHostname,
 	)
 }
