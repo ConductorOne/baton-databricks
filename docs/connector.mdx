@@ -134,7 +134,7 @@ Otherwise, grant **MANAGE** on each catalog you want synced:
 </Steps>
 
 <Warning>
-Without this, the sync fails with a permission error naming the catalog, and ConductorOne keeps the grants it already has. Databricks would otherwise return HTTP 200 with only the privileges the caller can see.
+Without this, that catalog is left out of the sync. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and ConductorOne would delete the grants it cannot read.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
