@@ -23,6 +23,10 @@ var _ connectorbuilder.ResourceSyncerV2 = (*tableBuilder)(nil)
 const (
 	securableTypeTable = "TABLE"
 
+	// errorCodeTableGone is what Databricks names in error_code when the table a
+	// request addresses does not exist.
+	errorCodeTableGone = "TABLE_DOES_NOT_EXIST"
+
 	// The canonical UPPER_SNAKE form the API answers with.
 	privilegeAllPrivileges = "ALL_PRIVILEGES"
 	privilegeRefresh       = "REFRESH"
@@ -153,6 +157,9 @@ func tableLevel(privileges []string) securableLevel {
 		trustRemedy:     tableTrustRemedy,
 		permissionsName: tablePermissionsName,
 		trusts:          tableGrantsAreTrustworthy,
+		// Dropping a parent drops the table with it, so any of the three codes
+		// means there is no table left to revoke on.
+		goneErrorCodes: []string{errorCodeTableGone, errorCodeSchemaGone, errorCodeCatalogGone},
 	}
 }
 

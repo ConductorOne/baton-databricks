@@ -18,6 +18,10 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*volumeBuilder)(nil)
 const (
 	securableTypeVolume = "VOLUME"
 
+	// errorCodeVolumeGone is what Databricks names in error_code when the volume
+	// a request addresses does not exist.
+	errorCodeVolumeGone = "VOLUME_DOES_NOT_EXIST"
+
 	profileKeyVolumeName = "volume_name"
 	profileKeyVolumeType = "volume_type"
 
@@ -52,6 +56,9 @@ var volumeLevel = securableLevel{
 	trustRemedy:     volumeTrustRemedy,
 	permissionsName: volumePermissionsName,
 	trusts:          volumeGrantsAreTrustworthy,
+	// Dropping a parent drops the volume with it, so any of the three codes
+	// means there is no volume left to revoke on.
+	goneErrorCodes: []string{errorCodeVolumeGone, errorCodeSchemaGone, errorCodeCatalogGone},
 }
 
 type volumeBuilder struct {

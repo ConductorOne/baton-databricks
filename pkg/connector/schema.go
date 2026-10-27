@@ -28,6 +28,10 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*schemaBuilder)(nil)
 const (
 	securableTypeSchema = "SCHEMA"
 
+	// errorCodeSchemaGone is what Databricks names in error_code when the schema
+	// a request addresses does not exist.
+	errorCodeSchemaGone = "SCHEMA_DOES_NOT_EXIST"
+
 	// informationSchema is the read-only schema Databricks puts in every catalog.
 	// Its privileges are not grantable, so it is left out of the sync.
 	informationSchema = "information_schema"
@@ -78,6 +82,9 @@ var schemaLevel = securableLevel{
 	trustRemedy:     schemaTrustRemedy,
 	permissionsName: schemaPermissionsName,
 	trusts:          schemaGrantsAreTrustworthy,
+	// Dropping the catalog drops its schemas, so a revoke on a schema can meet
+	// either code and both mean the schema is gone.
+	goneErrorCodes: []string{errorCodeSchemaGone, errorCodeCatalogGone},
 }
 
 type schemaBuilder struct {

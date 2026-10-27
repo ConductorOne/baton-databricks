@@ -400,6 +400,57 @@ func TestTablePrivilegesFollowTableType(t *testing.T) {
 	}
 }
 
+// Dropping a table, or any parent of it, leaves nothing to revoke. Databricks
+// names which one is missing in error_code, and only that answer proves it: a
+// bare 404 also comes back from a workspace the table is not reachable through,
+// where the privilege is still held.
+func TestTableRevokeOnADroppedTableOrParentIsAlreadyRevoked(t *testing.T) {
+	tests := []struct {
+		name      string
+		errorCode string
+		wantGone  bool
+	}{
+		{name: "dropped table", errorCode: errorCodeTableGone, wantGone: true},
+		{name: "dropped parent schema", errorCode: errorCodeSchemaGone, wantGone: true},
+		{name: "dropped parent catalog", errorCode: errorCodeCatalogGone, wantGone: true},
+		{name: "a 404 naming nothing"},
+		{name: "some other 404", errorCode: "RESOURCE_DOES_NOT_EXIST"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := &fakeSchemaChildAccount{
+				metastoreOwner: testOwnPrincipal,
+				catalogOwner:   "someone",
+				schemaOwner:    "someone",
+				users:          map[string]string{"1": "alice@example.com"},
+				permNotFound:   true,
+				permErrorCode:  test.errorCode,
+			}
+			b := newTestTableBuilder(t, f)
+			resource := testTable(t, "orders", tableTypeManaged, "someone", "someone", "someone", testOwnPrincipal, "wsa")
+			g := grant.NewGrant(resource, "SELECT", alice.GetId())
+
+			annos, err := b.Revoke(context.Background(), g)
+			switch {
+			case test.wantGone:
+				if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+				}
+			default:
+				if err == nil {
+					t.Fatalf("Revoke returned %v and no error; want the revoke to fail", annos)
+				}
+				if annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Error("a 404 without a gone code reported GrantAlreadyRevoked")
+				}
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
+	}
+}
+
 // Two privileges a table reports cannot be asked for: the grants API answers an
 // added ALL_PRIVILEGES on a view, and an added REFRESH on anything other than a
 // materialized view or a streaming table, with a 400. Both are refused before
