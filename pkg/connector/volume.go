@@ -55,7 +55,7 @@ var volumeLevel = securableLevel{
 }
 
 type volumeBuilder struct {
-	client *databricks.Client
+	client   *databricks.Client
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}

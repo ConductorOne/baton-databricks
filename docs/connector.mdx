@@ -41,7 +41,7 @@ records on one of them (`CREATE_CATALOG` on a metastore, `USE_CATALOG` or
 review who holds it, request it, and revoke it for users, groups and service
 principals. A grant held by a group is expandable so C1 can resolve the
 group's members as holders. Ownership is shown as a read-only `owner`
-entitlement — it cannot be granted or revoked through C1. Views, materialized views, metric views and streaming tables are tables; `table_type` picks which privileges can be requested. `ALL_PRIVILEGES` on a view is shown when it already exists and cannot be requested.
+entitlement — it cannot be granted or revoked through C1. Views, materialized views, metric views and streaming tables are tables; `table_type` picks which privileges can be requested. `ALL_PRIVILEGES` on a view, and `MODIFY` on a streaming table, are shown when they already exist and cannot be requested.
 
 <Note>
 The Metastores, Catalogs, Schemas, Tables and Volumes resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1.
@@ -152,6 +152,8 @@ Workspace **Admin** does not list every schema, except when the catalog is owned
 <Warning>
 The built-in `system` catalog is left out of the sync when the service principal cannot list every schema in it. For every other catalog, the sync fails instead of continuing. Databricks would otherwise return a short list and ConductorOne would delete the schemas it did not see.
 </Warning>
+
+Listing every table or volume needs more than **USE SCHEMA** or **MANAGE**. The service principal must own the metastore, the catalog, or the schema, be a direct Admin when the workspace admins group owns the catalog, or hold **ALL PRIVILEGES** on the catalog. Otherwise the sync fails.
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
 

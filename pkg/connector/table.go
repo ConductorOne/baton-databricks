@@ -107,7 +107,7 @@ var foreignTablePrivileges = slices.DeleteFunc(slices.Clone(tablePrivileges), fu
 var anyTablePrivileges = append(slices.Clone(tablePrivileges), privilegeRefresh)
 
 type tableBuilder struct {
-	client *databricks.Client
+	client   *databricks.Client
 	clientID string
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
@@ -289,8 +289,12 @@ func (b *tableBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 		// materialized view or a streaming table, are reported when a principal
 		// already holds them. The grants API rejects adding either, so neither is
 		// requestable.
+		// MODIFY on a streaming table is reported when a principal already holds it.
+		// The streaming-tables privilege reference lists SELECT and REFRESH only,
+		// and this connector has not seen a grant of MODIFY succeed.
 		reportOnly := (privilege == privilegeAllPrivileges && isViewLike(variant)) ||
-			(privilege == privilegeRefresh && !refreshIsRequestable(variant))
+			(privilege == privilegeRefresh && !refreshIsRequestable(variant)) ||
+			(privilege == "MODIFY" && strings.EqualFold(strings.TrimSpace(variant), tableTypeStreamingTable))
 		if !reportOnly {
 			options = append([]ent.EntitlementOption{grantable}, options...)
 		}
@@ -336,6 +340,9 @@ func refuseUngrantableTablePrivilege(resource *v2.Resource, entitlement *v2.Enti
 	case privilege == privilegeRefresh && !refreshIsRequestable(variant):
 		return status.Errorf(codes.InvalidArgument,
 			"databricks-connector: REFRESH can be granted on a materialized view or a streaming table, not on table type %q", normalized)
+	case privilege == "MODIFY" && normalized == tableTypeStreamingTable:
+		return status.Errorf(codes.InvalidArgument,
+			"databricks-connector: MODIFY on a streaming table is reported when already held; the grants API reference does not list it as grantable")
 	}
 
 	return nil

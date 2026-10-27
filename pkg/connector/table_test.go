@@ -301,9 +301,8 @@ func TestTableListFailsInsteadOfEmittingAShortList(t *testing.T) {
 	}
 }
 
-// A workspace that cannot see every schema in the catalog cannot be trusted to
-// list every table under one either, so the sync fails rather than emitting the
-// subset Databricks chose to show.
+// USE_SCHEMA makes the schema list complete. It does not make the table list
+// complete, so the sync fails rather than emitting the subset Databricks shows.
 func TestTableListRequiresACompleteSchemaListing(t *testing.T) {
 	f := &fakeSchemaChildAccount{
 		metastoreOwner: "eng",
@@ -320,7 +319,7 @@ func TestTableListRequiresACompleteSchemaListing(t *testing.T) {
 	if len(resources) != 0 {
 		t.Errorf("listed %d tables, want none", len(resources))
 	}
-	if !strings.Contains(err.Error(), "main.sales") || !strings.Contains(err.Error(), schemaListRemedy) {
+	if !strings.Contains(err.Error(), "main.sales") || !strings.Contains(err.Error(), childListRemedy) {
 		t.Errorf("error %q does not name the schema and the remedy", err)
 	}
 }
@@ -402,6 +401,7 @@ func TestTableGrantRejectsPrivilegesTheGrantsApiRefuses(t *testing.T) {
 		{"refresh on a streaming table", tableTypeStreamingTable, privilegeRefresh, codes.OK},
 		{"modify on a foreign table", tableTypeForeign, "MODIFY", codes.InvalidArgument},
 		{"modify on a managed table", tableTypeManaged, "MODIFY", codes.OK},
+		{"modify on a streaming table", tableTypeStreamingTable, "MODIFY", codes.InvalidArgument},
 		{"a catalog-only privilege", tableTypeManaged, "USE_CATALOG", codes.InvalidArgument},
 		{"ownership", tableTypeManaged, ownerEntitlement, codes.InvalidArgument},
 		{"a legacy alias", tableTypeManaged, "USAGE", codes.InvalidArgument},
