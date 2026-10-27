@@ -239,10 +239,10 @@ func listAllCatalogs(t *testing.T, b *catalogBuilder) ([]*v2.Resource, error) {
 	return nil, nil
 }
 
-// Catalogs are read through the one workspace the metastore route picked, the
-// first running one. A catalog listed only by another workspace is outside that
-// path. Paging reads that workspace's pages once and resolves the route once.
-func TestCatalogListReadsTheFirstWorkspaceOnce(t *testing.T) {
+// Catalogs are read through every running in-scope workspace. A catalog bound
+// to only one of them is absent from the others, so listing a single workspace
+// would drop it. Names repeat across workspaces and are emitted once.
+func TestCatalogListReadsEveryWorkspace(t *testing.T) {
 	shared := manyCatalogs("shared", 120)
 	f := &fakeCatalogAccount{
 		attached: []int{1, 2},
@@ -262,14 +262,17 @@ func TestCatalogListReadsTheFirstWorkspaceOnce(t *testing.T) {
 	for _, resource := range resources {
 		unique[resource.GetId().GetResource()] = resource
 	}
-	if len(unique) != 120 {
-		t.Fatalf("unique catalogs = %d, want the 120 listed by the first workspace", len(unique))
+	if len(unique) != 150 {
+		t.Fatalf("unique catalogs = %d, want the 120 shared catalogs plus the 30 bound only to wsb", len(unique))
+	}
+	if _, ok := unique["ms-1::only_b_000"]; !ok {
+		t.Fatal("no resource with id ms-1::only_b_000")
 	}
 	if f.routed != 1 {
 		t.Errorf("the route was resolved %d times, want once per metastore", f.routed)
 	}
-	if want := 3; f.catalogPages != want {
-		t.Errorf("catalog pages read = %d, want %d (the first workspace's pages once)", f.catalogPages, want)
+	if want := 6; f.catalogPages != want {
+		t.Errorf("catalog pages read = %d, want %d (both workspaces, once each)", f.catalogPages, want)
 	}
 
 	// The resource id keys the catalog by its metastore, and the profile carries

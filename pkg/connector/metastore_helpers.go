@@ -251,6 +251,9 @@ func workspaceIsUsable(workspaceStatus string) bool {
 // errMetastoreGone marks a metastore the account no longer lists.
 var errMetastoreGone = errors.New("metastore is no longer on the account")
 
+// errCatalogGone marks a catalog no running in-scope workspace lists.
+var errCatalogGone = errors.New("catalog is no longer listed")
+
 // attached lists the running in-scope workspaces the metastore is assigned to,
 // in assignment order. inScope reports whether any in-scope workspace is
 // attached at all, running or not: that is what tells "outside this sync" apart
@@ -471,6 +474,35 @@ func holdsPrivilegeOn(
 	}
 
 	return holds, nil
+}
+
+// assignmentListError explains a failed read of the workspaces a metastore is
+// assigned to, which decides which workspaces its securables are read through.
+func assignmentListError(metastoreID string, err error) error {
+	return fmt.Errorf("databricks-connector: failed to list the workspaces assigned to metastore %s: %w", metastoreID, err)
+}
+
+// workspaceForCatalog returns the first in-scope workspace whose catalog listing
+// contains catalogName. None listing it is an error: an empty child list would
+// make ConductorOne delete the schemas, tables and volumes under that catalog.
+func workspaceForCatalog(
+	ctx context.Context,
+	client *databricks.Client,
+	metastoreID, catalogName string,
+	usable []databricks.Workspace,
+	annos *annotations.Annotations,
+) (*databricks.Workspace, *databricks.Catalog, error) {
+	for i := range usable {
+		catalog, err := catalogThrough(ctx, client, usable[i].DeploymentName, metastoreID, catalogName, annos)
+		if err != nil {
+			return nil, nil, err
+		}
+		if catalog != nil {
+			return &usable[i], catalog, nil
+		}
+	}
+
+	return nil, nil, fmt.Errorf("databricks-connector: catalog %s of metastore %s: %w", catalogName, metastoreID, errCatalogGone)
 }
 
 // deniesTrust is an answer that withholds what the connector asked for, as

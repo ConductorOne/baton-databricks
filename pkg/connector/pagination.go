@@ -2,13 +2,19 @@ package connector
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 )
 
 const ResourcesPageSize uint = 50
+
+// GrantsPageSize caps grants built from a single unpaginated API response (e.g. group members).
+// Each grant serializes to ~550 bytes, so a page is ~1.1MB, well under the 6MB Lambda response limit.
+const GrantsPageSize uint = 2000
 
 func parsePageToken(i string, resourceID *v2.ResourceId) (*pagination.Bag, uint, error) {
 	b := &pagination.Bag{}
@@ -57,4 +63,48 @@ func prepareNextToken(page uint, pageTotal int, total uint) string {
 	}
 
 	return token
+}
+
+// parseCursorToken returns the pagination bag and the cursor stored in its current page token,
+// which is empty on the first page.
+func parseCursorToken(i string, resourceID *v2.ResourceId) (*pagination.Bag, string, error) {
+	b := &pagination.Bag{}
+	err := b.Unmarshal(i)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if b.Current() == nil {
+		b.Push(pagination.PageState{
+			ResourceTypeID: resourceID.ResourceType,
+			ResourceID:     resourceID.Resource,
+		})
+	}
+
+	return b, b.PageToken(), nil
+}
+
+// pageAfter sorts items by key and returns up to GrantsPageSize of them that sort after cursor,
+// plus the cursor for the next page (empty when this is the last page). Keys must be unique.
+// Paging from the last emitted key rather than an offset keeps page boundaries stable when items
+// are added or removed between page fetches.
+func pageAfter[T any](items []T, key func(T) string, cursor string) ([]T, string) {
+	slices.SortFunc(items, func(a, b T) int { return strings.Compare(key(a), key(b)) })
+
+	start := 0
+	if cursor != "" {
+		var found bool
+		start, found = slices.BinarySearchFunc(items, cursor, func(item T, c string) int { return strings.Compare(key(item), c) })
+		if found {
+			start++
+		}
+	}
+
+	end := min(start+int(GrantsPageSize), len(items))
+	var next string
+	if end < len(items) {
+		next = key(items[end-1])
+	}
+
+	return items[start:end], next
 }

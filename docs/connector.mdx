@@ -50,7 +50,7 @@ The Metastores, Catalogs and Schemas resource types are turned off by default. T
 
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
-- A catalog is synced when a workspace in the sync lists it. A catalog that only excluded workspaces can reach is not synced.
+- A catalog is synced when any running workspace in the sync lists it, and the same catalog name is kept once. A catalog that only excluded workspaces can reach is not synced.
 - `information_schema` is skipped.
 - Unity Catalog tags are not synced.
 </Note>
@@ -137,6 +137,8 @@ Otherwise, grant **MANAGE** on each catalog you want synced:
 
 <Warning>
 Without this, that catalog is left out of the sync. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and ConductorOne would delete the grants it cannot read.
+
+The catalog list has the same limit. A service principal that is not the metastore admin receives only the catalogs it owns or holds **USE CATALOG** on. The connector asks every running workspace in scope, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not.
 </Warning>
 
 ### Let the service principal list every schema
