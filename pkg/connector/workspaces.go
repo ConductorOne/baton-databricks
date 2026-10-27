@@ -213,8 +213,18 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	}
 
 	var rv []*v2.Grant
+	skipped := 0
 	l.Debug("grants: workspace resource", zap.String("workspace_id", workspace), zap.Int("assignments_count", len(assignments)))
-	for _, assignment := range assignments {
+	for i, assignment := range assignments {
+		if !assignment.UsablePrincipal() {
+			skipped++
+			l.Debug("skipping workspace permission assignment without a usable principal",
+				zap.String("workspace_id", workspace),
+				zap.Int("assignment_index", i),
+				zap.String("assignment_error", assignment.Error),
+			)
+			continue
+		}
 		resourceType, err := prepareResourceType(assignment.Principal)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource type: %w", err)
@@ -236,6 +246,15 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 		}
 
 		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
+	}
+
+	if skipped > 0 {
+		l.Warn("skipped workspace permission assignments without a usable principal",
+			zap.String("workspace_id", workspace),
+			zap.String("workspace_name", resource.DisplayName),
+			zap.Int("skipped_count", skipped),
+			zap.Int("assignments_count", len(assignments)),
+		)
 	}
 
 	return rv, nil, nil
