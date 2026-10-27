@@ -41,6 +41,8 @@ type fakeSchemaAccount struct {
 	ownPrivileges map[string][]map[string]any
 	// permStatus fails the permissions endpoint on that deployment name.
 	permStatus map[string]int
+	// catalogStatus fails the catalog read on that deployment name.
+	catalogStatus map[string]int
 	// workspaceMembers maps a workspace id to its permission assignments, or to
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
@@ -55,6 +57,7 @@ type fakeSchemaAccount struct {
 	permHosts     []string
 	memberLists   []string
 	filteredReads []string
+	catalogReads  []string
 }
 
 func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
@@ -101,6 +104,8 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 			encode(map[string]any{"catalogs": []map[string]any{
 				{"name": "main", "metastore_id": "ms-1", "owner": f.catalogOwner},
 			}})
+		case strings.Contains(path, "/unity-catalog/catalogs/"):
+			f.serveCatalog(w, r)
 		case strings.HasSuffix(path, "/unity-catalog/schemas"):
 			f.serveSchemas(w, r)
 		case strings.Contains(path, "/unity-catalog/permissions/"):
@@ -111,6 +116,21 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 			http.Error(w, `{"message":"unexpected"}`, http.StatusInternalServerError)
 		}
 	}
+}
+
+// serveCatalog answers GET /catalogs/{name}. catalogStatus makes a workspace
+// refuse it, which is how a catalog bound elsewhere reads from a workspace that
+// does not serve it.
+func (f *fakeSchemaAccount) serveCatalog(w http.ResponseWriter, r *http.Request) {
+	workspace := r.Header.Get("X-Test-Workspace")
+	f.catalogReads = append(f.catalogReads, workspace)
+	if code, ok := f.catalogStatus[workspace]; ok {
+		http.Error(w, `{"message":"refused"}`, code)
+
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": "main", "metastore_id": "ms-1", "owner": f.catalogOwner})
 }
 
 func (f *fakeSchemaAccount) serveSchemas(w http.ResponseWriter, r *http.Request) {
@@ -356,6 +376,57 @@ func TestSchemaListRequiresACompleteListing(t *testing.T) {
 				t.Errorf("own privileges read %d times, want %d", len(f.filteredReads), test.wantFilteredReads)
 			}
 		})
+	}
+}
+
+// The catalog's schemas are read through a workspace that serves the catalog,
+// not through whichever workspace the metastore's assignment list names first.
+// An ISOLATED catalog is bound to a subset of them, so stopping at the first one
+// would emit no schemas and ConductorOne would delete every schema it had.
+func TestSchemaListTriesTheNextWorkspace(t *testing.T) {
+	f := &fakeSchemaAccount{
+		second:         true,
+		metastoreOwner: "eng",
+		catalogOwner:   "eng",
+		catalogStatus:  map[string]int{"wsa": http.StatusNotFound},
+		schemas:        []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newTestSchemaBuilderAs(t, f, "eng")
+
+	resources, err := listAllSchemas(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("listed %d schemas, want 1 through the second workspace", len(resources))
+	}
+	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace); workspace != "wsb" {
+		t.Errorf("profile[%s] = %q, want wsb", profileKeyWorkspace, workspace)
+	}
+	if want := []string{"wsa", "wsb"}; !slices.Equal(f.catalogReads, want) {
+		t.Errorf("catalog reads = %v, want %v (the first workspace is tried before the second)", f.catalogReads, want)
+	}
+}
+
+// No workspace in scope serving the catalog is not the catalog being empty.
+// Returning no schemas would make ConductorOne delete the ones it already has,
+// so the sync fails and keeps them.
+func TestSchemaListFailsWhenNoWorkspaceServesTheCatalog(t *testing.T) {
+	f := &fakeSchemaAccount{
+		second:         true,
+		metastoreOwner: "eng",
+		catalogOwner:   "eng",
+		catalogStatus:  map[string]int{"wsa": http.StatusNotFound, "wsb": http.StatusForbidden},
+		schemas:        []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newTestSchemaBuilderAs(t, f, "eng")
+
+	resources, err := listAllSchemas(t, b)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("List = %v, want FailedPrecondition", err)
+	}
+	if len(resources) != 0 {
+		t.Errorf("listed %d schemas, want none", len(resources))
 	}
 }
 
