@@ -14,8 +14,10 @@ import (
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -239,6 +241,21 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	return rv, nil, nil
 }
 
+// workspacePrincipalID returns the numeric principal ID the permission assignments API expects.
+// Groups are only synced under the account, so only "account/<account>/group/<n>" group IDs of
+// the given account are accepted; anything else is rejected.
+func workspacePrincipalID(principal *v2.ResourceId, accountID string) (string, error) {
+	if principal.ResourceType != groupResourceType.Id {
+		return principal.Resource, nil
+	}
+	parent, group, err := parseResourceId(principal.Resource)
+	if err != nil || parent == nil || parent.ResourceType != accountResourceType.Id || parent.Resource != accountID || group.ResourceType != groupResourceType.Id {
+		return "", uhttp.WrapErrors(codes.InvalidArgument,
+			fmt.Sprintf("databricks-connector: only account-level group IDs can be assigned to a workspace: %q", principal.Resource))
+	}
+	return group.Resource, nil
+}
+
 func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
@@ -260,7 +277,12 @@ func (w *workspaceBuilder) Grant(ctx context.Context, principal *v2.Resource, en
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	alreadyGranted, _, err := w.client.AddWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	principalID, err := workspacePrincipalID(principal.Id, w.client.GetAccountId())
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyGranted, _, err := w.client.AddWorkspaceMember(ctx, workspace, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to add workspace member: %w", err)
 	}
@@ -295,7 +317,12 @@ func (w *workspaceBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotat
 	}
 
 	workspace := strconv.Itoa(int(workspaceID))
-	alreadyRevoked, _, err := w.client.RemoveWorkspaceMember(ctx, workspace, principal.Id.Resource)
+	principalID, err := workspacePrincipalID(principal.Id, w.client.GetAccountId())
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyRevoked, _, err := w.client.RemoveWorkspaceMember(ctx, workspace, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to remove workspace member: %w", err)
 	}

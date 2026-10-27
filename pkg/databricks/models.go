@@ -64,6 +64,21 @@ type Group struct {
 	Schemas []string `json:"schemas,omitempty"`
 }
 
+const PatchOpSchema = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+
+// PatchOperation is one SCIM PATCH operation, e.g. {"op":"add","path":"members","value":[...]}
+// or {"op":"remove","path":"members[value eq \"<id>\"]"}.
+type PatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value,omitempty"`
+}
+
+type PatchRequest struct {
+	Schemas    []string         `json:"schemas"`
+	Operations []PatchOperation `json:"Operations"`
+}
+
 func (g Group) HaveRole(role string) bool {
 	for _, r := range g.Roles {
 		if r.Value == role {

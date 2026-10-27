@@ -285,11 +285,12 @@ func (c *Client) doRequest(
 	}
 
 	ratelimitData := &v2.RateLimitDescription{}
-	resp, err := c.httpClient.Do(
-		req,
-		uhttp.WithAlwaysJSONResponse(&response),
-		uhttp.WithRatelimitData(ratelimitData),
-	)
+	doOptions := []uhttp.DoOption{uhttp.WithRatelimitData(ratelimitData)}
+	// A nil response means the caller ignores the body, which may be empty (SCIM PATCH answers 204).
+	if response != nil {
+		doOptions = append(doOptions, uhttp.WithAlwaysJSONResponse(&response))
+	}
+	resp, err := c.httpClient.Do(req, doOptions...)
 	if resp == nil {
 		return ratelimitData, wrapTransportAuthError(err)
 	}

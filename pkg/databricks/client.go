@@ -356,6 +356,29 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	*v2.RateLimitDescription,
 	error,
 ) {
+	return c.getGroup(ctx, c.Get, workspaceId, groupId, vars...)
+}
+
+// GetGroupNoCache is GetGroup that bypasses the uhttp response cache. Reads that decide a
+// write use it, since a cached group can be up to the cache TTL old.
+func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
+	*Group,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return c.getGroup(ctx, c.GetUncached, workspaceId, groupId, vars...)
+}
+
+func (c *Client) getGroup(
+	ctx context.Context,
+	get func(context.Context, *url.URL, interface{}, ...Vars) (*v2.RateLimitDescription, error),
+	workspaceId, groupId string,
+	vars ...Vars,
+) (
+	*Group,
+	*v2.RateLimitDescription,
+	error,
+) {
 	var u *url.URL
 	if workspaceId == "" {
 		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), groupId)
@@ -364,7 +387,7 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	}
 
 	var res *Group
-	ratelimitData, err := c.Get(ctx, u, &res, vars...)
+	ratelimitData, err := get(ctx, u, &res, vars...)
 	if err != nil {
 		return nil, ratelimitData, err
 	}
@@ -372,15 +395,22 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 	return res, ratelimitData, nil
 }
 
-func (c *Client) UpdateGroup(ctx context.Context, workspaceId string, group *Group) (*v2.RateLimitDescription, error) {
+// PatchGroup applies SCIM PATCH operations to a group, changing only the attributes the
+// operations target.
+func (c *Client) PatchGroup(ctx context.Context, workspaceId, groupId string, operations ...PatchOperation) (*v2.RateLimitDescription, error) {
 	var u *url.URL
 	if workspaceId == "" {
-		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), group.ID)
+		u = c.accountBaseUrl.JoinPath(fmt.Sprintf(accountGroupsEndpoint, c.accountId), groupId)
 	} else {
-		u = c.workspaceUrl(workspaceId).JoinPath(groupsEndpoint, group.ID)
+		u = c.workspaceUrl(workspaceId).JoinPath(groupsEndpoint, groupId)
 	}
 
-	return c.Put(ctx, u, group, nil)
+	body := PatchRequest{
+		Schemas:    []string{PatchOpSchema},
+		Operations: operations,
+	}
+
+	return c.Patch(ctx, u, body, nil)
 }
 
 func (c *Client) FindGroupID(
