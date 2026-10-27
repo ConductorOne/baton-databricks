@@ -113,6 +113,29 @@ func (c *Client) ListCatalogs(
 	return res.Catalogs, res.NextPageToken, ratelimitData, nil
 }
 
+// GetCatalog (GET /api/2.1/unity-catalog/catalogs/{name}) reads one catalog
+// through workspaceId, which is a deployment name. It answers what draining
+// ListCatalogs cannot: a 404 naming CATALOG_DOES_NOT_EXIST is the catalog not
+// existing, while any other refusal is this workspace not seeing it.
+func (c *Client) GetCatalog(
+	ctx context.Context,
+	workspaceId, name string,
+) (
+	*Catalog,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res Catalog
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogCatalogsEndpoint, name)
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read catalog %s: %w", name, err))
+	}
+
+	return &res, ratelimitData, nil
+}
+
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).
 // The principal query filters effectively, not literally: an inherited assignment
 // comes back naming the group it is inherited through, so a caller must read every

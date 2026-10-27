@@ -90,6 +90,8 @@ func (f *fakeCatalogAccount) handler(t *testing.T) http.HandlerFunc {
 			})
 		case strings.HasSuffix(path, "/unity-catalog/catalogs"):
 			f.serveCatalogs(w, r)
+		case strings.Contains(path, "/unity-catalog/catalogs/"):
+			f.serveCatalog(w, r, path[strings.LastIndex(path, "/")+1:])
 		case strings.Contains(path, "/unity-catalog/permissions/catalog/"):
 			f.servePermissions(w, r, path[strings.LastIndex(path, "/")+1:])
 		default:
@@ -118,6 +120,26 @@ func (f *fakeCatalogAccount) serveCatalogs(w http.ResponseWriter, r *http.Reques
 		next = strconv.Itoa(start + size)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"catalogs": all[start : start+size], "next_page_token": next})
+}
+
+// serveCatalog answers GET /catalogs/{name} from the same per-workspace listing,
+// so a catalog bound elsewhere 404s here exactly as the workspace would answer.
+func (f *fakeCatalogAccount) serveCatalog(w http.ResponseWriter, r *http.Request, name string) {
+	workspace := r.Header.Get("X-Test-Workspace")
+	if code, ok := f.listStatus[workspace]; ok {
+		http.Error(w, `{"message":"denied"}`, code)
+
+		return
+	}
+	for _, catalog := range f.listed[workspace] {
+		if catalog["name"] == name {
+			_ = json.NewEncoder(w).Encode(catalog)
+
+			return
+		}
+	}
+
+	http.Error(w, `{"error_code":"CATALOG_DOES_NOT_EXIST","message":"not found"}`, http.StatusNotFound)
 }
 
 func (f *fakeCatalogAccount) servePermissions(w http.ResponseWriter, r *http.Request, catalog string) {
@@ -566,7 +588,9 @@ func TestCatalogRevokeTellsADeletedCatalogFromAnUnreachableOne(t *testing.T) {
 // ConductorOne recorded it as revoked.
 func TestCatalogRevokeOnAnUnlistedCatalogDoesNotReportAlreadyRevoked(t *testing.T) {
 	f := catalogProvisioningAccount()
-	f.listed = map[string][]map[string]any{"wsa": {}}
+	// 403, not a 404 naming the catalog: this workspace does not serve the
+	// catalog, which says nothing about whether it exists.
+	f.listStatus = map[string]int{"wsa": http.StatusForbidden}
 	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
 	g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
 

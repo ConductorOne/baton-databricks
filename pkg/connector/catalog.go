@@ -367,40 +367,35 @@ func metastoreOwner(
 	return "", nil
 }
 
-// catalogThrough finds one catalog in the listing of workspace, nil when that
-// workspace does not list it.
+// catalogThrough reads one catalog through workspace, nil when that workspace
+// does not serve it. A single GET replaces draining the listing, which cost one
+// page walk per catalog per workspace, and it separates the two answers the
+// listing ran together: a refusal naming the catalog as nonexistent is an
+// absence, and anything else is this workspace not seeing a catalog that may
+// well exist.
 func catalogThrough(
 	ctx context.Context,
 	client *databricks.Client,
 	workspace, metastoreID, catalogName string,
 	annos *annotations.Annotations,
 ) (*databricks.Catalog, error) {
-	pageToken := ""
-	for {
-		catalogs, next, rateLimit, err := client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
-		noteRateLimit(annos, rateLimit)
-		if err != nil {
-			return nil, catalogListingError(metastoreID, workspace, err)
-		}
-
-		for _, catalog := range catalogs {
-			if catalog.Name == catalogName && (catalog.MetastoreID == "" || catalog.MetastoreID == metastoreID) {
-				return &catalog, nil
-			}
-		}
-
-		if next == "" {
-			return nil, nil
-		}
-		// Databricks ignores a page token it cannot deserialize and restarts at
-		// page one, which would walk the same page forever.
-		if next == pageToken {
-			return nil, status.Errorf(codes.Internal,
-				"databricks-connector: the catalogs of metastore %s repeat page token %q through workspace %s",
-				metastoreID, next, workspace)
-		}
-		pageToken = next
+	catalog, rateLimit, err := client.GetCatalog(ctx, workspace, catalogName)
+	noteRateLimit(annos, rateLimit)
+	switch {
+	case err == nil:
+	case databricks.IsSecurableGone(err, errorCodeCatalogGone), deniesTrust(err):
+		return nil, nil
+	default:
+		return nil, catalogListingError(metastoreID, workspace, err)
 	}
+
+	// A catalog served by this workspace but belonging to another metastore is
+	// not this metastore's catalog.
+	if catalog.MetastoreID != "" && catalog.MetastoreID != metastoreID {
+		return nil, nil
+	}
+
+	return catalog, nil
 }
 
 // catalogListingError reads a workspace that refuses the catalog listing as
