@@ -353,6 +353,32 @@ func TestCatalogListFailsOnACatalogItCannotFullyRead(t *testing.T) {
 	}
 }
 
+// system is the exception: it is built in, a workspace admin reads only part of
+// it, and this connector has never synced it, so leaving it out deletes nothing
+// and the catalogs beside it still sync.
+func TestCatalogListSkipsOnlyTheSystemCatalog(t *testing.T) {
+	f := &fakeCatalogAccount{
+		attached: []int{1},
+		listed: map[string][]map[string]any{"wsa": {
+			catalogEntry(systemCatalog, "someone"),
+			catalogEntry("owned", "app-9"),
+		}},
+		workspaceMembers: map[string]any{"1": []map[string]any{{
+			"principal":   map[string]any{"service_principal_name": "app-9"},
+			"permissions": []string{"ADMIN"},
+		}}},
+	}
+	b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+	resources, err := listAllCatalogs(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 || resources[0].GetDisplayName() != "owned" {
+		t.Fatalf("listed %d catalogs, want only the one it owns", len(resources))
+	}
+}
+
 // Which workspaces serve the metastore decides which catalogs are in scope, so an
 // assignment list the connector cannot read is unknown, not empty. Listing no
 // catalogs would make ConductorOne delete the metastore's whole subtree.

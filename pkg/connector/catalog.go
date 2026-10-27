@@ -37,6 +37,11 @@ const (
 	// catalog a request addresses does not exist.
 	errorCodeCatalogGone = "CATALOG_DOES_NOT_EXIST"
 
+	// systemCatalog is the built-in, read-only catalog Databricks puts in every
+	// metastore. A workspace admin reads only part of it, and this connector has
+	// never synced it, so it is left out rather than failing the sync.
+	systemCatalog = "system"
+
 	// workspaceAdminsGroupPrefix starts the name of the system group Databricks
 	// creates for a workspace, _workspace_admins_<workspace>_<workspace id>.
 	workspaceAdminsGroupPrefix = "_workspace_admins_"
@@ -260,6 +265,16 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if !trustworthy {
+			// system is built in and read-only, and this connector has never synced
+			// it, so leaving it out deletes nothing. Every other catalog was synced
+			// in full before, which is why losing standing on one stops the sync.
+			if catalog.Name == systemCatalog {
+				ctxzap.Extract(ctx).Debug("databricks-connector: skipping the system catalog, whose privilege list is partial",
+					zap.String("workspace", route.Workspace))
+
+				continue
+			}
+
 			return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.PermissionDenied,
 				"databricks-connector: cannot read every privilege on catalog %s through workspace %s; %s",
 				catalog.Name, route.Workspace, catalogTrustRemedy)
