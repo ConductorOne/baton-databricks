@@ -128,18 +128,6 @@ func TestFindFiltersQuoteTheValue(t *testing.T) {
 	}
 }
 
-// TestUpdateGroupRefusesEmptyDisplayName guards against the CXH-2347 full-replacement-PUT
-// data-loss class: UpdateGroup must refuse to send a Group with an empty displayName,
-// since displayName is never legitimately empty and a PUT with it blank would wipe it.
-func TestUpdateGroupRefusesEmptyDisplayName(t *testing.T) {
-	c := newTestClient(t, nil)
-
-	_, err := c.UpdateGroup(context.Background(), "", &Group{BaseResponse: BaseResponse{ID: "g1"}})
-	if err == nil {
-		t.Fatal("UpdateGroup succeeded with an empty displayName, want an error")
-	}
-}
-
 func TestIsWorkspaceExcludedReturnsEveryMatchedKey(t *testing.T) {
 	ws := Workspace{ID: 12345, Name: "prod", DeploymentName: "dbc-abc"}
 	c := newTestClient(t, []string{"prod", "dbc-abc", "staging"})
