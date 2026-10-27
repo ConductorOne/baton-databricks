@@ -220,6 +220,20 @@ func (a *accountBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	return nil, nil
 }
 
+// Get returns the singleton account resource, used to re-sync it after a RESOURCE_CHANGE event.
+func (a *accountBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	resource, err := a.accountResource(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed account",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
+	return resource, nil, nil
+}
+
 func (a *accountBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations.Annotations, error) {
 	l := ctxzap.Extract(ctx)
 
