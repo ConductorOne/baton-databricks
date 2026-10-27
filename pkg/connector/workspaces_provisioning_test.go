@@ -504,7 +504,7 @@ func TestWorkspaceGrantsSkipAssignmentsWithoutUsablePrincipal(t *testing.T) {
 		t.Errorf("summary level = %v, want Warn", we.Level)
 	}
 	var skippedCount, assignmentsCount int
-	var totalOccurrences uint64
+	var totalOccurrences int64
 	var wsID, wsName string
 	for _, f := range we.Context {
 		switch f.Key {
@@ -513,7 +513,7 @@ func TestWorkspaceGrantsSkipAssignmentsWithoutUsablePrincipal(t *testing.T) {
 		case "assignments_count":
 			assignmentsCount = int(f.Integer)
 		case "total_occurrences":
-			totalOccurrences = uint64(f.Integer)
+			totalOccurrences = f.Integer
 		case "workspace_id":
 			wsID = f.String
 		case "workspace_name":
