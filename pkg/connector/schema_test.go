@@ -342,8 +342,8 @@ func TestSchemaListRequiresACompleteListing(t *testing.T) {
 			case test.wantSchemas && len(resources) != 1:
 				t.Fatalf("listed %d schemas, want 1", len(resources))
 			case !test.wantSchemas:
-				if err != nil {
-					t.Fatalf("List = %v, want the catalog left out", err)
+				if status.Code(err) != codes.PermissionDenied {
+					t.Fatalf("List = %v, want PermissionDenied", err)
 				}
 				if len(resources) != 0 {
 					t.Errorf("listed %d schemas, want none", len(resources))

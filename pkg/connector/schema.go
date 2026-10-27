@@ -177,10 +177,11 @@ type schemaRoute struct {
 	CatalogOwner   string `json:"c"`
 }
 
-// List pages a catalog's schemas through the one workspace the route picked.
+// List pages a catalog's schemas through a workspace that can see every schema.
 // Databricks answers a caller without catalog-wide visibility with only the
-// schemas it owns or can use, at 200, so that listing is refused rather than
-// synced.
+// schemas it owns or can use, at 200. For the built-in system catalog that
+// short list is left out. For every other catalog the sync stops, so
+// ConductorOne keeps the schemas it already has.
 func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != catalogResourceType.Id {
 		return nil, nil, nil
@@ -248,11 +249,12 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// pushRoute records the one workspace the schemas are read through: the first
-// running workspace attached to the metastore. An empty stack means no workspace
-// this sync can use serves it. A catalog listed there whose schemas cannot all be
-// read fails instead: a short listing would make ConductorOne delete the schemas
-// it hides, and their whole subtree.
+// pushRoute records a workspace that can list every schema of the catalog. It
+// walks the running in-scope workspaces until one both lists the catalog and
+// can read every schema. An empty stack means no workspace this sync can use
+// serves the metastore. A catalog none of them list fails the sync: returning
+// no schemas would make ConductorOne delete them. The built-in system catalog
+// is the exception, because this connector has never listed it completely.
 func (b *schemaBuilder) pushRoute(
 	ctx context.Context,
 	metastoreID, catalogName string,
@@ -264,12 +266,9 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	// A 404 here does not mean the metastore is gone. Listing nothing would make ConductorOne delete the schemas.
 	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
-		return fmt.Errorf(
-			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
-			metastoreID, err)
+		return assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
 		if inScope {
@@ -285,93 +284,65 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	workspace := usable[0]
-	// The catalog listing answers who owns the catalog, which is what the
-	// completeness rule is decided against. A catalog this workspace does not
-	// list has no schemas on this path.
-	catalog, err := b.catalogThrough(ctx, workspace.DeploymentName, metastoreID, catalogName, annos)
-	if err != nil {
-		return err
-	}
-	if catalog == nil {
-		ctxzap.Extract(ctx).Debug("databricks-connector: the workspace does not list the catalog, so it lists no schemas",
-			zap.String("catalog", catalogName),
-			zap.String("workspace", workspace.DeploymentName))
-
-		return nil
-	}
-
-	route := schemaRoute{
-		Workspace:      workspace.DeploymentName,
-		WorkspaceID:    strconv.Itoa(workspace.ID),
-		WorkspaceName:  workspace.Name,
-		MetastoreOwner: owner,
-		CatalogOwner:   catalog.Owner,
-	}
-
-	complete, err := schemaListingIsComplete(ctx, b.client, securableTrust{
-		ownPrincipal:   b.clientID,
-		metastoreOwner: owner,
-		parentOwner:    catalog.Owner,
-		fullName:       catalogName,
-		workspace:      route.Workspace,
-		workspaceID:    route.WorkspaceID,
-	}, annos)
-	if err != nil {
-		return err
-	}
-	if !complete {
-		// The system catalog is the measured case: a workspace admin sees 2 schemas
-		// out of 15. Leaving the catalog out keeps the rest of the sync running.
-		ctxzap.Extract(ctx).Debug("databricks-connector: skipping a catalog whose schema list is partial",
-			zap.String("catalog", catalogName),
-			zap.String("workspace", route.Workspace))
-
-		return nil
-	}
-
-	encoded, err := json.Marshal(route)
-	if err != nil {
-		return err
-	}
-	bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
-
-	return nil
-}
-
-// catalogThrough finds one catalog in the listing of workspace, nil when that
-// workspace does not list it.
-func (b *schemaBuilder) catalogThrough(
-	ctx context.Context,
-	workspace, metastoreID, catalogName string,
-	annos *annotations.Annotations,
-) (*databricks.Catalog, error) {
-	pageToken := ""
-	for {
-		catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize)
-		noteRateLimit(annos, rateLimit)
+	var sawCatalog bool
+	for i := range usable {
+		workspace := usable[i]
+		catalog, err := catalogThrough(ctx, b.client, workspace.DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
-			return nil, catalogListingError(metastoreID, workspace, err)
+			return err
+		}
+		if catalog == nil {
+			continue
+		}
+		sawCatalog = true
+
+		route := schemaRoute{
+			Workspace:      workspace.DeploymentName,
+			WorkspaceID:    strconv.Itoa(workspace.ID),
+			WorkspaceName:  workspace.Name,
+			MetastoreOwner: owner,
+			CatalogOwner:   catalog.Owner,
+		}
+		complete, err := schemaListingIsComplete(ctx, b.client, securableTrust{
+			ownPrincipal:   b.clientID,
+			metastoreOwner: owner,
+			parentOwner:    catalog.Owner,
+			fullName:       catalogName,
+			workspace:      route.Workspace,
+			workspaceID:    route.WorkspaceID,
+		}, annos)
+		if err != nil {
+			return err
+		}
+		if !complete {
+			continue
 		}
 
-		for _, catalog := range catalogs {
-			if catalog.Name == catalogName && (catalog.MetastoreID == "" || catalog.MetastoreID == metastoreID) {
-				return &catalog, nil
-			}
+		encoded, err := json.Marshal(route)
+		if err != nil {
+			return err
 		}
+		bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
 
-		if next == "" {
-			return nil, nil
-		}
-		// Databricks ignores a page token it cannot deserialize and restarts at
-		// page one, which would walk the same page forever.
-		if next == pageToken {
-			return nil, status.Errorf(codes.Internal,
-				"databricks-connector: the catalogs of metastore %s repeat page token %q through workspace %s",
-				metastoreID, next, workspace)
-		}
-		pageToken = next
+		return nil
 	}
+	if !sawCatalog {
+		return status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+	}
+	// system is built in. A workspace admin sees 2 of its schemas out of 15, and
+	// this connector has never synced the rest, so leaving it out deletes nothing.
+	// Any other catalog was listed in full before: a short list would delete the
+	// schemas ConductorOne can no longer see, so the sync stops and keeps them.
+	if catalogName == "system" {
+		ctxzap.Extract(ctx).Debug("databricks-connector: skipping schemas of the system catalog, which the connector cannot fully list")
+
+		return nil
+	}
+
+	return status.Errorf(codes.PermissionDenied,
+		"databricks-connector: cannot list every schema in catalog %s; %s",
+		catalogName, schemaListRemedy)
 }
 
 // schemaListingError reads a workspace that refuses the schema listing as
