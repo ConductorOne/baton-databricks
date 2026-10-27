@@ -234,11 +234,15 @@ func workspaceIsUsable(workspaceStatus string) bool {
 	}
 }
 
-// routeMetastore picks the first running in-scope workspace attached to the
-// metastore. inScope reports whether any in-scope workspace is attached at all.
+// errMetastoreGone marks a metastore the account no longer lists.
+var errMetastoreGone = errors.New("metastore is no longer on the account")
+
+// routeMetastore picks a workspace the connector can read every privilege through:
+// it owns the metastore, or it is a direct Admin there. A nil workspace with no
+// error means none is running and in scope; pending says one can still become RUNNING.
 func (m *metastoreBuilder) routeMetastore(
 	ctx context.Context,
-	metastoreID string,
+	metastoreID, owner string,
 	scoped map[string]databricks.Workspace,
 	running map[string]bool,
 	annos *annotations.Annotations,
@@ -246,37 +250,84 @@ func (m *metastoreBuilder) routeMetastore(
 	ids, rateLimit, err := m.client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf(
+			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
+			metastoreID, err)
 	}
 
-	inScope := false
+	pending := false
+	var candidates []databricks.Workspace
 	for _, id := range ids {
 		workspace, ok := scoped[id]
 		if !ok {
 			continue
 		}
 		if running[id] {
-			return &workspace, true, nil
+			candidates = append(candidates, workspace)
+			continue
 		}
-		inScope = true
+		pending = true
+	}
+	if len(candidates) == 0 {
+		return nil, pending, nil
 	}
 
-	return nil, inScope, nil
+	if ownsPrincipal(m.clientID, owner) {
+		return &candidates[0], false, nil
+	}
+
+	for i := range candidates {
+		admin, err := isWorkspaceAdmin(ctx, m.client, m.clientID, strconv.Itoa(candidates[i].ID), annos)
+		if err != nil {
+			return nil, false, err
+		}
+		if admin {
+			return &candidates[i], false, nil
+		}
+	}
+
+	return nil, false, untrustedMetastoreError(metastoreID, candidates)
 }
 
-// metastoreGrantsAreTrustworthy is true when the connector owns the metastore or is a direct Admin of the routed workspace. MANAGE is not a metastore privilege.
-func metastoreGrantsAreTrustworthy(
+// resolveMetastoreRoute routes a metastore from its id, reading owner and standing live.
+func (m *metastoreBuilder) resolveMetastoreRoute(
 	ctx context.Context,
-	client *databricks.Client,
-	ownPrincipal, metastoreOwner, workspaceID string,
+	metastoreID string,
 	annos *annotations.Annotations,
-) (bool, error) {
-	// An owner holds every privilege implicitly, which is not reported as a grant.
-	if ownsPrincipal(ownPrincipal, metastoreOwner) {
-		return true, nil
+) (*databricks.Workspace, error) {
+	metastores, rateLimit, err := m.client.ListMetastores(ctx)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
 	}
 
-	return isWorkspaceAdmin(ctx, client, ownPrincipal, workspaceID, annos)
+	found := slices.IndexFunc(metastores, func(metastore databricks.Metastore) bool {
+		return metastore.MetastoreID == metastoreID
+	})
+	if found < 0 {
+		return nil, errMetastoreGone
+	}
+
+	scoped, running, err := m.scopedWorkspaces(ctx, annos)
+	if err != nil {
+		return nil, err
+	}
+
+	workspace, pending, err := m.routeMetastore(ctx, metastoreID, metastores[found].Owner, scoped, running, annos)
+	if err != nil {
+		return nil, err
+	}
+	if workspace == nil {
+		reason := "no workspace in sync scope is attached to it"
+		if pending {
+			reason = "every workspace in sync scope attached to it is still on its way to RUNNING"
+		}
+
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: cannot route metastore %s: %s", metastoreID, reason)
+	}
+
+	return workspace, nil
 }
 
 // ownsPrincipal reports whether name is the service principal the connector
@@ -376,39 +427,18 @@ func deniesTrust(err error) bool {
 	}
 }
 
-// ensureGrantsAreTrustworthy refuses the call unless the privilege list is
-// complete. Databricks returns HTTP 200 with only the rows the caller may see,
-// and reporting that subset would make ConductorOne revoke the rest.
-// The check is not cached.
-func (m *metastoreBuilder) ensureGrantsAreTrustworthy(
-	ctx context.Context,
-	resource *v2.Resource,
-	metastoreID, workspace string,
-	annos *annotations.Annotations,
-) error {
-	profile := rs.GetProfile(resource)
-	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
-	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
-
-	trustworthy, err := metastoreGrantsAreTrustworthy(ctx, m.client, m.clientID, owner, workspaceID, annos)
-	if err != nil {
-		return err
-	}
-	if !trustworthy {
-		return untrustedMetastoreError(metastoreID, workspace)
+func untrustedMetastoreError(metastoreID string, tried []databricks.Workspace) error {
+	names := make([]string, 0, len(tried))
+	for _, workspace := range tried {
+		names = append(names, workspace.DeploymentName)
 	}
 
-	return nil
-}
-
-// untrustedMetastoreError names the metastore, the workspace the read goes
-// through and what an operator has to change.
-func untrustedMetastoreError(metastoreID, workspace string) error {
 	return status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot read every privilege on metastore %s through workspace %s, and Databricks answers a partial read with 200, "+
+		"databricks-connector: cannot read every privilege on metastore %s through any workspace attached to it (%s), "+
+			"and Databricks answers a partial read with 200, "+
 			"so reporting it would revoke the access ConductorOne cannot see; "+
-			"the connector's service principal must own the metastore or be assigned Admin directly on the workspace",
-		metastoreID, workspace)
+			"the connector's service principal must own the metastore or be assigned Admin directly on one of those workspaces",
+		metastoreID, strings.Join(names, ", "))
 }
 
 // principalResolver maps a privilege assignment to a C1 resource id. The id is used when present; the name is only the fallback.

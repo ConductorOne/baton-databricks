@@ -162,7 +162,10 @@ members as holders.
 metastore level.
 
 A metastore lives on the account plane, but its privileges are read through a
-workspace attached to it.
+workspace attached to it. The connector picks that workspace itself: the first
+running one in scope where it can read every privilege, which it proves by
+owning the metastore or by holding Admin directly on that workspace. Grant and
+Revoke resolve the same route from the metastore id.
 
 A metastore is synced only while a workspace this sync can use is attached to
 it. The connector never guesses when the answer is unknown:
@@ -188,9 +191,10 @@ fails with an `InvalidArgument` error.
 ## Unity Catalog permissions
 
 The service principal must own the metastore, or be assigned **Admin** directly
-on the workspace the metastore is read through. Admin inherited only through a
+on at least one running workspace attached to it. Admin inherited only through a
 group is not enough. Databricks answers an under-permissioned read with HTTP 200
-and only the rows the caller may see. The connector refuses that read, so the
+and only the rows the caller may see, so the connector reads a metastore only
+through a workspace that passes that check. When no attached workspace does, the
 sync fails and ConductorOne keeps the grants it already has.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares

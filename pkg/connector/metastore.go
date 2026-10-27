@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -94,14 +96,12 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		}
 
 		// A 404 here does not mean the metastore is gone. Skipping it would make ConductorOne delete it.
-		workspace, inScope, err := m.routeMetastore(ctx, metastore.MetastoreID, scoped, running, &annos)
+		workspace, pending, err := m.routeMetastore(ctx, metastore.MetastoreID, metastore.Owner, scoped, running, &annos)
 		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
-				metastore.MetastoreID, err)
+			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if workspace == nil {
-			if inScope {
+			if pending {
 				return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.FailedPrecondition,
 					"databricks-connector: metastore %s has no running workspace in sync scope", metastore.MetastoreID)
 			}
@@ -145,17 +145,14 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	l := ctxzap.Extract(ctx)
 	metastoreID := resource.GetId().GetResource()
 	profile := rs.GetProfile(resource)
+	// List writes the route. An empty one is a resource this sync did not emit.
 	workspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
 	if workspace == "" {
-		l.Debug("databricks-connector: metastore has no workspace on its profile; returning no grants", zap.String("metastore", metastoreID))
-		return nil, nil, nil
+		return nil, nil, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: metastore %s has no workspace on its profile", metastoreID)
 	}
 
 	annos := annotations.Annotations{}
-	if err := m.ensureGrantsAreTrustworthy(ctx, resource, metastoreID, workspace, &annos); err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, err
-	}
-
 	pageToken := attr.PageToken.Token
 	assignments, nextPageToken, rateLimit, err := m.client.ListPermissions(ctx, workspace, databricks.SecurableMetastore, metastoreID, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
@@ -255,17 +252,17 @@ func (m *metastoreBuilder) resolveChange(
 			"databricks-connector: %s is not a grantable metastore privilege", privilege)
 	}
 
-	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyWorkspace)
-	if workspace == "" {
-		return metastoreChange{}, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: metastore %s has no workspace on its profile", metastoreID)
-	}
+	// Provisioning carries ids, not the profile a sync wrote.
+	routed, err := m.resolveMetastoreRoute(ctx, metastoreID, annos)
+	if err != nil {
+		if errors.Is(err, errMetastoreGone) && isGrant {
+			return metastoreChange{}, status.Errorf(codes.NotFound,
+				"databricks-connector: metastore %s is no longer on the account", metastoreID)
+		}
 
-	// A privilege list the connector cannot fully read also cannot be safely
-	// written to: the PATCH would be built from the rows it is allowed to see.
-	if err := m.ensureGrantsAreTrustworthy(ctx, resource, metastoreID, workspace, annos); err != nil {
 		return metastoreChange{}, err
 	}
+	workspace := routed.DeploymentName
 
 	scimID, err := unityPrincipalScimID(principalID)
 	if err != nil {
@@ -274,11 +271,14 @@ func (m *metastoreBuilder) resolveChange(
 
 	principalName, err := unityPrincipalName(ctx, m.client, principalID)
 	if err != nil {
-		return metastoreChange{}, fmt.Errorf("databricks-connector: failed to resolve principal %s: %w", principalID.GetResource(), err)
-	}
-	// Revoke can still remove a deleted principal's row by its id.
-	if isGrant && principalName == "" {
-		return metastoreChange{}, status.Errorf(codes.NotFound, "databricks-connector: principal %s no longer exists in Databricks", scimID)
+		if !errors.Is(err, errPrincipalNotFound) {
+			return metastoreChange{}, fmt.Errorf("databricks-connector: failed to resolve principal %s: %w", principalID.GetResource(), err)
+		}
+		// Revoke addresses a vanished principal's rows by id.
+		if isGrant {
+			return metastoreChange{}, status.Errorf(codes.NotFound,
+				"databricks-connector: principal %s no longer exists in Databricks", scimID)
+		}
 	}
 
 	return metastoreChange{
@@ -349,6 +349,11 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 	annos := annotations.Annotations{}
 	change, err := m.resolveChange(ctx, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), false, &annos)
 	if err != nil {
+		if errors.Is(err, errMetastoreGone) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+			return annos, nil
+		}
+
 		return annos, err
 	}
 
@@ -365,15 +370,14 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 		return annos, fmt.Errorf("databricks-connector: failed to read privileges on metastore %s: %w", change.metastoreID, err)
 	}
 
+	// A missed row can be a partial read, and removing a privilege nobody holds is a no-op.
 	held, ok := change.matchHeld(seen)
-	if !ok {
-		annos.Update(&v2.GrantAlreadyRevoked{})
-		return annos, nil
-	}
-
 	removal := databricks.PermissionsChange{Principal: change.principalName, Remove: []string{change.privilege}}
-	if heldID := held.PrincipalID.String(); heldID != "" && heldID != "0" {
+	switch heldID := held.PrincipalID.String(); {
+	case ok && heldID != "" && heldID != "0":
 		removal = databricks.PermissionsChange{PrincipalID: held.PrincipalID, Remove: []string{change.privilege}}
+	case change.principalName == "":
+		removal = databricks.PermissionsChange{PrincipalID: json.Number(change.scimID), Remove: []string{change.privilege}}
 	}
 
 	result, rateLimit, err := m.client.UpdatePermissions(ctx, change.workspace, databricks.SecurableMetastore, change.metastoreID,
@@ -385,6 +389,9 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 	if _, stillHeld := change.matchHeld(result); stillHeld {
 		return annos, status.Errorf(codes.Internal,
 			"databricks-connector: revoking %s on metastore %s was accepted but not applied", change.privilege, change.metastoreID)
+	}
+	if !ok {
+		annos.Update(&v2.GrantAlreadyRevoked{})
 	}
 
 	return annos, nil
