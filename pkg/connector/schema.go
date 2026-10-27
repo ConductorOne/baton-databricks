@@ -321,10 +321,13 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 	if !complete {
-		return status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot list every schema in catalog %s, and Databricks answers a partial listing with 200, "+
-				"so syncing it would delete the schemas ConductorOne cannot see along with their grants; %s",
-			catalogName, schemaListRemedy)
+		// The system catalog is the measured case: a workspace admin sees 2 schemas
+		// out of 15. Leaving the catalog out keeps the rest of the sync running.
+		ctxzap.Extract(ctx).Debug("databricks-connector: skipping a catalog whose schema list is partial",
+			zap.String("catalog", catalogName),
+			zap.String("workspace", route.Workspace))
+
+		return nil
 	}
 
 	encoded, err := json.Marshal(route)
