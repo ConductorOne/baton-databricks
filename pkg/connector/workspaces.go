@@ -24,12 +24,14 @@ import (
 
 const workspaceMemberEntitlement = "member"
 
-// workspaceSkipWarnOccurrences counts workspace permission assignments
-// skipped for lack of a usable principal, process-wide, for the L7 sampling
-// of the per-workspace "skipped workspace permission assignments without a
-// usable principal" Warn: the summary emits at skip-occurrence 1, 10, 100,
-// then every 1000, so warn volume is logarithmic in the number of skips,
-// not one-per-affected-workspace. The counter is process-local logging
+// workspaceSkipWarnOccurrences counts workspaceBuilder.Grants() calls that
+// skipped at least one workspace permission assignment for lack of a usable
+// principal — it is incremented once per call (at the `if skipped > 0` site),
+// so it counts affected workspaces, not skipped assignments — process-wide,
+// for the L7 sampling of the per-workspace "skipped workspace permission
+// assignments without a usable principal" Warn: the Warn emits at occurrence
+// 1, 10, 100, then every 1000, so warn volume is logarithmic in the number
+// of affected workspaces. The counter is process-local logging
 // bookkeeping, not connector sync state; a warm Lambda execution environment
 // keeps the process (and this counter) alive across invocations, while a
 // fresh process starts it at zero. Tests reset it via
