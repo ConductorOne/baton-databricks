@@ -106,8 +106,7 @@ func ensureGrantsAreTrustworthy(
 	}
 	if !trustworthy {
 		return status.Errorf(codes.PermissionDenied,
-			"databricks-connector: cannot read every privilege on %s %s through workspace %s, and Databricks answers a partial read with 200, "+
-				"so reporting it would revoke the access ConductorOne cannot see; %s",
+			"databricks-connector: cannot read every privilege on %s %s through workspace %s; %s",
 			level.noun, fullName, workspace, level.trustRemedy)
 	}
 
