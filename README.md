@@ -233,22 +233,9 @@ running one in scope where it can read every privilege, which it proves by
 owning the metastore or by holding Admin directly on that workspace. Grant and
 Revoke resolve the same route from the metastore id.
 
-A metastore is synced only while a workspace this sync can use is attached to
-it. The connector never guesses when the answer is unknown:
-
-| Attached workspace | Result |
-|--------------------|--------|
-| `RUNNING` and in scope | the metastore syncs through it |
-| `PROVISIONING`, `NOT_PROVISIONED` | still changing, so the metastore is kept and the sync fails with `FailedPrecondition` until a workspace is `RUNNING` |
-| `CANCELLING` | the workspace is being deleted and will not become `RUNNING`, so the metastore is kept and the sync fails until that workspace is gone or another attached one is `RUNNING` |
-| `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
-| metastore workspace list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming that list |
-| workspace permission list unreadable (401, 403, 404) | treated as not Admin on that workspace; the sync then fails with the usual missing-standing error, which does not name this list |
-
-A metastore is left out of the sync only when the answer is known: every
-attached workspace is out of scope or unusable. Leaving it out is what makes
-ConductorOne remove it and its grants, so an unknown answer must not take that
-path.
+A metastore syncs through a running workspace in scope. The sync fails, naming
+the metastore, while an attached workspace in scope is still provisioning, or
+while the metastore's workspace list cannot be read.
 
 ## Unity Catalog provisioning
 
@@ -260,10 +247,7 @@ fails with an `InvalidArgument` error.
 
 The service principal must own the metastore, or be assigned **Admin** directly
 on at least one running workspace attached to it. Admin inherited only through a
-group is not enough. Databricks answers an under-permissioned read with HTTP 200
-and only the rows the caller may see, so the connector reads a metastore only
-through a workspace that passes that check. When no attached workspace does, the
-sync fails and ConductorOne keeps the grants it already has.
+group is not enough. Otherwise the sync fails naming the metastore.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
