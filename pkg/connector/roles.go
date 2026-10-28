@@ -53,7 +53,7 @@ func roleResourceId(role string, parent *v2.ResourceId) string {
 }
 
 func roleResource(ctx context.Context, role string, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"role_name":   role,
 		"parent_type": parent.GetResourceType(),
 		"parent_id":   parent.GetResource(),

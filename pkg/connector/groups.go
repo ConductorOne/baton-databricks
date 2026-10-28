@@ -41,7 +41,7 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 }
 
 func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
-	profile := map[string]interface{}{
+	profile := map[string]any{
 		"display_name": group.DisplayName,
 		"group_id":     group.ID,
 		"parent_type":  parent.GetResourceType(),

@@ -8,6 +8,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # This job grants and revokes one hardcoded group membership on the shared
+    # Databricks tenant, so two PRs running it at once read each other's writes.
+    # The group is deliberately not per-ref: it serializes across every branch.
+    concurrency:
+      group: databricks-sync-test
+      cancel-in-progress: false
     env:
       BATON_LOG_LEVEL: debug
       # Add any environment variables needed to run baton-bitbucket-datacenter
