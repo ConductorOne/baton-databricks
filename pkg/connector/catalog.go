@@ -121,8 +121,6 @@ type catalogBuilder struct {
 	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 	sync       syncPrincipals
-	// seen drops a catalog an earlier workspace in this sync already emitted.
-	seen map[string]struct{}
 }
 
 func newCatalogBuilder(client *databricks.Client, clientID string, workspaces map[string]struct{}, sync syncPrincipals) *catalogBuilder {
@@ -202,7 +200,8 @@ type catalogRoute struct {
 	MetastoreOwner string `json:"o"`
 }
 
-// List reads a metastore's catalogs through the one workspace the route picked.
+// List reads a metastore's catalogs through every running in-scope workspace.
+// A catalog bound to only one of them is absent from the others.
 func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != metastoreResourceType.Id {
 		return nil, nil, nil
@@ -244,11 +243,6 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			continue
 		}
 
-		key := catalogResourceID(metastoreID, catalog.Name)
-		if _, ok := b.seen[key]; ok {
-			continue
-		}
-
 		// A partial privilege list is indistinguishable from an empty one, and
 		// leaving the catalog out is not the safe half: ConductorOne deletes every
 		// resource a sync stops emitting, so the catalog, its grants, and its
@@ -265,10 +259,11 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if !trustworthy {
-			// system and samples are built in, owned by System user, and this
-			// connector has never synced them. Databricks refuses a MANAGE grant
-			// on them, so leaving them out deletes nothing. Every other catalog
-			// was synced in full before, which is why losing standing on one stops the sync.
+			// system and samples are owned by System user and Databricks refuses
+			// MANAGE on them, so a connector that does not own the metastore
+			// cannot prove the privilege list. They are left out in that case.
+			// While the connector owns the metastore the read is complete and
+			// both are synced. Leaving them out after that deletes them.
 			if catalog.Name == systemCatalog || catalog.CatalogType == "SYSTEM_CATALOG" {
 				ctxzap.Extract(ctx).Debug("databricks-connector: skipping a built-in catalog whose privilege list is partial",
 					zap.String("catalog", catalog.Name),
@@ -281,11 +276,6 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 				"databricks-connector: cannot read every privilege on catalog %s through workspace %s; %s",
 				catalog.Name, route.Workspace, catalogTrustRemedy)
 		}
-
-		if b.seen == nil {
-			b.seen = map[string]struct{}{}
-		}
-		b.seen[key] = struct{}{}
 
 		built, err := catalogResource(&catalog, metastoreID, parentResourceID, route)
 		if err != nil {
@@ -312,6 +302,12 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 // through. A catalog bound to only one of them is absent from the others, so
 // listing a single workspace would make ConductorOne delete it. An empty stack
 // means no workspace this sync can use serves the metastore.
+//
+// A catalog bound to several of them is listed by each, and emitted once per
+// route. The store keys a resource by (external_id, sync_id) and upserts on
+// conflict, so those copies collapse into one row. Measured on a live tenant:
+// with every route pushed twice, a three-catalog metastore still synced three
+// catalogs. Nothing here has to remember what an earlier route emitted.
 func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag *pagination.Bag, annos *annotations.Annotations) error {
 	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
 	if err != nil {
@@ -369,7 +365,7 @@ func metastoreOwner(
 	metastores, rateLimit, err := client.ListMetastores(ctx)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		return "", fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
+		return "", refuseUnreadable("databricks-connector: failed to list metastores", err)
 	}
 
 	for _, metastore := range metastores {

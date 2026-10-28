@@ -156,10 +156,8 @@ func syncSecurableGrants(
 	assignments, nextPageToken, rateLimit, err := client.ListPermissions(ctx, workspace, level.securableType, fullName, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		// FailedPrecondition, not NotFound: the SDK reads NotFound as "no grants".
-		// Whether the securable is gone is settled by the next List.
-		return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.FailedPrecondition,
-			fmt.Sprintf("databricks-connector: failed to list permissions on %s %s through workspace %s", level.noun, fullName, workspace), err)
+		return nil, &rs.SyncOpResults{Annotations: annos}, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: failed to list permissions on %s %s through workspace %s", level.noun, fullName, workspace), err)
 	}
 
 	resolver := newPrincipalResolver(client, &annos)

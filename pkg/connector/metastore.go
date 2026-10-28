@@ -95,7 +95,8 @@ var metastoreLevel = securableLevel{
 }
 
 // List emits each metastore with the workspace its permissions are read through.
-// A metastore with no usable workspace is left out: its grants cannot be read.
+// A metastore is left out only when no attached workspace is in scope or usable.
+// A pending workspace fails the sync instead, so ConductorOne keeps the metastore.
 func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, _ rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != accountResourceType.Id {
 		return nil, nil, nil
@@ -105,7 +106,7 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	metastores, rateLimit, err := m.client.ListMetastores(ctx)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
+		return nil, &rs.SyncOpResults{Annotations: annos}, refuseUnreadable("databricks-connector: failed to list metastores", err)
 	}
 
 	scope, err := scopedWorkspaces(ctx, m.client, m.workspaces, &annos)
@@ -123,9 +124,7 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		// A 404 here does not mean the metastore is gone. Skipping it would make ConductorOne delete it.
 		usable, inScope, err := scope.attached(ctx, m.client, metastore.MetastoreID, &annos)
 		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf(
-				"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
-				metastore.MetastoreID, err)
+			return nil, &rs.SyncOpResults{Annotations: annos}, assignmentListError(metastore.MetastoreID, err)
 		}
 		if len(usable) == 0 {
 			if inScope {
@@ -237,9 +236,7 @@ func (m *metastoreBuilder) entitlementOnLiveRoute(
 	}
 	usable, _, err := scope.attached(ctx, m.client, metastoreID, annos)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
-			metastoreID, err)
+		return nil, assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
 		return nil, status.Errorf(codes.FailedPrecondition,
