@@ -70,7 +70,8 @@ func metastoreResource(_ context.Context, metastore *databricks.Metastore, paren
 }
 
 // List emits each metastore with the workspace its permissions are read through.
-// A metastore with no usable workspace is left out: its grants cannot be read.
+// A metastore is left out only when no attached workspace is in scope or usable.
+// A pending workspace fails the sync instead, so ConductorOne keeps the metastore.
 func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, _ rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID.GetResourceType() != accountResourceType.Id {
 		return nil, nil, nil
@@ -80,7 +81,7 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 	metastores, rateLimit, err := m.client.ListMetastores(ctx)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
+		return nil, &rs.SyncOpResults{Annotations: annos}, refuseUnreadable("databricks-connector: failed to list metastores", err)
 	}
 
 	scoped, running, err := m.scopedWorkspaces(ctx, &annos)
@@ -157,10 +158,11 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	assignments, nextPageToken, rateLimit, err := m.client.ListPermissions(ctx, workspace, databricks.SecurableMetastore, metastoreID, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		// FailedPrecondition, not NotFound: the SDK reads NotFound as "no grants".
-		// Whether the metastore is gone is settled by the next List.
-		return nil, &rs.SyncOpResults{Annotations: annos}, uhttp.WrapErrors(codes.FailedPrecondition,
-			fmt.Sprintf("databricks-connector: failed to list permissions on metastore %s through workspace %s", metastoreID, workspace), err)
+		// Only a NotFound is FailedPrecondition. The SDK reads NotFound as "no
+		// grants", and whether the metastore is gone is settled by the next List.
+		// A throttle or a 5xx keeps the status the client returned, so the SDK retries it.
+		return nil, &rs.SyncOpResults{Annotations: annos}, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: failed to list permissions on metastore %s through workspace %s", metastoreID, workspace), err)
 	}
 
 	resolver := newPrincipalResolver(m.client, &annos)

@@ -259,20 +259,30 @@ func testMetastore(t *testing.T) *v2.Resource {
 
 // Which workspaces serve a metastore decides whether it syncs at all, so an
 // assignment list the connector cannot read is unknown, not absent. Skipping it
-// would drop the metastore and make ConductorOne remove its grants.
+// would drop the metastore and make ConductorOne remove its grants. Only the
+// NotFound has to be re-coded: the SDK runs the metastore List with
+// allowWarning, reads NotFound as "the account has no metastores" and lets the
+// sync succeed with none. A 401 or 403 already fails it.
 func TestMetastoreListFailsWhenAnAssignmentListCannotBeRead(t *testing.T) {
-	for _, code := range []int{http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized} {
+	for code, want := range map[int]codes.Code{
+		http.StatusNotFound:     codes.FailedPrecondition,
+		http.StatusForbidden:    codes.PermissionDenied,
+		http.StatusUnauthorized: codes.Unauthenticated,
+	} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			f := defaultFakeAccount()
 			f.assignments = map[string]any{"ms-a": code}
 			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
 
 			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
-			if err == nil {
-				t.Fatalf("List returned %d resources and no error, want the sync to fail", len(resources))
+			if status.Code(err) != want {
+				t.Fatalf("List = %v, want %s", err, want)
 			}
 			if !strings.Contains(err.Error(), "ms-a") {
 				t.Errorf("error %q does not name the metastore", err)
+			}
+			if len(resources) != 0 {
+				t.Errorf("listed %d metastores, want none", len(resources))
 			}
 		})
 	}
@@ -478,6 +488,35 @@ func TestMetastoreGrantsReadThroughTheRoutedWorkspace(t *testing.T) {
 	}
 	if len(f.memberLists) != 0 {
 		t.Errorf("workspace assignments listed %d times, want none: List already settled the route", len(f.memberLists))
+	}
+}
+
+// A NotFound must not look like an empty grant page, and a throttle must stay
+// retryable. Wrapping every permissions error as FailedPrecondition does both wrong.
+func TestMetastoreGrantsKeepThePermissionsStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		want codes.Code
+	}{
+		{name: "not found", code: http.StatusNotFound, want: codes.FailedPrecondition},
+		{name: "throttle", code: http.StatusTooManyRequests, want: codes.Unavailable},
+		{name: "unavailable", code: http.StatusServiceUnavailable, want: codes.Unavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := defaultFakeAccount()
+			f.permStatus = test.code
+			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
+
+			grants, _, err := m.Grants(context.Background(), testSyncedMetastore(t, "wsa"), rs.SyncOpAttrs{})
+			if status.Code(err) != test.want {
+				t.Fatalf("Grants = %v, want %s", err, test.want)
+			}
+			if len(grants) != 0 {
+				t.Errorf("grants = %v, want none", grantKeys(grants))
+			}
+		})
 	}
 }
 

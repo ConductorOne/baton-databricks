@@ -14,6 +14,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -27,8 +28,9 @@ const (
 	// holder a metastore admin for the workspace's Unity Catalog reads.
 	workspacePermissionAdmin = "ADMIN"
 
-	// Statuses the account API documents for a workspace. PROVISIONING,
-	// NOT_PROVISIONED and CANCELLING can still change; FAILED and BANNED cannot.
+	// Statuses the account API documents for a workspace. PROVISIONING and
+	// NOT_PROVISIONED can still become RUNNING. CANCELLING is a workspace being
+	// deleted: it will not become RUNNING. FAILED and BANNED cannot either.
 	workspaceStatusRunning        = "RUNNING"
 	workspaceStatusProvisioning   = "PROVISIONING"
 	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
@@ -155,6 +157,21 @@ func apiStatus(err error) int {
 	return 0
 }
 
+// refuseUnreadable keeps a NotFound from reading as an empty result: the SDK
+// skips a child List that answers NotFound, and ConductorOne then deletes what
+// that parent contained. Every other status, a throttle included, keeps the
+// code the client returned so the SDK can still back off and retry.
+func refuseUnreadable(msg string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if apiStatus(err) == http.StatusNotFound || status.Code(err) == codes.NotFound {
+		return uhttp.WrapErrors(codes.FailedPrecondition, msg, err)
+	}
+
+	return fmt.Errorf("%s: %w", msg, err)
+}
+
 // unityPrincipalScimID is the numeric SCIM id a privilege assignment carries in principal_id.
 func unityPrincipalScimID(principal *v2.ResourceId) (string, error) {
 	if principal.GetResourceType() != groupResourceType.Id {
@@ -194,7 +211,7 @@ func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotati
 	workspaces, rateLimit, err := m.client.ListWorkspaces(ctx)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		return nil, nil, refuseUnreadable("databricks-connector: failed to list workspaces", err)
 	}
 
 	scoped := make(map[string]databricks.Workspace, len(workspaces))
@@ -250,9 +267,11 @@ func (m *metastoreBuilder) routeMetastore(
 	ids, rateLimit, err := m.client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		return nil, false, fmt.Errorf(
-			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it: %w",
-			metastoreID, err)
+		// A 404 here is not an empty assignment list. NotFound on this List makes
+		// the SDK skip the metastore, and ConductorOne deletes it.
+		return nil, false, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it",
+			metastoreID), err)
 	}
 
 	pending := false
