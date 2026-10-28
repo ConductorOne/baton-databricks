@@ -395,8 +395,10 @@ func catalogThrough(
 	noteRateLimit(annos, rateLimit)
 	switch {
 	case err == nil:
-	case databricks.IsSecurableGone(err, errorCodeCatalogGone), deniesTrust(err):
+	case databricks.IsSecurableGone(err, errorCodeCatalogGone):
 		return nil, nil
+	case deniesTrust(err):
+		return nil, err
 	default:
 		return nil, catalogListingError(metastoreID, workspace, err)
 	}
@@ -578,7 +580,7 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 
 	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyWorkspace); workspace != "" {
 		served, err := catalogThrough(ctx, b.client, workspace, metastoreID, catalogName, annos)
-		if err != nil {
+		if err != nil && !deniesTrust(err) {
 			return nil, err
 		}
 		if served != nil {

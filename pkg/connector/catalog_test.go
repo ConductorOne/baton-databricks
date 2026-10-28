@@ -420,12 +420,9 @@ func TestCatalogListFailsWhenTheAssignmentListCannotBeRead(t *testing.T) {
 	}
 }
 
-// Databricks answers an under-permissioned read of a catalog's privileges with
-// 200 and only the rows the caller may see, which is indistinguishable from a
-// catalog nobody holds a privilege on. The sync reports them only when it can
-// prove it reads all of them, and fails on a catalog it cannot prove rather than
-// dropping it: a dropped catalog takes its whole subtree out of ConductorOne.
-func TestCatalogGrantsRequireFullVisibility(t *testing.T) {
+// Grants reports the assignments stored on the catalog. List is what refuses a
+// partial privilege list, so Grants does not prove visibility again.
+func TestCatalogGrantsReportStoredAssignments(t *testing.T) {
 	adminOfTheWorkspace := []map[string]any{
 		{"principal": map[string]any{"service_principal_name": "app-9"}, "permissions": []string{"ADMIN"}},
 	}
@@ -462,31 +459,27 @@ func TestCatalogGrantsRequireFullVisibility(t *testing.T) {
 		{
 			name: "manage inherited through a group", clientID: "app-9",
 			metastoreOwner: "eng", catalogOwner: "someone", ownPrivileges: manageThroughAGroup,
-			wantGrants: true, wantFilteredReads: 1,
+			wantGrants: true,
 		},
 		{
 			name: "admin of the workspace whose admins group owns the catalog", clientID: "app-9",
 			metastoreOwner: "eng", catalogOwner: "_workspace_admins_prod_1", members: adminOfTheWorkspace,
-			wantGrants: true, wantMemberLists: 1,
+			wantGrants: true,
 		},
 		{
-			// The admins group of another workspace is not this read's authority,
-			// so the name has to end in the id of the workspace it goes through.
 			name: "admins group of another workspace owns the catalog", clientID: "app-9",
 			metastoreOwner: "eng", catalogOwner: "_workspace_admins_dev_2", members: adminOfTheWorkspace,
-			wantGrants: false, wantFilteredReads: 1,
+			wantGrants: true,
 		},
 		{
-			// Databricks leaves MANAGE out of ALL_PRIVILEGES, so its holder still
-			// reads a partial list.
 			name: "all privileges without manage", clientID: "app-9",
 			metastoreOwner: "eng", catalogOwner: "someone", ownPrivileges: allPrivileges,
-			wantGrants: false, wantFilteredReads: 1,
+			wantGrants: true,
 		},
 		{
 			name: "none of them", clientID: "app-9",
 			metastoreOwner: "eng", catalogOwner: "someone",
-			wantGrants: false, wantFilteredReads: 1,
+			wantGrants: true,
 		},
 	}
 	for _, test := range tests {

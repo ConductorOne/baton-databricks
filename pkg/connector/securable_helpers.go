@@ -142,11 +142,9 @@ func syncSecurableGrants(
 
 	annos := annotations.Annotations{}
 	pageToken := attr.PageToken.Token
-	// A metastore's route was already chosen as a workspace the connector can fully
-	// read. Other levels still have to prove it here, once per securable: the proof
-	// is an uncached read, and a transient refusal on a later page would otherwise
-	// reverse a verdict the earlier pages were already emitted under.
-	if level.securableType != databricks.SecurableMetastore && pageToken == "" {
+	// List already refused a catalog or a metastore whose privilege list is
+	// partial, so Grants does not prove it again.
+	if pageToken == "" && level.securableType != databricks.SecurableMetastore && level.securableType != databricks.SecurableCatalog {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}

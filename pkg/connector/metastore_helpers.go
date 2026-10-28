@@ -461,9 +461,14 @@ func workspaceForCatalog(
 	usable []databricks.Workspace,
 	annos *annotations.Annotations,
 ) (*databricks.Workspace, *databricks.Catalog, error) {
+	var lastDeny error
 	for i := range usable {
 		catalog, err := catalogThrough(ctx, client, usable[i].DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
+			if deniesTrust(err) {
+				lastDeny = err
+				continue
+			}
 			return nil, nil, err
 		}
 		if catalog != nil {
@@ -471,9 +476,12 @@ func workspaceForCatalog(
 		}
 	}
 
-	return nil, nil, status.Errorf(codes.FailedPrecondition,
-		"databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",
+	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",
 		catalogName, metastoreID)
+	if lastDeny != nil {
+		msg = fmt.Sprintf("%s: %s", msg, lastDeny.Error())
+	}
+	return nil, nil, status.Errorf(codes.FailedPrecondition, "%s", msg)
 }
 
 // deniesTrust is an answer that withholds what the connector asked for, as
