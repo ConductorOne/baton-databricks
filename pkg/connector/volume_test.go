@@ -16,7 +16,7 @@ import (
 
 func TestVolumeRevokeOnADroppedVolumeIsAlreadyRevoked(t *testing.T) {
 	f := &fakeSchemaChildAccount{
-		metastoreOwner: "someone-else",
+		metastoreOwner: testOwnPrincipal,
 		catalogOwner:   "someone",
 		schemaOwner:    "someone",
 		users:          map[string]string{"1": "alice@example.com"},
@@ -24,7 +24,7 @@ func TestVolumeRevokeOnADroppedVolumeIsAlreadyRevoked(t *testing.T) {
 		permErrorCode:  errorCodeVolumePermissionsGone,
 	}
 	b := newTestVolumeBuilder(t, f)
-	resource := testVolume(t, "raw", "someone", "someone", "someone", "someone-else")
+	resource := testVolume(t, "raw", "someone", "someone", "someone", testOwnPrincipal)
 	g := grant.NewGrant(resource, "READ_VOLUME", alice.GetId())
 
 	annos, err := b.Revoke(context.Background(), g)

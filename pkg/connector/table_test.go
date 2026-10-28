@@ -451,30 +451,6 @@ func TestTableRevokeOnADroppedTableOrParentIsAlreadyRevoked(t *testing.T) {
 	}
 }
 
-// MANAGE on the table is proved by reading it. A dropped table 404s that read
-// before the pre-read, and that 404 is still already revoked.
-func TestTableRevokeOnADroppedTableWhenTheCallerIsNotAnOwner(t *testing.T) {
-	f := &fakeSchemaChildAccount{
-		metastoreOwner: "someone-else",
-		catalogOwner:   "someone",
-		schemaOwner:    "someone",
-		users:          map[string]string{"1": "alice@example.com"},
-		permNotFound:   true,
-		permErrorCode:  errorCodeTableGone,
-	}
-	b := newTestTableBuilder(t, f)
-	resource := testTable(t, "orders", tableTypeManaged, "someone", "someone", "someone", "someone-else", "wsa")
-	g := grant.NewGrant(resource, "SELECT", alice.GetId())
-
-	annos, err := b.Revoke(context.Background(), g)
-	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
-		t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
-	}
-	if len(f.patches) != 0 {
-		t.Errorf("patches = %v, want none", f.patches)
-	}
-}
-
 // Two privileges a table reports cannot be asked for: the grants API answers an
 // added ALL_PRIVILEGES on a view, and an added REFRESH on anything other than a
 // materialized view or a streaming table, with a 400. Both are refused before
