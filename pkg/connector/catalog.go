@@ -37,8 +37,8 @@ const (
 	errorCodeCatalogGone = "CATALOG_DOES_NOT_EXIST"
 
 	// systemCatalog is the built-in catalog Databricks puts in every metastore.
-	// samples is the other one. Both are SYSTEM_CATALOG, owned by System user,
-	// and Databricks refuses a MANAGE grant on them.
+	// samples is the other one. Both are SYSTEM_CATALOG. They are left out when
+	// their privilege list cannot be proved complete.
 	systemCatalog = "system"
 
 	// workspaceAdminsGroupPrefix starts the name of the system group Databricks
@@ -335,9 +335,9 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 		return err
 	}
 
-	// The bag pops the last state first, so push the later workspaces first.
-	// A catalog listed by more than one workspace is then kept from the
-	// earliest one in assignment order.
+	// Later workspaces are pushed first, so the bag processes the earliest one
+	// first. The store upserts on (external_id, sync_id), so the last route
+	// processed is the copy that remains.
 	for i := len(usable) - 1; i >= 0; i-- {
 		workspace := usable[i]
 		encoded, err := json.Marshal(catalogRoute{
@@ -399,8 +399,10 @@ func catalogThrough(
 	noteRateLimit(annos, rateLimit)
 	switch {
 	case err == nil:
-	case databricks.IsSecurableGone(err, errorCodeCatalogGone), deniesTrust(err):
+	case databricks.IsSecurableGone(err, errorCodeCatalogGone):
 		return nil, nil
+	case deniesTrust(err):
+		return nil, err
 	default:
 		return nil, catalogListingError(metastoreID, workspace, err)
 	}
@@ -506,10 +508,7 @@ func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 
 func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
 	annos := annotations.Annotations{}
-	// A catalog no workspace lists is not a catalog proven gone, so this does not
-	// answer GrantAlreadyRevoked: the privilege would stay in Databricks while
-	// ConductorOne recorded it as revoked. A failed revoke is retried, and a
-	// catalog that really was deleted leaves C1 through the next sync.
+	// A catalog no workspace lists isn't proven gone, so this doesn't return GrantAlreadyRevoked.
 	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
 	if err != nil {
 		return annos, err
@@ -521,9 +520,9 @@ func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotat
 	return revokeSecurable(ctx, b.client, b.clientID, catalogLevel, grantCopy)
 }
 
-// entitlementOnLiveRoute copies the entitlement with the workspace resolved from
-// the catalog id. A provisioning call carries ids, not the profile List wrote,
-// and that profile can name a workspace that no longer lists the catalog.
+// entitlementOnLiveRoute returns the entitlement addressed at a workspace.
+// A workspace on the profile is kept when it still serves the catalog.
+// Otherwise the route is resolved live.
 func (b *catalogBuilder) entitlementOnLiveRoute(
 	ctx context.Context,
 	entitlement *v2.Entitlement,
@@ -533,6 +532,16 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 	metastoreID, catalogName, err := parseCatalogID(resource.GetId().GetResource())
 	if err != nil {
 		return nil, err
+	}
+
+	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyWorkspace); workspace != "" {
+		served, err := catalogThrough(ctx, b.client, workspace, metastoreID, catalogName, annos)
+		if err != nil && !deniesTrust(err) {
+			return nil, err
+		}
+		if served != nil {
+			return entitlement, nil
+		}
 	}
 
 	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
