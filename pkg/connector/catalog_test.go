@@ -265,7 +265,8 @@ func listAllCatalogs(t *testing.T, b *catalogBuilder) ([]*v2.Resource, error) {
 
 // Catalogs are read through every running in-scope workspace. A catalog bound
 // to only one of them is absent from the others, so listing a single workspace
-// would drop it. Names repeat across workspaces and are emitted once.
+// would drop it. A catalog both of them list is emitted twice, once per route,
+// and the store collapses the copies on (external_id, sync_id).
 func TestCatalogListReadsEveryWorkspace(t *testing.T) {
 	shared := manyCatalogs("shared", 120)
 	f := &fakeCatalogAccount{
@@ -319,10 +320,19 @@ func TestCatalogListReadsEveryWorkspace(t *testing.T) {
 			t.Errorf("profile[%s] = %q, want %q", key, got, want)
 		}
 	}
-	// Grants reads the workspace the route picked.
+	// Grants reads the workspace the route picked. A catalog listed by both
+	// workspaces keeps the last route to emit it, since that is the copy the
+	// store's upsert leaves behind. Either one serves the read: a route only
+	// emits a catalog it lists and can prove it reads every privilege on.
 	workspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
-	if workspace != "wsa" {
-		t.Errorf("profile[%s] = %q, want wsa", profileKeyWorkspace, workspace)
+	if workspace != "wsb" {
+		t.Errorf("profile[%s] = %q, want wsb", profileKeyWorkspace, workspace)
+	}
+	if onlyB, ok := unique["ms-1::only_b_000"]; ok {
+		workspace, _ := rs.GetProfileStringValue(rs.GetProfile(onlyB), profileKeyWorkspace)
+		if workspace != "wsb" {
+			t.Errorf("profile[%s] = %q, want wsb for a catalog only wsb lists", profileKeyWorkspace, workspace)
+		}
 	}
 }
 
@@ -354,8 +364,10 @@ func TestCatalogListFailsOnACatalogItCannotFullyRead(t *testing.T) {
 }
 
 // system and samples are built in, owned by System user, and Databricks refuses
-// a MANAGE grant on them. Leaving them out deletes nothing this connector has
-// synced. A catalog beside them that the caller owns still syncs.
+// a MANAGE grant on them. A connector that does not own the metastore cannot
+// prove their privilege list, so they are left out. A catalog beside them that
+// the caller owns still syncs. When the connector does own the metastore, the
+// same catalogs are synced, because ownership makes the read complete.
 func TestCatalogListSkipsBuiltInCatalogs(t *testing.T) {
 	f := &fakeCatalogAccount{
 		attached: []int{1},
@@ -382,19 +394,27 @@ func TestCatalogListSkipsBuiltInCatalogs(t *testing.T) {
 
 // Which workspaces serve the metastore decides which catalogs are in scope, so an
 // assignment list the connector cannot read is unknown, not empty. Listing no
-// catalogs would make ConductorOne delete the metastore's whole subtree.
+// catalogs would make ConductorOne delete the metastore's whole subtree. Only the
+// NotFound has to be re-coded: the SDK reads that one as "this parent has no
+// children" and skips the List as a warning. A 403 already fails the sync.
 func TestCatalogListFailsWhenTheAssignmentListCannotBeRead(t *testing.T) {
-	for _, code := range []int{http.StatusNotFound, http.StatusForbidden} {
+	for code, want := range map[int]codes.Code{
+		http.StatusNotFound:  codes.FailedPrecondition,
+		http.StatusForbidden: codes.PermissionDenied,
+	} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			f := &fakeCatalogAccount{attached: []int{1}, attachedStatus: code}
 			b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
 
 			resources, err := listAllCatalogs(t, b)
-			if err == nil {
-				t.Fatalf("List returned %d resources and no error, want the sync to fail", len(resources))
+			if status.Code(err) != want {
+				t.Fatalf("List = %v, want %s", err, want)
 			}
 			if !strings.Contains(err.Error(), "ms-1") {
 				t.Errorf("error %q does not name the metastore", err)
+			}
+			if len(resources) != 0 {
+				t.Errorf("listed %d catalogs, want none", len(resources))
 			}
 		})
 	}

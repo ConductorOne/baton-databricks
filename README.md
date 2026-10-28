@@ -241,9 +241,11 @@ it. The connector never guesses when the answer is unknown:
 | Attached workspace | Result |
 |--------------------|--------|
 | `RUNNING` and in scope | the metastore syncs through it |
-| `PROVISIONING`, `NOT_PROVISIONED`, `CANCELLING` | still changing, so the metastore is kept and the sync fails with `FailedPrecondition` until a workspace is `RUNNING` |
+| `PROVISIONING`, `NOT_PROVISIONED` | still changing, so the metastore is kept and the sync fails with `FailedPrecondition` until a workspace is `RUNNING` |
+| `CANCELLING` | the workspace is being deleted and will not become `RUNNING`, so the metastore is kept and the sync fails until that workspace is gone or another attached one is `RUNNING` |
 | `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
-| assignment list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming the assignment list |
+| metastore workspace list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming that list |
+| workspace permission list unreadable (401, 403, 404) | treated as not Admin on that workspace; the sync then fails with the usual missing-standing error, which does not name this list |
 
 A metastore is left out of the sync only when the answer is known: every
 attached workspace is out of scope or unusable. Leaving it out is what makes

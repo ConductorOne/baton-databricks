@@ -159,7 +159,11 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		_, ok := matchConfiguredWorkspace(configuredWorkspaceSet(d.workspaces), w.DeploymentName, w.Name, strconv.Itoa(w.ID))
 		return ok
 	}) {
-		return annos, fmt.Errorf("databricks-connector: none of the configured workspaces (%s) exists on the account", strings.Join(d.workspaces, ", "))
+		// ListWorkspaces already dropped the excluded ones, so a name that is
+		// only excluded would otherwise be reported as absent from the account.
+		return annos, fmt.Errorf(
+			"databricks-connector: none of the configured workspaces (%s) is on the account and not excluded by databricks-exclude-workspaces",
+			strings.Join(d.workspaces, ", "))
 	}
 
 	l := ctxzap.Extract(ctx)
