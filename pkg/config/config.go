@@ -26,13 +26,13 @@ var (
 	)
 	DatabricksTokenField = field.StringField(
 		"databricks-token",
-		field.WithDescription("An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token."),
+		field.WithDescription("An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires."),
 		field.WithIsSecret(true),
 		field.WithDisplayName("Workload Identity Token"),
 	)
 	DatabricksTokenFileField = field.StringField(
 		"databricks-token-file",
-		field.WithDescription("Path to a file holding an externally issued JWT identifying the workload. Read again on every token refresh."),
+		field.WithDescription("Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh."),
 		field.WithDisplayName("Workload Identity Token File"),
 	)
 	WorkspacesField = field.StringSliceField(
