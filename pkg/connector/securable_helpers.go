@@ -391,6 +391,12 @@ func revokeSecurable(
 	annos := annotations.Annotations{}
 	change, err := resolveChange(ctx, client, clientID, level, revoked.GetPrincipal().GetId(), revoked.GetEntitlement(), false, &annos)
 	if err != nil {
+		if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
+
 		return annos, err
 	}
 

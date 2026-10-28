@@ -476,6 +476,13 @@ func holdsPrivilegeOn(
 		})
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
+		gone := []string{errorCodeTableGone, errorCodeSchemaGone, errorCodeCatalogGone}
+		if securableType == databricks.SecurableVolume {
+			gone = append(gone, errorCodeVolumeGone, errorCodeVolumePermissionsGone)
+		}
+		if databricks.IsSecurableGone(err, gone...) {
+			return false, err
+		}
 		if !deniesTrust(err) {
 			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on %s %s: %w", securableType, fullName, err)
 		}

@@ -14,6 +14,28 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
+func TestVolumeRevokeOnADroppedVolumeIsAlreadyRevoked(t *testing.T) {
+	f := &fakeSchemaChildAccount{
+		metastoreOwner: "someone-else",
+		catalogOwner:   "someone",
+		schemaOwner:    "someone",
+		users:          map[string]string{"1": "alice@example.com"},
+		permNotFound:   true,
+		permErrorCode:  errorCodeVolumePermissionsGone,
+	}
+	b := newTestVolumeBuilder(t, f)
+	resource := testVolume(t, "raw", "someone", "someone", "someone", "someone-else")
+	g := grant.NewGrant(resource, "READ_VOLUME", alice.GetId())
+
+	annos, err := b.Revoke(context.Background(), g)
+	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+	if len(f.patches) != 0 {
+		t.Errorf("patches = %v, want none", f.patches)
+	}
+}
+
 func newTestVolumeBuilder(t *testing.T, f *fakeSchemaChildAccount) *volumeBuilder {
 	return newTestVolumeBuilderAs(t, f, testOwnPrincipal)
 }

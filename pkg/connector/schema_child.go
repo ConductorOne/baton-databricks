@@ -42,11 +42,8 @@ type schemaChildRoute struct {
 // listSchemaChildren pages one level that hangs from a schema — a table or a
 // volume. pushSchemaChildRoute re-runs the schema syncer's completeness proof
 // on the first page of every schema, once for tables and again for volumes.
-// Those calls are GETs. The HTTP client caches them for BATON_HTTP_CACHE_TTL,
-// which is one hour when the variable is unset, so a repeated proof usually
-// hits the cache. A TTL of 0 makes the cost grow with the number of schemas.
-// The owners the proof learns are written onto each resource, so Grants does
-// not repeat it.
+// The privilege reads in that proof bypass the HTTP cache. The owners the
+// proof learns are written onto each resource, so Grants does not repeat it.
 //
 // fetch reads one page through the routed workspace and turns it into resources.
 func listSchemaChildren(
@@ -128,8 +125,9 @@ const childListRemedy = "the connector's service principal must own the metastor
 
 // pushSchemaChildRoute records a workspace that can list every table or volume
 // of the schema. It walks the running in-scope workspaces until one lists the
-// catalog and the child listing is complete. An empty result is an error: it
-// would make ConductorOne delete the tables and volumes.
+// catalog and the child listing is complete. A denial from one workspace is
+// tried on the next. Any other error stops the walk. An empty result is an
+// error: it would make ConductorOne delete the tables and volumes.
 func pushSchemaChildRoute(
 	ctx context.Context,
 	client *databricks.Client,
@@ -166,10 +164,15 @@ func pushSchemaChildRoute(
 
 	fullName := catalogName + schemaNameSeparator + schemaName
 	var sawCatalog bool
+	var lastDeny error
 	for i := range usable {
 		workspace := usable[i]
 		catalog, err := catalogThrough(ctx, client, workspace.DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
+			if deniesTrust(err) {
+				lastDeny = err
+				continue
+			}
 			return err
 		}
 		if catalog == nil {
@@ -199,6 +202,10 @@ func pushSchemaChildRoute(
 
 		schema, err := schemaThrough(ctx, client, route.Workspace, catalogName, schemaName, annos)
 		if err != nil {
+			if deniesTrust(err) {
+				lastDeny = err
+				continue
+			}
 			return err
 		}
 		if schemasComplete && schema == nil {
@@ -235,8 +242,11 @@ func pushSchemaChildRoute(
 		return nil
 	}
 	if !sawCatalog {
-		return status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+		msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+		if lastDeny != nil {
+			msg = fmt.Sprintf("%s: %s", msg, lastDeny.Error())
+		}
+		return status.Errorf(codes.FailedPrecondition, "%s", msg)
 	}
 
 	return status.Errorf(codes.PermissionDenied,
