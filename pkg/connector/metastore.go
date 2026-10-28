@@ -64,7 +64,6 @@ func metastoreResource(_ context.Context, metastore *databricks.Metastore, paren
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
 		rs.WithAnnotation(
-			// Without this annotation the catalog syncer's List is never invoked.
 			&v2.ChildResourceType{ResourceTypeId: catalogResourceType.Id},
 			&v2.RawId{Id: metastore.MetastoreID},
 		),
@@ -208,8 +207,9 @@ func (m *metastoreBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annot
 	return revokeSecurable(ctx, m.client, m.clientID, metastoreLevel, grantCopy)
 }
 
-// entitlementOnLiveRoute copies the entitlement with the workspace resolved from
-// the metastore id. A provisioning call carries ids, not the profile List wrote.
+// entitlementOnLiveRoute returns the entitlement addressed at a workspace.
+// A workspace on the profile is the one List proved. It is kept when that
+// workspace is still running and attached. Otherwise the route is resolved live.
 func (m *metastoreBuilder) entitlementOnLiveRoute(
 	ctx context.Context,
 	entitlement *v2.Entitlement,
@@ -217,6 +217,17 @@ func (m *metastoreBuilder) entitlementOnLiveRoute(
 ) (*v2.Entitlement, error) {
 	resource := entitlement.GetResource()
 	metastoreID := resource.GetId().GetResource()
+	profile := rs.GetProfile(resource)
+	profileWorkspace, _ := rs.GetProfileStringValue(profile, profileKeyWorkspace)
+	if profileWorkspace != "" {
+		kept, err := m.profileWorkspaceStillServes(ctx, metastoreID, profileWorkspace, annos)
+		if err != nil {
+			return nil, err
+		}
+		if kept {
+			return entitlement, nil
+		}
+	}
 	metastores, rateLimit, err := m.client.ListMetastores(ctx)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
@@ -258,4 +269,29 @@ func (m *metastoreBuilder) entitlementOnLiveRoute(
 	copyEntitlement.Resource = routed
 
 	return copyEntitlement, nil
+}
+
+// profileWorkspaceStillServes reports whether workspace is still a running
+// workspace attached to the metastore. A profile written by an earlier sync
+// can name one that no longer is.
+func (m *metastoreBuilder) profileWorkspaceStillServes(
+	ctx context.Context,
+	metastoreID, workspace string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	scope, err := scopedWorkspaces(ctx, m.client, m.workspaces, annos)
+	if err != nil {
+		return false, err
+	}
+	usable, _, err := scope.attached(ctx, m.client, metastoreID, annos)
+	if err != nil {
+		return false, assignmentListError(metastoreID, err)
+	}
+	for i := range usable {
+		if usable[i].DeploymentName == workspace {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

@@ -293,10 +293,15 @@ func (b *schemaBuilder) pushRoute(
 	}
 
 	var sawCatalog bool
+	var lastDeny error
 	for i := range usable {
 		workspace := usable[i]
 		catalog, err := catalogThrough(ctx, b.client, workspace.DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
+			if deniesTrust(err) {
+				lastDeny = err
+				continue
+			}
 			return err
 		}
 		if catalog == nil {
@@ -335,8 +340,11 @@ func (b *schemaBuilder) pushRoute(
 		return nil
 	}
 	if !sawCatalog {
-		return status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+		msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+		if lastDeny != nil {
+			msg = fmt.Sprintf("%s: %s", msg, lastDeny.Error())
+		}
+		return status.Errorf(codes.FailedPrecondition, "%s", msg)
 	}
 
 	return status.Errorf(codes.PermissionDenied,

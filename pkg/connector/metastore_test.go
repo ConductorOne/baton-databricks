@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/grpc/codes"
@@ -71,10 +72,11 @@ type fakeAccount struct {
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
 
-	permHosts   []string
-	patches     []map[string]any
-	scimGets    map[string]int
-	memberLists []string
+	permHosts      []string
+	patches        []map[string]any
+	scimGets       map[string]int
+	memberLists    []string
+	metastoreLists int
 }
 
 func defaultFakeAccount() *fakeAccount {
@@ -111,6 +113,7 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 		encode := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 		switch {
 		case strings.HasSuffix(path, "/metastores"):
+			f.metastoreLists++
 			encode(map[string]any{"metastores": f.metastores})
 		case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
 			parts := strings.Split(path, "/")
@@ -252,6 +255,56 @@ func testSyncedMetastore(t *testing.T, workspace string) *v2.Resource {
 	}
 
 	return r
+}
+
+// A workspace List already proved is kept, and the account metastore list is
+// not read again. A workspace the account no longer attaches falls through to
+// the live route.
+func TestMetastoreGrantKeepsAProfileWorkspaceThatStillServes(t *testing.T) {
+	f := defaultFakeAccount()
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "eng")
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "eng",
+	}, testAccountResourceID, "wsa", "1", "prod")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	if f.metastoreLists != 0 {
+		t.Errorf("listed metastores %d times, want none when the profile workspace still serves", f.metastoreLists)
+	}
+	if routed != entitlement {
+		t.Error("a profile workspace that still serves was replaced")
+	}
+}
+
+func TestMetastoreGrantReresolvesAProfileWorkspaceThatIsGone(t *testing.T) {
+	f := defaultFakeAccount()
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "eng")
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "eng",
+	}, testAccountResourceID, "gone", "9", "old")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	if f.metastoreLists == 0 {
+		t.Error("a profile workspace that is not attached did not resolve the route live")
+	}
+	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyWorkspace)
+	if workspace != "wsa" {
+		t.Errorf("workspace = %q, want wsa", workspace)
+	}
 }
 
 // testMetastore is the resource a provisioning call carries: an id, no profile.
