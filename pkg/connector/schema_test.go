@@ -41,6 +41,8 @@ type fakeSchemaAccount struct {
 	ownPrivileges map[string][]map[string]any
 	// permStatus fails the permissions endpoint on that deployment name.
 	permStatus map[string]int
+	// permErrorCode is the vendor error_code that rides along with permStatus.
+	permErrorCode string
 	// catalogStatus fails the catalog read on that deployment name.
 	catalogStatus map[string]int
 	// workspaceMembers maps a workspace id to its permission assignments, or to
@@ -163,7 +165,11 @@ func (f *fakeSchemaAccount) servePermissions(w http.ResponseWriter, r *http.Requ
 	workspace := r.Header.Get("X-Test-Workspace")
 	f.permHosts = append(f.permHosts, workspace)
 	if code, ok := f.permStatus[workspace]; ok {
-		http.Error(w, `{"message":"refused"}`, code)
+		body := `{"message":"refused"}`
+		if f.permErrorCode != "" {
+			body = fmt.Sprintf(`{"error_code":%q,"message":"refused"}`, f.permErrorCode)
+		}
+		http.Error(w, body, code)
 
 		return
 	}
@@ -274,8 +280,8 @@ func listAllSchemas(t *testing.T, b *schemaBuilder) ([]*v2.Resource, error) {
 // Databricks answers a caller without catalog-wide visibility with only the
 // schemas it owns or can use, at 200, which is indistinguishable from a catalog
 // that holds just those. A short list read as the whole one makes ConductorOne
-// delete the schemas it did not see and every grant under them, so that catalog
-// is left out of the sync.
+// delete the schemas it did not see and every grant under them, so the sync
+// fails with PermissionDenied and keeps them.
 func TestSchemaListRequiresACompleteListing(t *testing.T) {
 	adminOfTheWorkspace := []map[string]any{
 		{"principal": map[string]any{"service_principal_name": "app-9"}, "permissions": []string{"ADMIN"}},
@@ -607,5 +613,59 @@ func TestSchemaGrantAndRevokeAreIdempotent(t *testing.T) {
 	annos, err = b.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+}
+
+// The first workspace can see the catalog and still be unable to list every
+// schema. The walk continues, and a later workspace that can list them is the
+// one the schemas are read through.
+func TestSchemaListContinuesWhenTheFirstWorkspaceCannotListCompletely(t *testing.T) {
+	f := &fakeSchemaAccount{
+		second:         true,
+		metastoreOwner: "eng",
+		catalogOwner:   "_workspace_admins_other_2",
+		workspaceMembers: map[string]any{"2": []map[string]any{{
+			"principal":   map[string]any{"service_principal_name": "app-9"},
+			"permissions": []string{"ADMIN"},
+		}}},
+		schemas: []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newTestSchemaBuilderAs(t, f, "app-9")
+
+	resources, err := listAllSchemas(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("listed %d schemas, want 1 through the second workspace", len(resources))
+	}
+	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace); workspace != "wsb" {
+		t.Errorf("profile[%s] = %q, want wsb", profileKeyWorkspace, workspace)
+	}
+}
+
+// A dropped schema, or a dropped parent catalog, leaves nothing to revoke. Only
+// the error_code proves it, and without it on schemaLevel the revoke task fails
+// and the grant is never marked revoked.
+func TestSchemaRevokeOnADroppedSchemaIsAlreadyRevoked(t *testing.T) {
+	for _, errorCode := range []string{errorCodeSchemaGone, errorCodeCatalogGone} {
+		t.Run(errorCode, func(t *testing.T) {
+			f := &fakeSchemaAccount{
+				catalogOwner:  "someone",
+				users:         map[string]string{"1": "alice@example.com"},
+				permStatus:    map[string]int{"wsa": http.StatusNotFound},
+				permErrorCode: errorCode,
+			}
+			b := newTestSchemaBuilder(t, f)
+			g := grant.NewGrant(testSchema(t, "sales", "someone", "someone", testOwnPrincipal, "wsa"), "SELECT", alice.GetId())
+
+			annos, err := b.Revoke(context.Background(), g)
+			if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+				t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
 	}
 }

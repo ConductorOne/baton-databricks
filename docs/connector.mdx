@@ -199,7 +199,7 @@ Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced.
 </Steps>
 
 <Warning>
-Without this, the sync fails naming that catalog. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and reporting that short list would make ConductorOne delete the grants it cannot read. Failing keeps what ConductorOne already has. The built-in `system` and `samples` catalogs are the exception: they are left out instead, because the connector never synced them and Databricks refuses a `MANAGE` grant on them.
+Without this, the sync fails naming that catalog. Databricks would otherwise return HTTP 200 with only the privileges the caller can see, and reporting that short list would make ConductorOne delete the grants it cannot read. Failing keeps what ConductorOne already has. The built-in `system` and `samples` catalogs are left out when the service principal does not own the metastore and cannot prove it sees every privilege on them. Databricks refuses a `MANAGE` grant on both, and both are owned by `System user`. While the service principal owns the metastore, both catalogs are synced. Moving off that ownership later drops them, and ConductorOne removes them and everything under them.
 
 The connector asks every running workspace in scope, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not, and ConductorOne removes it with everything under it.
 </Warning>
@@ -211,7 +211,7 @@ Skip this section if you are not syncing schemas, or if the service principal ow
 Workspace **Admin** does not list every schema, except when the catalog is owned by the workspace admins group (`_workspace_admins_<workspace>_<id>`) and the service principal is a direct Admin of that workspace. On any other catalog the service principal does not own, Databricks returns only the schemas it owns or can use, with HTTP 200. To list every schema, the service principal must own the metastore, own the catalog, be that direct Admin, or hold **MANAGE**, **USE SCHEMA**, or **ALL PRIVILEGES** on the catalog.
 
 <Warning>
-The built-in `system` catalog is left out of the sync when the service principal cannot list every schema in it. For every other catalog, the sync fails instead of continuing. Databricks would otherwise return a short list and ConductorOne would delete the schemas it did not see.
+A catalog whose schemas cannot all be listed fails the sync. `system` and `samples` are not a special case of that listing: the catalog sync leaves them out, when their privilege list cannot be proven complete, before their schemas are read.
 </Warning>
 
 Listing every table or volume needs more than **USE SCHEMA** or **MANAGE**. The service principal must own the metastore, the catalog, or the schema, be a direct Admin when the workspace admins group owns the catalog, or hold **ALL PRIVILEGES** on the catalog. Otherwise the sync fails.

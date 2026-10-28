@@ -82,8 +82,8 @@ var schemaLevel = securableLevel{
 	trustRemedy:     schemaTrustRemedy,
 	permissionsName: schemaPermissionsName,
 	trusts:          schemaGrantsAreTrustworthy,
-	// Dropping the catalog drops its schemas, so a revoke on a schema can meet
-	// either code and both mean the schema is gone.
+	// SCHEMA_DOES_NOT_EXIST is the schema itself. CATALOG_DOES_NOT_EXIST is the
+	// parent: dropping the catalog makes the schema read 404 with that code.
 	goneErrorCodes: []string{errorCodeSchemaGone, errorCodeCatalogGone},
 }
 
@@ -265,9 +265,10 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 // pushRoute records a workspace that can list every schema of the catalog. It
 // walks the running in-scope workspaces until one both lists the catalog and
 // can read every schema. An empty stack means no workspace this sync can use
-// serves the metastore. A catalog none of them list fails the sync: returning
-// no schemas would make ConductorOne delete them. The built-in system catalog
-// is the exception, because this connector has never listed it completely.
+// serves the metastore. A catalog none of them can list completely fails the
+// sync: returning no schemas would make ConductorOne delete them. system and
+// samples are not special here. The catalog sync leaves them out, when it
+// leaves them out, before this List runs.
 func (b *schemaBuilder) pushRoute(
 	ctx context.Context,
 	metastoreID, catalogName string,
@@ -342,15 +343,6 @@ func (b *schemaBuilder) pushRoute(
 	if !sawCatalog {
 		return status.Errorf(codes.FailedPrecondition,
 			"databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
-	}
-	// system is built in. A workspace admin sees 2 of its schemas out of 15, and
-	// this connector has never synced the rest, so leaving it out deletes nothing.
-	// Any other catalog was listed in full before: a short list would delete the
-	// schemas ConductorOne can no longer see, so the sync stops and keeps them.
-	if catalogName == "system" {
-		ctxzap.Extract(ctx).Debug("databricks-connector: skipping schemas of the system catalog, which the connector cannot fully list")
-
-		return nil
 	}
 
 	return status.Errorf(codes.PermissionDenied,
