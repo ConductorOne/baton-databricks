@@ -270,11 +270,14 @@ read-only: granting or revoking it fails with an `InvalidArgument` error.
 The service principal must own the metastore, or be assigned **Admin** directly
 on at least one running workspace attached to it. Admin inherited only through a
 group is not enough. The connector reads a metastore only through a workspace
-that passes that check. Listing every schema, table, or volume also takes
-ownership of the catalog, or `MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that
-catalog. Databricks answers an under-permissioned read with HTTP 200 and only
-the rows the caller may see. The connector refuses that read, so the sync fails
-and ConductorOne keeps the grants it already has.
+that passes that check. Listing every schema takes ownership of the catalog, or
+`MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that catalog. Listing every table
+or volume needs more: ownership of the metastore, the catalog, or the schema,
+direct Admin when the workspace admins group owns the catalog, or
+`ALL_PRIVILEGES` on the catalog. `MANAGE` and `USE_SCHEMA` are not enough for
+tables or volumes. Databricks answers an under-permissioned read with HTTP 200
+and only the rows the caller may see. The connector refuses that read, so the
+sync fails and ConductorOne keeps the grants it already has.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`

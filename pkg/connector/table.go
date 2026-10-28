@@ -87,7 +87,9 @@ var viewPrivileges = []string{
 // with only it, not the SELECT and REFRESH it implies.
 var materializedViewPrivileges = append(slices.Clone(viewPrivileges), privilegeRefresh)
 
-// A streaming table takes REFRESH and MODIFY, not the table DML trio.
+// A streaming table takes SELECT and REFRESH. MODIFY is reported when a
+// principal already holds it and is not offered: the streaming-tables reference
+// lists SELECT and REFRESH only, and a grant of MODIFY has not been seen to succeed.
 var streamingTablePrivileges = []string{
 	privilegeAllPrivileges,
 	"APPLY_TAG",

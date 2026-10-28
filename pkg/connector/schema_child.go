@@ -40,12 +40,13 @@ type schemaChildRoute struct {
 }
 
 // listSchemaChildren pages one level that hangs from a schema — a table or a
-// volume — through one workspace that is proven to see every schema in the
-// parent catalog. Databricks answers a caller without catalog-wide visibility
-// with only the objects it owns or can use, at 200, so the listing has to be
-// proven complete before it is read as the whole one. Catalog-wide visibility
-// is what settles it at both levels, which is why the proof the schema syncer
-// already makes is reused here rather than a second probe per schema.
+// volume. pushSchemaChildRoute re-runs the schema syncer's completeness proof
+// on the first page of every schema, once for tables and again for volumes.
+// Those calls are GETs. The HTTP client caches them for BATON_HTTP_CACHE_TTL,
+// which is one hour when the variable is unset, so a repeated proof usually
+// hits the cache. A TTL of 0 makes the cost grow with the number of schemas.
+// The owners the proof learns are written onto each resource, so Grants does
+// not repeat it.
 //
 // fetch reads one page through the routed workspace and turns it into resources.
 func listSchemaChildren(
@@ -275,7 +276,7 @@ func schemaChildListingError(noun, schemaFullName, workspace string, err error) 
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
 		return uhttp.WrapErrors(codes.FailedPrecondition,
 			fmt.Sprintf("databricks-connector: the %ss of schema %s cannot be listed through workspace %s, "+
-				"so which of them are in scope is unknown; %s", noun, schemaFullName, workspace, schemaListRemedy),
+				"so which of them are in scope is unknown; %s", noun, schemaFullName, workspace, childListRemedy),
 			err)
 	}
 
