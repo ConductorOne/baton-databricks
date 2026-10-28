@@ -36,6 +36,12 @@ The connector authenticates as an account-level service principal, named by its 
 
 Exactly one of the two credentials is supplied. There is no personal access token (PAT), workspace token, or username and password option.
 
+<Warning>
+The token file must exist on the machine that runs the connector. A hosted connector has no file for you to rotate, so use the token file only when you run the connector yourself.
+
+A token pasted into **Workload Identity Token** is not refreshed. The sync fails once that JWT expires. Prefer the token file, which the connector reads again on every refresh.
+</Warning>
+
 ## Gather Databricks credentials
 
 Configuring the connector requires you to pass in credentials generated in Databricks. Gather these credentials before you move on.
