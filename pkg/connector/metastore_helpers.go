@@ -204,25 +204,39 @@ func unityPrincipalName(ctx context.Context, c *databricks.Client, principal *v2
 	return name, nil
 }
 
-// scopedWorkspaces indexes, by numeric id, the workspaces this sync may read
-// through, and marks which of them are RUNNING. ListWorkspaces already drops the
-// excluded ones.
-func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotations.Annotations) (map[string]databricks.Workspace, map[string]bool, error) {
-	workspaces, rateLimit, err := m.client.ListWorkspaces(ctx)
+// workspaceScope is the set of workspaces this sync may read Unity Catalog
+// through, indexed by numeric id, with the RUNNING ones marked. Both the
+// metastore and the catalog syncer resolve their route through it.
+type workspaceScope struct {
+	byID    map[string]databricks.Workspace
+	running map[string]bool
+}
+
+// scopedWorkspaces reads the account's workspaces and keeps the ones the
+// allowlist admits. ListWorkspaces already drops the excluded ones.
+func scopedWorkspaces(
+	ctx context.Context,
+	client *databricks.Client,
+	allowlist map[string]struct{},
+	annos *annotations.Annotations,
+) (workspaceScope, error) {
+	workspaces, rateLimit, err := client.ListWorkspaces(ctx)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		return nil, nil, refuseUnreadable("databricks-connector: failed to list workspaces", err)
+		return workspaceScope{}, refuseUnreadable("databricks-connector: failed to list workspaces", err)
 	}
 
-	scoped := make(map[string]databricks.Workspace, len(workspaces))
-	running := make(map[string]bool, len(workspaces))
+	scope := workspaceScope{
+		byID:    make(map[string]databricks.Workspace, len(workspaces)),
+		running: make(map[string]bool, len(workspaces)),
+	}
 	for _, workspace := range workspaces {
 		id := strconv.Itoa(workspace.ID)
 		if workspace.DeploymentName == "" {
 			continue
 		}
-		if len(m.workspaces) > 0 {
-			if _, ok := matchConfiguredWorkspace(m.workspaces, workspace.DeploymentName, workspace.Name, id); !ok {
+		if len(allowlist) > 0 {
+			if _, ok := matchConfiguredWorkspace(allowlist, workspace.DeploymentName, workspace.Name, id); !ok {
 				continue
 			}
 		}
@@ -232,11 +246,11 @@ func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotati
 		if !workspaceIsUsable(workspace.Status) {
 			continue
 		}
-		scoped[id] = workspace
-		running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
+		scope.byID[id] = workspace
+		scope.running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
 	}
 
-	return scoped, running, nil
+	return scope, nil
 }
 
 // workspaceIsUsable reports a status that is RUNNING or can still become it.
@@ -254,99 +268,93 @@ func workspaceIsUsable(workspaceStatus string) bool {
 // errMetastoreGone marks a metastore the account no longer lists.
 var errMetastoreGone = errors.New("metastore is no longer on the account")
 
-// routeMetastore picks a workspace the connector can read every privilege through:
-// it owns the metastore, or it is a direct Admin there. A nil workspace with no
-// error means none is running and in scope; pending says one can still become RUNNING.
-func (m *metastoreBuilder) routeMetastore(
+// attached lists the running in-scope workspaces the metastore is assigned to,
+// in assignment order. inScope reports whether any in-scope workspace is
+// attached at all, running or not: that is what tells "outside this sync" apart
+// from "in this sync but not reachable right now".
+func (s workspaceScope) attached(
 	ctx context.Context,
-	metastoreID, owner string,
-	scoped map[string]databricks.Workspace,
-	running map[string]bool,
+	client *databricks.Client,
+	metastoreID string,
 	annos *annotations.Annotations,
-) (*databricks.Workspace, bool, error) {
-	ids, rateLimit, err := m.client.ListMetastoreWorkspaces(ctx, metastoreID)
+) ([]databricks.Workspace, bool, error) {
+	ids, rateLimit, err := client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		// A 404 here is not an empty assignment list. NotFound on this List makes
-		// the SDK skip the metastore, and ConductorOne deletes it.
-		return nil, false, refuseUnreadable(fmt.Sprintf(
-			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it",
-			metastoreID), err)
+		if databricks.IsSecurableGone(err, errorCodeMetastoreGone) {
+			return nil, false, errMetastoreGone
+		}
+		return nil, false, err
 	}
 
-	pending := false
-	var candidates []databricks.Workspace
+	var usable []databricks.Workspace
+	inScope := false
 	for _, id := range ids {
-		workspace, ok := scoped[id]
+		workspace, ok := s.byID[id]
 		if !ok {
 			continue
 		}
-		if running[id] {
-			candidates = append(candidates, workspace)
-			continue
-		}
-		pending = true
-	}
-	if len(candidates) == 0 {
-		return nil, pending, nil
-	}
-
-	if ownsPrincipal(m.clientID, owner) {
-		return &candidates[0], false, nil
-	}
-
-	for i := range candidates {
-		admin, err := isWorkspaceAdmin(ctx, m.client, m.clientID, strconv.Itoa(candidates[i].ID), annos)
-		if err != nil {
-			return nil, false, err
-		}
-		if admin {
-			return &candidates[i], false, nil
+		inScope = true
+		if s.running[id] {
+			usable = append(usable, workspace)
 		}
 	}
 
-	return nil, false, untrustedMetastoreError(metastoreID, candidates)
+	return usable, inScope, nil
 }
 
-// resolveMetastoreRoute routes a metastore from its id, reading owner and standing live.
-func (m *metastoreBuilder) resolveMetastoreRoute(
+// pickReadableWorkspace is the first running workspace the connector can read
+// every privilege through. An owner sees them all; otherwise it is the first
+// workspace where the connector is a direct Admin.
+func pickReadableWorkspace(
 	ctx context.Context,
-	metastoreID string,
+	client *databricks.Client,
+	ownPrincipal, owner, metastoreID string,
+	usable []databricks.Workspace,
 	annos *annotations.Annotations,
 ) (*databricks.Workspace, error) {
-	metastores, rateLimit, err := m.client.ListMetastores(ctx)
-	noteRateLimit(annos, rateLimit)
-	if err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to list metastores: %w", err)
+	if ownsPrincipal(ownPrincipal, owner) {
+		return &usable[0], nil
 	}
 
-	found := slices.IndexFunc(metastores, func(metastore databricks.Metastore) bool {
-		return metastore.MetastoreID == metastoreID
-	})
-	if found < 0 {
-		return nil, errMetastoreGone
-	}
-
-	scoped, running, err := m.scopedWorkspaces(ctx, annos)
-	if err != nil {
-		return nil, err
-	}
-
-	workspace, pending, err := m.routeMetastore(ctx, metastoreID, metastores[found].Owner, scoped, running, annos)
-	if err != nil {
-		return nil, err
-	}
-	if workspace == nil {
-		reason := "no workspace in sync scope is attached to it"
-		if pending {
-			reason = "every workspace in sync scope attached to it is still on its way to RUNNING"
+	for i := range usable {
+		admin, err := isWorkspaceAdmin(ctx, client, ownPrincipal, strconv.Itoa(usable[i].ID), annos)
+		if err != nil {
+			return nil, err
 		}
-
-		return nil, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: cannot route metastore %s: %s", metastoreID, reason)
+		if admin {
+			return &usable[i], nil
+		}
 	}
 
-	return workspace, nil
+	names := make([]string, 0, len(usable))
+	for _, workspace := range usable {
+		names = append(names, workspace.DeploymentName)
+	}
+
+	return nil, status.Errorf(codes.PermissionDenied,
+		"databricks-connector: cannot read every privilege on metastore %s through any workspace attached to it (%s), "+
+			"and Databricks answers a partial read with 200, "+
+			"so reporting it would revoke the access ConductorOne cannot see; "+
+			"the connector's service principal must own the metastore or be assigned Admin directly on one of those workspaces",
+		metastoreID, strings.Join(names, ", "))
+}
+
+// metastoreGrantsAreTrustworthy is true when the connector owns the metastore
+// or is a direct Admin of the routed workspace. MANAGE is not a metastore
+// privilege.
+func metastoreGrantsAreTrustworthy(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	annos *annotations.Annotations,
+) (bool, error) {
+	// An owner holds every privilege implicitly, which is not reported as a grant.
+	if ownsPrincipal(trust.ownPrincipal, trust.owner) {
+		return true, nil
+	}
+
+	return isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
 }
 
 // ownsPrincipal reports whether name is the service principal the connector
@@ -435,6 +443,63 @@ func ownPrincipalScimID(
 	return id, nil
 }
 
+// assignmentListError explains a failed read of the workspaces a metastore is
+// assigned to, which decides which workspaces its securables are read through.
+// A 404 is not an empty assignment list: the SDK would skip the child List and
+// ConductorOne would delete what it contained.
+func assignmentListError(metastoreID string, err error) error {
+	if errors.Is(err, errMetastoreGone) {
+		return err
+	}
+
+	return refuseUnreadable(
+		fmt.Sprintf("databricks-connector: failed to list the workspaces assigned to metastore %s", metastoreID), err)
+}
+
+// workspaceForCatalog returns the first in-scope workspace whose catalog listing
+// contains catalogName. None listing it is an error, never an absence: a catalog
+// bound to a workspace outside the sync, or one the connector lost USE_CATALOG
+// on, is not listed either and still exists. Reporting it as gone would delete
+// its subtree on a sync, and confirm a revoke that never happened.
+func workspaceForCatalog(
+	ctx context.Context,
+	client *databricks.Client,
+	metastoreID, catalogName string,
+	usable []databricks.Workspace,
+	annos *annotations.Annotations,
+) (*databricks.Workspace, *databricks.Catalog, error) {
+	var lastDeny error
+	allGone := len(usable) > 0
+	for i := range usable {
+		catalog, err := catalogThrough(ctx, client, usable[i].DeploymentName, metastoreID, catalogName, annos)
+		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				continue
+			}
+			allGone = false
+			if deniesTrust(err) {
+				lastDeny = err
+				continue
+			}
+			return nil, nil, err
+		}
+		if catalog != nil {
+			return &usable[i], catalog, nil
+		}
+		allGone = false
+	}
+	if allGone {
+		return nil, nil, errCatalogGone
+	}
+
+	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",
+		catalogName, metastoreID)
+	if lastDeny != nil {
+		msg = fmt.Sprintf("%s: %s", msg, lastDeny.Error())
+	}
+	return nil, nil, status.Errorf(codes.FailedPrecondition, "%s", msg)
+}
+
 // deniesTrust is an answer that withholds what the connector asked for, as
 // opposed to one that says the account plane is unavailable.
 func deniesTrust(err error) bool {
@@ -444,20 +509,6 @@ func deniesTrust(err error) bool {
 	default:
 		return false
 	}
-}
-
-func untrustedMetastoreError(metastoreID string, tried []databricks.Workspace) error {
-	names := make([]string, 0, len(tried))
-	for _, workspace := range tried {
-		names = append(names, workspace.DeploymentName)
-	}
-
-	return status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot read every privilege on metastore %s through any workspace attached to it (%s), "+
-			"and Databricks answers a partial read with 200, "+
-			"so reporting it would revoke the access ConductorOne cannot see; "+
-			"the connector's service principal must own the metastore or be assigned Admin directly on one of those workspaces",
-		metastoreID, strings.Join(names, ", "))
 }
 
 // principalResolver maps a privilege assignment to a C1 resource id. The id is used when present; the name is only the fallback.
