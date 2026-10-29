@@ -108,6 +108,7 @@ func (c *Client) ListCatalogs(
 	ctx context.Context,
 	workspaceId, pageToken string,
 	maxResults uint,
+	includeUnbound bool,
 ) (
 	[]Catalog,
 	string,
@@ -118,8 +119,9 @@ func (c *Client) ListCatalogs(
 
 	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogCatalogsEndpoint)
 	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
-		maxResults: &maxResults,
-		pageToken:  pageToken,
+		maxResults:     &maxResults,
+		pageToken:      pageToken,
+		includeUnbound: includeUnbound,
 	})
 	if err != nil {
 		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to list catalogs: %w", err))

@@ -58,15 +58,16 @@ func newWorkspaceRoutedClient(t *testing.T, handler http.HandlerFunc) (*databric
 
 // fakeAccount serves the account, Unity Catalog and SCIM endpoints the metastore syncer calls.
 type fakeAccount struct {
-	metastores  []map[string]any
-	assignments map[string]any // metastore id -> []int workspace ids, or an HTTP status
-	workspaces  []map[string]any
-	permissions []map[string]any
-	permStatus  int
-	patchStatus int
-	users       map[string]string // id -> userName
-	groups      map[string]string // id -> displayName
-	sps         map[string]string // id -> applicationId
+	metastores          []map[string]any
+	assignments         map[string]any // metastore id -> []int workspace ids, or an HTTP status
+	assignmentErrorCode map[string]string
+	workspaces          []map[string]any
+	permissions         []map[string]any
+	permStatus          int
+	patchStatus         int
+	users               map[string]string // id -> userName
+	groups              map[string]string // id -> displayName
+	sps                 map[string]string // id -> applicationId
 
 	// workspaceMembers maps a workspace id to its permission assignments, or to
 	// the HTTP status the account API answers the list with.
@@ -119,7 +120,8 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 			parts := strings.Split(path, "/")
 			switch v := f.assignments[parts[len(parts)-2]].(type) {
 			case int:
-				http.Error(w, `{"message":"denied"}`, v)
+				w.WriteHeader(v)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error_code": f.assignmentErrorCode[parts[len(parts)-2]], "message": "denied"})
 			default:
 				encode(map[string]any{"workspace_ids": v})
 			}
@@ -705,6 +707,35 @@ func TestMetastoreRevoke(t *testing.T) {
 	annos, err := m.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+}
+
+// A metastore deleted after the sync is proven gone by its assignment list,
+// which the profile workspace check reads first.
+func TestMetastoreProvisioningOnADeletedMetastoreWithAProfile(t *testing.T) {
+	for _, verb := range []string{"grant", "revoke"} {
+		t.Run(verb, func(t *testing.T) {
+			f := defaultFakeAccount()
+			f.assignments["ms-a"] = http.StatusNotFound
+			f.assignmentErrorCode = map[string]string{"ms-a": errorCodeMetastoreGone}
+			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
+			g := grant.NewGrant(testSyncedMetastore(t, "wsa"), "CREATE_CATALOG", alice.GetId())
+
+			if verb == "grant" {
+				_, err := m.Grant(context.Background(), alice, g.GetEntitlement())
+				if status.Code(err) != codes.NotFound {
+					t.Fatalf("Grant error = %v, want NotFound", err)
+				}
+			} else {
+				annos, err := m.Revoke(context.Background(), g)
+				if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+				}
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
 	}
 }
 

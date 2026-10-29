@@ -623,6 +623,35 @@ func TestSchemaListContinuesWhenTheFirstWorkspaceCannotListCompletely(t *testing
 	f := &fakeSchemaAccount{
 		second:         true,
 		metastoreOwner: "eng",
+		catalogOwner:   "someone",
+		// wsa refuses the privilege read, so trust stays unproven there.
+		permStatus: map[string]int{"wsa": http.StatusForbidden},
+		ownPrivileges: map[string][]map[string]any{
+			"catalog/main": {{"principal": "app-9", "privileges": []string{"USE_SCHEMA"}}},
+		},
+		schemas: []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newTestSchemaBuilderAs(t, f, "app-9")
+
+	resources, err := listAllSchemas(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("listed %d schemas, want 1 through the second workspace", len(resources))
+	}
+	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace); workspace != "wsb" {
+		t.Errorf("profile[%s] = %q, want wsb", profileKeyWorkspace, workspace)
+	}
+}
+
+// The admins group that owns the catalog names its own workspace. A direct Admin
+// of that workspace reads every privilege, whatever route the schema is listed
+// through, so the first workspace already settles trust.
+func TestSchemaTrustChecksTheWorkspaceNamedByItsAdminsGroupOwner(t *testing.T) {
+	f := &fakeSchemaAccount{
+		second:         true,
+		metastoreOwner: "eng",
 		catalogOwner:   "_workspace_admins_other_2",
 		workspaceMembers: map[string]any{"2": []map[string]any{{
 			"principal":   map[string]any{"service_principal_name": "app-9"},
@@ -637,10 +666,10 @@ func TestSchemaListContinuesWhenTheFirstWorkspaceCannotListCompletely(t *testing
 		t.Fatalf("List: %v", err)
 	}
 	if len(resources) != 1 {
-		t.Fatalf("listed %d schemas, want 1 through the second workspace", len(resources))
+		t.Fatalf("listed %d schemas, want 1", len(resources))
 	}
-	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace); workspace != "wsb" {
-		t.Errorf("profile[%s] = %q, want wsb", profileKeyWorkspace, workspace)
+	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resources[0]), profileKeyWorkspace); workspace != "wsa" {
+		t.Errorf("profile[%s] = %q, want wsa", profileKeyWorkspace, workspace)
 	}
 }
 

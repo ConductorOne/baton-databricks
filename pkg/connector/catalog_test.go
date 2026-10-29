@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
@@ -27,7 +28,8 @@ import (
 type fakeCatalogAccount struct {
 	attached []int
 	// attachedStatus fails the metastore's assignment list with that status.
-	attachedStatus int
+	attachedStatus    int
+	attachedErrorCode string
 	// listed maps a workspace to the catalogs its listing returns.
 	listed map[string][]map[string]any
 	// listStatus fails a workspace's catalog listing with that status.
@@ -42,7 +44,13 @@ type fakeCatalogAccount struct {
 	workspaceMembers map[string]any
 	permStatus       int
 	// permErrorCode is the vendor error_code that rides along with permStatus.
-	permErrorCode string
+	permErrorCode       string
+	unboundCatalogs     []map[string]any
+	includeUnboundReads int
+	metastoreOwner      string
+	// metastoreGone drops the metastore from the account listing.
+	metastoreGone bool
+	catalogGets   []string
 	patchStatus   int
 	users         map[string]string
 	groups        map[string]string
@@ -64,10 +72,20 @@ func (f *fakeCatalogAccount) handler(t *testing.T) http.HandlerFunc {
 		case strings.Contains(path, "/scim/v2/"):
 			serveSCIM(w, r, f.users, f.groups, nil, nil)
 		case strings.HasSuffix(path, "/metastores"):
-			encode(map[string]any{"metastores": []map[string]any{{"metastore_id": "ms-1", "name": "main", "owner": "eng"}}})
+			if f.metastoreGone {
+				encode(map[string]any{"metastores": []map[string]any{}})
+
+				return
+			}
+			owner := f.metastoreOwner
+			if owner == "" {
+				owner = "eng"
+			}
+			encode(map[string]any{"metastores": []map[string]any{{"metastore_id": "ms-1", "name": "main", "owner": owner}}})
 		case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
 			if f.attachedStatus != 0 {
-				http.Error(w, `{"message":"denied"}`, f.attachedStatus)
+				w.WriteHeader(f.attachedStatus)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error_code": f.attachedErrorCode, "message": "denied"})
 
 				return
 			}
@@ -110,6 +128,10 @@ func (f *fakeCatalogAccount) serveCatalogs(w http.ResponseWriter, r *http.Reques
 
 	f.catalogPages++
 	all := f.listed[workspace]
+	if r.URL.Query().Get("include_unbound") == "true" {
+		f.includeUnboundReads++
+		all = f.unboundCatalogs
+	}
 	start, _ := strconv.Atoi(r.URL.Query().Get("page_token"))
 	size, _ := strconv.Atoi(r.URL.Query().Get("max_results"))
 	if size <= 0 || size > len(all)-start {
@@ -126,6 +148,7 @@ func (f *fakeCatalogAccount) serveCatalogs(w http.ResponseWriter, r *http.Reques
 // so a catalog bound elsewhere 404s here exactly as the workspace would answer.
 func (f *fakeCatalogAccount) serveCatalog(w http.ResponseWriter, r *http.Request, name string) {
 	workspace := r.Header.Get("X-Test-Workspace")
+	f.catalogGets = append(f.catalogGets, workspace)
 	if code, ok := f.listStatus[workspace]; ok {
 		http.Error(w, `{"message":"denied"}`, code)
 
@@ -423,9 +446,6 @@ func TestCatalogListFailsWhenTheAssignmentListCannotBeRead(t *testing.T) {
 // Grants reports the assignments stored on the catalog. List is what refuses a
 // partial privilege list, so Grants does not prove visibility again.
 func TestCatalogGrantsReportStoredAssignments(t *testing.T) {
-	adminOfTheWorkspace := []map[string]any{
-		{"principal": map[string]any{"service_principal_name": "app-9"}, "permissions": []string{"ADMIN"}},
-	}
 	// The principal filter answers with the group the privilege is inherited
 	// through, so the row names the group and not the connector's principal.
 	manageThroughAGroup := []map[string]any{
@@ -440,7 +460,6 @@ func TestCatalogGrantsReportStoredAssignments(t *testing.T) {
 		clientID          string
 		metastoreOwner    string
 		catalogOwner      string
-		members           any
 		ownPrivileges     []map[string]any
 		wantGrants        bool
 		wantMemberLists   int
@@ -462,16 +481,6 @@ func TestCatalogGrantsReportStoredAssignments(t *testing.T) {
 			wantGrants: true,
 		},
 		{
-			name: "admin of the workspace whose admins group owns the catalog", clientID: "app-9",
-			metastoreOwner: "eng", catalogOwner: "_workspace_admins_prod_1", members: adminOfTheWorkspace,
-			wantGrants: true,
-		},
-		{
-			name: "admins group of another workspace owns the catalog", clientID: "app-9",
-			metastoreOwner: "eng", catalogOwner: "_workspace_admins_dev_2", members: adminOfTheWorkspace,
-			wantGrants: true,
-		},
-		{
 			name: "all privileges without manage", clientID: "app-9",
 			metastoreOwner: "eng", catalogOwner: "someone", ownPrivileges: allPrivileges,
 			wantGrants: true,
@@ -486,7 +495,7 @@ func TestCatalogGrantsReportStoredAssignments(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := &fakeCatalogAccount{
 				users:            map[string]string{"1": "alice@example.com"},
-				workspaceMembers: map[string]any{"1": test.members},
+				workspaceMembers: map[string]any{},
 				ownPrivileges:    test.ownPrivileges,
 				assignments: map[string][]map[string]any{"main": {
 					{"principal": "alice@example.com", "principal_id": 1, "privileges": []string{"SELECT"}},
@@ -519,6 +528,30 @@ func TestCatalogGrantsReportStoredAssignments(t *testing.T) {
 				t.Errorf("own privileges read %d times, want %d", len(f.filteredReads), test.wantFilteredReads)
 			}
 		})
+	}
+}
+
+func TestCatalogTrustChecksTheWorkspaceNamedByItsAdminsGroupOwner(t *testing.T) {
+	f := &fakeCatalogAccount{
+		workspaceMembers: map[string]any{"2": []map[string]any{{
+			"principal":   map[string]any{"service_principal_name": "app-9"},
+			"permissions": []string{"ADMIN"},
+		}}},
+	}
+	client, _ := newWorkspaceRoutedClient(t, f.handler(t))
+	trust := securableTrust{
+		ownPrincipal: "app-9",
+		owner:        "_workspace_admins_dev_2",
+		fullName:     "main",
+		workspace:    "wsa",
+		workspaceID:  "1",
+	}
+	trustworthy, err := catalogGrantsAreTrustworthy(context.Background(), client, trust, &annotations.Annotations{})
+	if err != nil || !trustworthy {
+		t.Fatalf("catalogGrantsAreTrustworthy = %v, %v; want true", trustworthy, err)
+	}
+	if len(f.memberLists) != 1 || f.memberLists[0] != "2" {
+		t.Fatalf("workspace admin checks = %v, want [2]", f.memberLists)
 	}
 }
 
@@ -556,6 +589,156 @@ func catalogProvisioningAccount() *fakeCatalogAccount {
 		listed:      map[string][]map[string]any{"wsa": {catalogEntry("main", "someone")}},
 		users:       map[string]string{"1": "alice@example.com"},
 		assignments: map[string][]map[string]any{},
+	}
+}
+
+func TestCatalogRevokeNeedsAnUnboundReadToProveDeletion(t *testing.T) {
+	tests := []struct {
+		name            string
+		owner           string
+		unboundCatalogs []map[string]any
+		wantGone        bool
+		wantReads       int
+	}{
+		{name: "deleted", owner: testOwnPrincipal, wantGone: true, wantReads: 1},
+		{name: "still exists outside sync scope", owner: testOwnPrincipal,
+			unboundCatalogs: []map[string]any{catalogEntry("main", "someone")}, wantReads: 1},
+		{name: "caller is not metastore owner", owner: "app-9"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := catalogProvisioningAccount()
+			f.listed = map[string][]map[string]any{"wsa": {}}
+			f.unboundCatalogs = test.unboundCatalogs
+			b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, test.owner)
+			g := grant.NewGrant(testCatalog(t, "main", "someone", "wsa"), "USE_CATALOG", alice.GetId())
+
+			annos, err := b.Revoke(context.Background(), g)
+			if test.wantGone {
+				if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+				}
+			} else if status.Code(err) != codes.FailedPrecondition || annos.Contains(&v2.GrantAlreadyRevoked{}) {
+				t.Fatalf("Revoke = %v, %v; want FailedPrecondition", annos, err)
+			}
+			if f.includeUnboundReads != test.wantReads {
+				t.Errorf("include_unbound reads = %d, want %d", f.includeUnboundReads, test.wantReads)
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
+	}
+}
+
+func TestCatalogListAndGrantsHandleCatalogDeletion404(t *testing.T) {
+	t.Run("List skips only the deleted catalog", func(t *testing.T) {
+		f := catalogProvisioningAccount()
+		f.permStatus = http.StatusNotFound
+		f.permErrorCode = errorCodeCatalogGone
+		b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+		resources, _, err := b.List(context.Background(), testMetastoreResourceID, rs.SyncOpAttrs{})
+		if err != nil || len(resources) != 0 {
+			t.Fatalf("List = %v, %v; want empty result and no error", resources, err)
+		}
+	})
+
+	t.Run("other permissions 404 fails closed", func(t *testing.T) {
+		f := catalogProvisioningAccount()
+		f.permStatus = http.StatusNotFound
+		f.permErrorCode = "RESOURCE_DOES_NOT_EXIST"
+		b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+		_, _, err := b.List(context.Background(), testMetastoreResourceID, rs.SyncOpAttrs{})
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("List error = %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("Grants ignores a catalog deleted after List", func(t *testing.T) {
+		f := catalogProvisioningAccount()
+		f.permStatus = http.StatusNotFound
+		f.permErrorCode = errorCodeCatalogGone
+		b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+
+		grants, _, err := b.Grants(context.Background(), testCatalog(t, "main", "someone", "wsa"), rs.SyncOpAttrs{})
+		if err != nil || len(grants) != 0 {
+			t.Fatalf("Grants = %v, %v; want empty result and no error", grants, err)
+		}
+	})
+}
+
+// A metastore the account stopped listing is deleted in ConductorOne by the
+// metastore syncer. Listing its catalogs reports nothing rather than failing the
+// whole sync on a parent that is already going away.
+func TestCatalogListIsEmptyWhenTheMetastoreIsGone(t *testing.T) {
+	f := catalogProvisioningAccount()
+	f.metastoreGone = true
+	b := newTestCatalogBuilder(t, f, nil, syncPrincipals{})
+
+	resources, _, err := b.List(context.Background(), testMetastoreResourceID, rs.SyncOpAttrs{})
+	if err != nil || len(resources) != 0 {
+		t.Fatalf("List = %v, %v; want empty result and no error", resources, err)
+	}
+}
+
+// The profile records the owners the last sync saw. Trust is decided from the
+// owners the live read returns instead, so ownership lost since then is seen.
+func TestCatalogProvisioningDecidesTrustFromTheLiveOwner(t *testing.T) {
+	for _, verb := range []string{"grant", "revoke"} {
+		t.Run(verb, func(t *testing.T) {
+			f := catalogProvisioningAccount()
+			f.metastoreOwner = "someone-else"
+			b := newTestCatalogBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+			g := grant.NewGrant(testCatalogOf(t, "main", "app-9", "app-9", "wsa"), "USE_CATALOG", alice.GetId())
+
+			var err error
+			if verb == "grant" {
+				_, err = b.Grant(context.Background(), alice, g.GetEntitlement())
+			} else {
+				_, err = b.Revoke(context.Background(), g)
+			}
+			if status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("%s = %v, want PermissionDenied after live ownership changed", verb, err)
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
+	}
+}
+
+// A workspace the operator scoped out after the sync is still on the profile.
+// Writing through it would reach a workspace this run was told to leave alone.
+func TestCatalogProvisioningIgnoresAnOutOfScopeProfileWorkspace(t *testing.T) {
+	f := &fakeCatalogAccount{
+		attached: []int{1, 2},
+		listed: map[string][]map[string]any{
+			"wsa": {catalogEntry("main", "someone")},
+			"wsb": {catalogEntry("main", "someone")},
+		},
+	}
+	b := newTestCatalogBuilder(t, f, []string{"prod"}, syncPrincipals{})
+	resource, err := catalogResource(&databricks.Catalog{Name: "main", MetastoreID: "ms-1", Owner: "someone"},
+		"ms-1", testMetastoreResourceID, catalogRoute{
+			Workspace: "wsb", WorkspaceID: "2", WorkspaceName: "dev", MetastoreOwner: testOwnPrincipal,
+		})
+	if err != nil {
+		t.Fatalf("catalogResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "USE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := b.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyWorkspace)
+	if workspace != "wsa" {
+		t.Fatalf("routed workspace = %q, want wsa", workspace)
+	}
+	if slices.Contains(f.catalogGets, "wsb") {
+		t.Errorf("catalog was probed through out-of-scope workspace: %v", f.catalogGets)
 	}
 }
 

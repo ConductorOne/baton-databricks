@@ -256,14 +256,14 @@ func childListingIsComplete(
 		return true, nil
 	}
 
-	if workspaceAdminsGroupOwns(trust.parentOwner, trust.workspaceID) {
-		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+	if ownerWorkspaceID, ok := catalogAdminWorkspaceID(trust.parentOwner); ok {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, ownerWorkspaceID, annos)
 		if err != nil || admin {
 			return admin, err
 		}
 	}
 
-	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, []string{privilegeAllPrivileges}, annos)
+	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, []string{privilegeAllPrivileges}, nil, annos)
 }
 
 // schemaChildListingError reads a workspace that refuses the listing as unknown,
@@ -344,9 +344,9 @@ func schemaChildGrantsAreTrustworthy(
 		return true, nil
 	}
 
-	// The workspace admins group acts as the owner for a direct Admin of that workspace.
-	if workspaceAdminsGroupOwns(trust.parentOwner, trust.workspaceID) {
-		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+	// The workspace admins group acts as the owner for a direct Admin of its workspace.
+	if ownerWorkspaceID, ok := catalogAdminWorkspaceID(trust.parentOwner); ok {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, ownerWorkspaceID, annos)
 		if err != nil || admin {
 			return admin, err
 		}
@@ -354,7 +354,7 @@ func schemaChildGrantsAreTrustworthy(
 
 	// MANAGE on the securable itself is the cheapest of the three reads, and
 	// MANAGE above it carries down, so they are tried from the inside out.
-	manages, err := holdsPrivilegeOn(ctx, client, trust, securableType, trust.fullName, managePrivilege, annos)
+	manages, err := holdsPrivilegeOn(ctx, client, trust, securableType, trust.fullName, managePrivilege, nil, annos)
 	if err != nil || manages {
 		return manages, err
 	}
@@ -362,10 +362,10 @@ func schemaChildGrantsAreTrustworthy(
 	catalogName, rest, _ := strings.Cut(trust.fullName, schemaNameSeparator)
 	schemaName, _, _ := strings.Cut(rest, schemaNameSeparator)
 	manages, err = holdsPrivilegeOn(ctx, client, trust, databricks.SecurableSchema,
-		catalogName+schemaNameSeparator+schemaName, managePrivilege, annos)
+		catalogName+schemaNameSeparator+schemaName, managePrivilege, nil, annos)
 	if err != nil || manages {
 		return manages, err
 	}
 
-	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, catalogName, managePrivilege, annos)
+	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, catalogName, managePrivilege, nil, annos)
 }
