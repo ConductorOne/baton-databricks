@@ -380,15 +380,15 @@ func schemaListingIsComplete(
 		return true, nil
 	}
 
-	// The workspace admins group acts as the owner for a direct Admin of that workspace.
-	if workspaceAdminsGroupOwns(trust.parentOwner, trust.workspaceID) {
-		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+	// The workspace admins group acts as the owner for a direct Admin of its workspace.
+	if ownerWorkspaceID, ok := catalogAdminWorkspaceID(trust.parentOwner); ok {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, ownerWorkspaceID, annos)
 		if err != nil || admin {
 			return admin, err
 		}
 	}
 
-	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, schemaListingPrivileges, annos)
+	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName, schemaListingPrivileges, nil, annos)
 }
 
 // schemaGrantsAreTrustworthy is true for an owner of the schema, catalog, or
@@ -409,15 +409,15 @@ func schemaGrantsAreTrustworthy(
 		return true, nil
 	}
 
-	if workspaceAdminsGroupOwns(trust.parentOwner, trust.workspaceID) {
-		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+	if ownerWorkspaceID, ok := catalogAdminWorkspaceID(trust.parentOwner); ok {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, ownerWorkspaceID, annos)
 		if err != nil || admin {
 			return admin, err
 		}
 	}
 
 	// MANAGE on the schema is the cheaper of the two reads, so it goes first.
-	manages, err := holdsPrivilegeOn(ctx, client, trust, databricks.SecurableSchema, trust.fullName, managePrivilege, annos)
+	manages, err := holdsPrivilegeOn(ctx, client, trust, databricks.SecurableSchema, trust.fullName, managePrivilege, nil, annos)
 	if err != nil || manages {
 		return manages, err
 	}
@@ -425,7 +425,7 @@ func schemaGrantsAreTrustworthy(
 	// MANAGE on the catalog carries down to every schema in it.
 	catalogName, _, _ := strings.Cut(trust.fullName, schemaNameSeparator)
 
-	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, catalogName, managePrivilege, annos)
+	return holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, catalogName, managePrivilege, nil, annos)
 }
 
 func (b *schemaBuilder) StaticEntitlements(_ context.Context, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {

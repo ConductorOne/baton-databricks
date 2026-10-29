@@ -161,6 +161,12 @@ func syncSecurableGrants(
 	assignments, nextPageToken, rateLimit, err := client.ListPermissions(ctx, workspace, level.securableType, fullName, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
+		// A securable deleted between List and this read is not a failed sync.
+		// Only a level that names its gone codes can reach this: with none,
+		// IsSecurableGone is false and every 404 still refuses the read.
+		if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+			return nil, &rs.SyncOpResults{Annotations: annos}, nil
+		}
 		return nil, &rs.SyncOpResults{Annotations: annos}, refuseUnreadable(fmt.Sprintf(
 			"databricks-connector: failed to list permissions on %s %s through workspace %s", level.noun, fullName, workspace), err)
 	}

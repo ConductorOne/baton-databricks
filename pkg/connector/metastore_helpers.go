@@ -281,6 +281,9 @@ func (s workspaceScope) attached(
 	ids, rateLimit, err := client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
+		if databricks.IsSecurableGone(err, errorCodeMetastoreGone) {
+			return nil, false, errMetastoreGone
+		}
 		return nil, false, err
 	}
 
@@ -446,13 +449,24 @@ func ownPrincipalScimID(
 // https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
 var managePrivilege = []string{privilegeManage}
 
+// errSecurableGone reports that the securable a trust read addressed no longer
+// exists. Only a level that names its gone codes can raise it.
+var errSecurableGone = errors.New("securable no longer exists")
+
 // holdsPrivilegeOn reports whether the connector holds one of wanted. A refusal leaves it unproven. The read is not cached.
+//
+// goneCodes are the error_code values that prove the securable is gone. A level
+// that names them can tell an absence from a routing miss, so a 404 carrying one
+// reports errSecurableGone and any other 404 refuses the read instead of passing
+// as unproven. A level that names none keeps every 404 unproven, because it has
+// no way to tell the two apart.
 func holdsPrivilegeOn(
 	ctx context.Context,
 	client *databricks.Client,
 	trust securableTrust,
 	securableType, fullName string,
 	wanted []string,
+	goneCodes []string,
 	annos *annotations.Annotations,
 ) (bool, error) {
 	if trust.ownPrincipal == "" || trust.workspace == "" {
@@ -476,6 +490,13 @@ func holdsPrivilegeOn(
 		})
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
+		if databricks.IsSecurableGone(err, goneCodes...) {
+			return false, errSecurableGone
+		}
+		if len(goneCodes) > 0 && apiStatus(err) == http.StatusNotFound {
+			return false, refuseUnreadable(fmt.Sprintf(
+				"databricks-connector: failed to read the connector's own privileges on %s %s", securableType, fullName), err)
+		}
 		if !deniesTrust(err) {
 			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on %s %s: %w", securableType, fullName, err)
 		}
@@ -495,6 +516,10 @@ func holdsPrivilegeOn(
 // A 404 is not an empty assignment list: the SDK would skip the child List and
 // ConductorOne would delete what it contained.
 func assignmentListError(metastoreID string, err error) error {
+	if errors.Is(err, errMetastoreGone) {
+		return err
+	}
+
 	return refuseUnreadable(
 		fmt.Sprintf("databricks-connector: failed to list the workspaces assigned to metastore %s", metastoreID), err)
 }
@@ -512,9 +537,14 @@ func workspaceForCatalog(
 	annos *annotations.Annotations,
 ) (*databricks.Workspace, *databricks.Catalog, error) {
 	var lastDeny error
+	allGone := len(usable) > 0
 	for i := range usable {
 		catalog, err := catalogThrough(ctx, client, usable[i].DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				continue
+			}
+			allGone = false
 			if deniesTrust(err) {
 				lastDeny = err
 				continue
@@ -524,6 +554,10 @@ func workspaceForCatalog(
 		if catalog != nil {
 			return &usable[i], catalog, nil
 		}
+		allGone = false
+	}
+	if allGone {
+		return nil, nil, errCatalogGone
 	}
 
 	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",
