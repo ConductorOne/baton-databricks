@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs Unity Catalog metastores. That resource type is opt-in — it stays off until it is enabled per resource type in ConductorOne.
+   > It also syncs Unity Catalog metastores, catalogs, schemas, tables, and volumes. Those resource types are opt-in — each stays off until it is enabled per resource type in ConductorOne.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a metastore privilege for a user, group or service principal. The `owner` entitlement is read-only and cannot be granted or revoked.
+   > - **Unity Catalog privileges**: grant and revoke a privilege on a metastore, catalog, schema, table, or volume for a user, group or service principal. The `owner` entitlement is read-only and cannot be granted or revoked.
 
 ## Connector credentials
 
@@ -54,7 +54,8 @@ While developing the connector, please fill out this form. This information is n
 
 - **Direct grants only.** Databricks inherits privileges downward. The connector reports the assignments stored on the object. The inheritance endpoint does not return principal IDs.
 - **Direct Admin, or the sync fails.** Admin inherited through a group does not count. Databricks then returns HTTP 200 with only the privileges the caller can see. The sync fails instead of reporting that list, so ConductorOne keeps the grants it already has.
-- **Ownership is read-only.** It is shown and cannot be granted or revoked. An owner that is not an account identity (`System user`, `_workspace_admins_…`) is not shown.
+- **A partial list fails the sync.** A privilege read on a catalog, schema, table, or volume is complete when the service principal owns the metastore, owns the object or a parent, or holds `MANAGE`. `ALL_PRIVILEGES` does not include `MANAGE`. A schema listing is also complete with `USE_SCHEMA` or `ALL_PRIVILEGES`, or when the catalog is owned by the workspace admins group and the service principal is a direct Admin. A table or volume listing is not: it needs ownership of the metastore, catalog, or schema, that same Admin standing, or `ALL_PRIVILEGES` on the catalog. Without that standing the sync fails naming the object, and ConductorOne keeps what it already has. `system` and `samples` (any `SYSTEM_CATALOG`) are left out of the catalog sync when their privilege list cannot be proven complete. While the service principal owns the metastore, both are synced, including their schemas and tables.
+- **Ownership is read-only.** It is shown and cannot be granted or revoked. An owner that does not resolve to an account identity, such as `System user`, is not shown. A workspace admins group is shown when it resolves as an account group.
 - **No `MANAGE` or `ALL_PRIVILEGES` on a metastore.** Databricks rejects both, so they are not offered.
 - **Read through one running workspace.** Privileges are not served on the account plane. The connector reads each metastore through the first running workspace in scope where it can see every privilege. With no running workspace in scope, the metastore is not synced and ConductorOne removes it. A workspace that is still provisioning fails the sync until it is `RUNNING`. An unreadable assignment list fails the sync and ConductorOne keeps the metastore.
 - **`workspaces` scopes metastores.** An allowlist that names no workspace on the account fails at credential validation, before any sync. A name that is also in `databricks-exclude-workspaces` is reported separately from a name the account does not have.
@@ -62,4 +63,4 @@ While developing the connector, please fill out this form. This information is n
 - **A catalog is read through every workspace in scope.** Databricks returns a catalog only to the workspaces it is bound to, so the connector asks each running in-scope workspace and keeps each catalog name once. A catalog bound only to a workspace the sync excludes is never listed, and ConductorOne removes it with its grants.
 - **Seeing a catalog needs more than `MANAGE`.** The list holds the catalogs the service principal owns or holds `USE_CATALOG` on, or every catalog when it is the metastore admin. `MANAGE` alone reads a catalog's privileges but does not make it appear.
 - **Built-in catalogs.** `system` and any `SYSTEM_CATALOG`, including `samples`, are synced while the service principal owns the metastore. When it does not, and the privilege list cannot be proven complete, those catalogs are left out. Databricks refuses `MANAGE` on them. Leaving them out after they were synced removes them in ConductorOne.
-- **Not synced yet:** tables, volumes, functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.
+- **Not synced yet:** functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.

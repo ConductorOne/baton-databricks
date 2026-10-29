@@ -28,6 +28,10 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*schemaBuilder)(nil)
 const (
 	securableTypeSchema = "SCHEMA"
 
+	// errorCodeSchemaGone is what Databricks names in error_code when the schema
+	// a request addresses does not exist.
+	errorCodeSchemaGone = "SCHEMA_DOES_NOT_EXIST"
+
 	// informationSchema is the read-only schema Databricks puts in every catalog.
 	// Its privileges are not grantable, so it is left out of the sync.
 	informationSchema = "information_schema"
@@ -56,10 +60,6 @@ const (
 	// schemaListRemedy is what a refusal to sync a catalog whose schema listing
 	// would be partial tells the operator.
 	schemaListRemedy = "the connector's service principal must own the metastore or the catalog, or hold MANAGE, USE_SCHEMA or ALL_PRIVILEGES on the catalog"
-
-	// errorCodeSchemaGone is what Databricks names in error_code when the schema
-	// a request addresses does not exist.
-	errorCodeSchemaGone = "SCHEMA_DOES_NOT_EXIST"
 )
 
 // schemaPrivileges is the catalog set minus the three that stop at the catalog.
@@ -167,7 +167,13 @@ func schemaResource(
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+		rs.WithAnnotation(
+			// Without these annotations the table and volume syncers' List is
+			// never invoked.
+			&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: volumeResourceType.Id},
+			&v2.RawId{Id: resourceID},
+		),
 	)
 }
 
@@ -350,6 +356,41 @@ func (b *schemaBuilder) pushRoute(
 	return status.Errorf(codes.PermissionDenied,
 		"databricks-connector: cannot list every schema in catalog %s; %s",
 		catalogName, schemaListRemedy)
+}
+
+// schemaThrough finds one schema in the listing of workspace, nil when that
+// workspace does not list it. Its caller has already proven the listing holds
+// every schema in the catalog, so an absence here is the schema being gone.
+func schemaThrough(
+	ctx context.Context,
+	client *databricks.Client,
+	workspace, catalogName, schemaName string,
+	annos *annotations.Annotations,
+) (*databricks.Schema, error) {
+	pageToken := ""
+	for {
+		schemas, next, rateLimit, err := client.ListSchemas(ctx, workspace, catalogName, pageToken, ResourcesPageSize)
+		noteRateLimit(annos, rateLimit)
+		if err != nil {
+			return nil, schemaListingError(catalogName, workspace, err)
+		}
+
+		for _, schema := range schemas {
+			if schema.Name == schemaName {
+				return &schema, nil
+			}
+		}
+
+		if next == "" {
+			return nil, nil
+		}
+		if next == pageToken {
+			return nil, status.Errorf(codes.Internal,
+				"databricks-connector: the schemas of catalog %s repeat page token %q through workspace %s",
+				catalogName, next, workspace)
+		}
+		pageToken = next
+	}
 }
 
 // schemaListingError reads a workspace that refuses the schema listing as
