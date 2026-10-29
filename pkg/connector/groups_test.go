@@ -98,9 +98,11 @@ func writeSCIMGroup(t *testing.T, w http.ResponseWriter, req *http.Request, grou
 	out := group
 	if attrs := req.URL.Query()["attributes"]; len(attrs) > 0 {
 		out = map[string]any{}
-		for _, a := range attrs {
-			if v, ok := group[a]; ok {
-				out[a] = v
+		for _, joined := range attrs {
+			for _, a := range strings.Split(joined, ",") {
+				if v, ok := group[a]; ok {
+					out[a] = v
+				}
 			}
 		}
 	}

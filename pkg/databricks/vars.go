@@ -3,6 +3,7 @@ package databricks
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 type Vars interface {
@@ -56,9 +57,7 @@ type AttrVars struct {
 
 func (a *AttrVars) Apply(params *url.Values) {
 	if len(a.Attrs) > 0 {
-		for _, attr := range a.Attrs {
-			params.Add("attributes", attr)
-		}
+		params.Set("attributes", strings.Join(a.Attrs, ","))
 	}
 }
 

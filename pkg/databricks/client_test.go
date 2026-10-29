@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -185,14 +187,11 @@ func TestGetUserByUsername(t *testing.T) {
 			}
 			wantAttrs := NewUserAttrVars().Attrs
 			gotAttrs := query["attributes"]
-			if len(gotAttrs) != len(wantAttrs) {
-				t.Fatalf("attributes = %v, want %v", gotAttrs, wantAttrs)
+			if len(gotAttrs) != 1 {
+				t.Fatalf("attributes = %v, want a single attributes key", gotAttrs)
 			}
-			for i := range wantAttrs {
-				if gotAttrs[i] != wantAttrs[i] {
-					t.Errorf("attributes = %v, want %v", gotAttrs, wantAttrs)
-					break
-				}
+			if parts := strings.Split(gotAttrs[0], ","); !slices.Equal(parts, wantAttrs) {
+				t.Errorf("attributes = %v, want %v", gotAttrs, wantAttrs)
 			}
 		})
 	}

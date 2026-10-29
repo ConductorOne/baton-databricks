@@ -327,8 +327,10 @@ func TestRoleGroupPrincipalRequestsRolesAttributes(t *testing.T) {
 				t.Fatalf("%s returned error: %v", tc.name, err)
 			}
 
-			if want := databricks.NewGroupRolesAttrVars().Attrs; !slices.Equal(gotAttrs, want) {
-				t.Errorf("GetGroup attributes = %v, want %v", gotAttrs, want)
+			if len(gotAttrs) != 1 {
+				t.Errorf("GetGroup attributes = %v, want a single attributes key", gotAttrs)
+			} else if parts := strings.Split(gotAttrs[0], ","); !slices.Equal(parts, []string{"roles", "entitlements", "meta"}) {
+				t.Errorf("GetGroup attributes = %v, want roles,entitlements,meta", gotAttrs)
 			}
 
 			if capturedPatchBody == nil {
@@ -378,7 +380,11 @@ func TestRoleGrantsSyncRequestsOnlyRoleAttributes(t *testing.T) {
 	}
 
 	want := []string{"roles", "entitlements", "meta"}
-	if len(groupListAttrs) != 1 || !slices.Equal(groupListAttrs[0], want) {
+	if len(groupListAttrs) != 1 {
 		t.Errorf("group list attributes = %v, want a single request with %v", groupListAttrs, want)
+	} else if len(groupListAttrs[0]) != 1 {
+		t.Errorf("group list attributes = %v, want a single attributes key", groupListAttrs)
+	} else if parts := strings.Split(groupListAttrs[0][0], ","); !slices.Equal(parts, want) {
+		t.Errorf("group list attributes = %v, want %v", groupListAttrs, want)
 	}
 }
