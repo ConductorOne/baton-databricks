@@ -148,8 +148,12 @@ func New(
 
 // NewConnector returns a new connector builder from a configuration struct.
 func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
-	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(cfg)
+	accountHostname, err := getAccountHostname(cfg, cfg.Hostname)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: %w", err)
+	}
+
+	auth := prepareClientAuth(cfg, accountHostname)
 
 	cb, err := New(
 		ctx,
@@ -168,11 +172,10 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 	return cb, nil, nil
 }
 
-func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
+func prepareClientAuth(cfg *config.Databricks, accountHostname string) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
 	databricksClientSecret := cfg.DatabricksClientSecret
-	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 
 	return databricks.NewOAuth2(
 		accountID,
@@ -182,10 +185,16 @@ func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
 	)
 }
 
-// getAccountHostname returns the account hostname from config if set, otherwise calculates it from hostname.
-func getAccountHostname(cfg *config.Databricks, hostname string) string {
+// getAccountHostname returns the account hostname from config if set, otherwise
+// calculates it from hostname. An explicitly set value must have the
+// accounts.-prefixed shape the derivation always produces, or the
+// accounts-dod.-prefixed GovCloud DoD shape the validator also accepts.
+func getAccountHostname(cfg *config.Databricks, hostname string) (string, error) {
 	if cfg.AccountHostname != "" {
-		return cfg.AccountHostname
+		if err := databricks.ValidateAccountHostname(cfg.AccountHostname); err != nil {
+			return "", err
+		}
+		return cfg.AccountHostname, nil
 	}
-	return databricks.GetAccountHostname(hostname)
+	return databricks.GetAccountHostname(hostname), nil
 }

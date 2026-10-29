@@ -2,9 +2,11 @@ package databricks
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -51,24 +53,87 @@ func TestGetAccountHostname(t *testing.T) {
 		name     string
 		hostname string
 		want     string
+		// degenerate marks inputs the CLI cannot produce whose result is
+		// knowingly exempt from the keep-in-sync validation below.
+		degenerate bool
 	}{
-		{"azure subdomain", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net"},
-		{"azure bare host", "azuredatabricks.net", "accounts.azuredatabricks.net"},
-		{"azure mixed case", "MyOrg.AzureDatabricks.net", "accounts.azuredatabricks.net"},
-		{"azure trailing dot", "myorg.azuredatabricks.net.", "accounts.azuredatabricks.net"},
-		{"gcp subdomain", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com"},
-		{"aws workspace host normalises to account host", "dbc-1234abcd.cloud.databricks.com", "accounts.cloud.databricks.com"},
-		{"unknown host falls through unnormalised", "myorg.example.com", "accounts.myorg.example.com"},
+		{"azure subdomain", "myorg.azuredatabricks.net", "accounts.azuredatabricks.net", false},
+		{"azure bare host", "azuredatabricks.net", "accounts.azuredatabricks.net", false},
+		{"azure mixed case", "MyOrg.AzureDatabricks.net", "accounts.azuredatabricks.net", false},
+		{"azure trailing dot", "myorg.azuredatabricks.net.", "accounts.azuredatabricks.net", false},
+		{"gcp subdomain", "myorg.gcp.databricks.com", "accounts.gcp.databricks.com", false},
+		{"aws workspace host normalises to account host", "dbc-1234abcd.cloud.databricks.com", "accounts.cloud.databricks.com", false},
+		{"unknown host falls through unnormalised", "myorg.example.com", "accounts.myorg.example.com", false},
 		// CXH-2349: a bare-suffix match would resolve this to the Azure account host.
-		{"azure lookalike does not match", "evilazuredatabricks.net", "accounts.evilazuredatabricks.net"},
-		{"gcp lookalike does not match", "evilgcp.databricks.com", "accounts.evilgcp.databricks.com"},
+		{"azure lookalike does not match", "evilazuredatabricks.net", "accounts.evilazuredatabricks.net", false},
+		{"gcp lookalike does not match", "evilgcp.databricks.com", "accounts.evilgcp.databricks.com", false},
+		// Degenerate case, pinned deliberately: GetAccountHostname("") returns
+		// bare "accounts." (default branch), which ValidateAccountHostname
+		// rejects. The CLI cannot produce this input (hostname has a default);
+		// changing a guard here is a conscious contract decision, not a silent
+		// invariant break.
+		{"empty hostname is degenerate", "", "accounts.", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := GetAccountHostname(tt.hostname); got != tt.want {
 				t.Errorf("GetAccountHostname(%q) = %q, want %q", tt.hostname, got, tt.want)
 			}
+			// Keep-in-sync contract: every host the derivation produces must pass the
+			// explicit-value validator, or a future derivation change could reject
+			// previously-working configs. Degenerate rows are the pinned exceptions.
+			if tt.degenerate {
+				t.Logf("skipping keep-in-sync validation for degenerate input %q (want %q)", tt.hostname, tt.want)
+				return
+			}
+			if err := ValidateAccountHostname(tt.want); err != nil {
+				t.Errorf("ValidateAccountHostname(%q) = %v, want nil", tt.want, err)
+			}
 		})
+	}
+}
+
+func TestValidateAccountHostname(t *testing.T) {
+	accept := []string{
+		"accounts.cloud.databricks.com",
+		"accounts.azuredatabricks.net",
+		"ACCOUNTS.Cloud.Databricks.com.", // case/trailing-dot leniency, matching GetAccountHostname's normalization
+		// The contract is shape, not domain ownership: an accounts.-prefixed
+		// lookalike passes by design (I2). Validation never rewrites the value.
+		"accounts.evil.com",
+		// The real AWS GovCloud DoD account console per vendor docs:
+		// https://docs.databricks.com/aws/en/security/privacy/gov-cloud
+		"accounts-dod.cloud.databricks.mil",
+		// AWS GovCloud (non-DoD) account console, same docs page.
+		"accounts.cloud.databricks.us",
+	}
+	for _, host := range accept {
+		if err := ValidateAccountHostname(host); err != nil {
+			t.Errorf("ValidateAccountHostname(%q) = %v, want nil", host, err)
+		}
+	}
+
+	reject := []string{
+		"cloud.databricks.com",
+		"azuredatabricks.net",
+		"gcp.databricks.com",
+		"evilaccounts.cloud.databricks.com",
+		"https://accounts.cloud.databricks.com", // scheme-prefixed is not accounts.-prefixed
+		"accounts.",                             // bare prefix has no host; would reproduce the opaque remote failure
+		"",
+	}
+	for _, host := range reject {
+		err := ValidateAccountHostname(host)
+		if err == nil {
+			t.Errorf("ValidateAccountHostname(%q) = nil, want error", host)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidAccountHostname) {
+			t.Errorf("ValidateAccountHostname(%q) error = %v, want errors.Is(ErrInvalidAccountHostname)", host, err)
+		}
+		if !strings.Contains(err.Error(), "account-hostname") {
+			t.Errorf("ValidateAccountHostname(%q) error %q does not mention account-hostname", host, err.Error())
+		}
 	}
 }
 
