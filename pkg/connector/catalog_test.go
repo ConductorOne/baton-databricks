@@ -395,7 +395,7 @@ func TestCatalogListSkipsBuiltInCatalogs(t *testing.T) {
 	f := &fakeCatalogAccount{
 		attached: []int{1},
 		listed: map[string][]map[string]any{"wsa": {
-			catalogEntry(systemCatalog, "someone"),
+			catalogEntry(systemCatalog, "System user"),
 			{"name": "samples", "metastore_id": "ms-1", "owner": "System user", "catalog_type": "SYSTEM_CATALOG"},
 			catalogEntry("owned", "app-9"),
 		}},

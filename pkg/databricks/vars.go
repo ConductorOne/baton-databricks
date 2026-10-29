@@ -173,6 +173,7 @@ func NewNameVars(name string, etag string) *NameVars {
 // while an absent max_results asks for the deprecated unpaginated response, so
 // maxResults is a pointer: its presence is the signal.
 type unityCatalogVars struct {
+	catalogName    string
 	principal      string
 	maxResults     *uint
 	pageToken      string
@@ -180,6 +181,10 @@ type unityCatalogVars struct {
 }
 
 func (v *unityCatalogVars) Apply(params *url.Values) {
+	if v.catalogName != "" {
+		params.Add("catalog_name", v.catalogName)
+	}
+
 	if v.principal != "" {
 		params.Add("principal", v.principal)
 	}

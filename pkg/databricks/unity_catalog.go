@@ -23,6 +23,9 @@ const (
 	// https://docs.databricks.com/api/workspace/catalogs/list
 	unityCatalogCatalogsEndpoint = "/api/2.1/unity-catalog/catalogs"
 
+	// https://docs.databricks.com/api/workspace/schemas/list
+	unityCatalogSchemasEndpoint = "/api/2.1/unity-catalog/schemas"
+
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
@@ -32,6 +35,7 @@ const (
 	// addressed by its UUID: its name is rejected.
 	SecurableMetastore = "metastore"
 	SecurableCatalog   = "catalog"
+	SecurableSchema    = "schema"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
@@ -136,6 +140,35 @@ func (c *Client) GetCatalog(
 	}
 
 	return &res, ratelimitData, nil
+}
+
+// ListSchemas (GET /api/2.1/unity-catalog/schemas?catalog_name=) reads one page of
+// the schemas of catalogName, through workspaceId, which is a deployment name.
+// Unlike the catalogs listing, this one pages, so the cursor is passed through.
+func (c *Client) ListSchemas(
+	ctx context.Context,
+	workspaceId, catalogName, pageToken string,
+	maxResults uint,
+) (
+	[]Schema,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res schemasResponse
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogSchemasEndpoint)
+	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
+		catalogName: catalogName,
+		maxResults:  &maxResults,
+		pageToken:   pageToken,
+	})
+	if err != nil {
+		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId,
+			fmt.Errorf("failed to list schemas in catalog %s: %w", catalogName, err))
+	}
+
+	return res.Schemas, res.NextPageToken, ratelimitData, nil
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).

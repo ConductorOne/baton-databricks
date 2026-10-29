@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -40,7 +39,8 @@ const (
 	errorCodeMetastoreGone = "METASTORE_DOES_NOT_EXIST"
 
 	// systemCatalog is the built-in catalog Databricks puts in every metastore.
-	// It is left out when its privilege list cannot be proved complete.
+	// samples is the other one. Both are SYSTEM_CATALOG. They are left out when
+	// their privilege list cannot be proved complete.
 	systemCatalog = "system"
 
 	// workspaceAdminsGroupPrefix starts the name of the system group Databricks
@@ -187,7 +187,11 @@ func catalogResource(
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+		rs.WithAnnotation(
+			// Without this annotation the schema syncer's List is never invoked.
+			&v2.ChildResourceType{ResourceTypeId: schemaResourceType.Id},
+			&v2.RawId{Id: resourceID},
+		),
 	)
 }
 
@@ -488,7 +492,13 @@ func catalogGrantsAreTrustworthy(
 		}
 	}
 
-	return holdsCatalogManage(ctx, client, trust, annos)
+	manages, err := holdsPrivilegeOn(ctx, client, trust, databricks.SecurableCatalog, trust.fullName,
+		managePrivilege, []string{errorCodeCatalogGone}, annos)
+	if errors.Is(err, errSecurableGone) {
+		return false, errCatalogGone
+	}
+
+	return manages, err
 }
 
 func catalogAdminWorkspaceID(owner string) (string, bool) {
@@ -505,61 +515,6 @@ func catalogAdminWorkspaceID(owner string) (string, bool) {
 	}
 
 	return id, true
-}
-
-// holdsCatalogManage asks the permissions endpoint for the connector's own
-// effective privileges on the catalog. The principal filter is effective, not
-// literal: a row can be the MANAGE a group holds and this principal inherits, so
-// only the privileges are read and never the principal field. The read bypasses
-// the cache, because a remembered page would decide this call with the access of
-// an earlier one.
-//
-// ALL_PRIVILEGES is not enough. Databricks leaves MANAGE out of it, so its holder
-// still reads a partial list.
-// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
-func holdsCatalogManage(
-	ctx context.Context,
-	client *databricks.Client,
-	trust securableTrust,
-	annos *annotations.Annotations,
-) (bool, error) {
-	if trust.ownPrincipal == "" || trust.workspace == "" {
-		return false, nil
-	}
-
-	var manages bool
-	rateLimit, err := client.ForEachUncachedPermissionsPage(ctx, trust.workspace, databricks.SecurableCatalog, trust.fullName, trust.ownPrincipal,
-		func(page []databricks.PrivilegeAssignment) (bool, error) {
-			for _, assignment := range page {
-				if slices.Contains(assignment.Privileges, privilegeManage) {
-					manages = true
-
-					return true, nil
-				}
-			}
-
-			return false, nil
-		})
-	noteRateLimit(annos, rateLimit)
-	if err != nil {
-		if databricks.IsSecurableGone(err, errorCodeCatalogGone) {
-			return false, errCatalogGone
-		}
-		if apiStatus(err) == http.StatusNotFound {
-			return false, refuseUnreadable(
-				fmt.Sprintf("databricks-connector: failed to read the connector's own privileges on catalog %s", trust.fullName), err)
-		}
-		if !deniesTrust(err) {
-			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on catalog %s: %w", trust.fullName, err)
-		}
-		ctxzap.Extract(ctx).Debug("databricks-connector: the connector's own privileges on the catalog cannot be read, so MANAGE stays unproven",
-			zap.String("catalog", trust.fullName),
-			zap.Error(err))
-
-		return false, nil
-	}
-
-	return manages, nil
 }
 
 func (b *catalogBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {

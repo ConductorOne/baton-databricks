@@ -443,6 +443,74 @@ func ownPrincipalScimID(
 	return id, nil
 }
 
+// managePrivilege is what a trust rule looks for when ownership did not settle
+// it. ALL_PRIVILEGES is deliberately not here: Databricks leaves MANAGE out of
+// it, so its holder still reads a partial privilege list.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+var managePrivilege = []string{privilegeManage}
+
+// errSecurableGone reports that the securable a trust read addressed no longer
+// exists. Only a level that names its gone codes can raise it.
+var errSecurableGone = errors.New("securable no longer exists")
+
+// holdsPrivilegeOn reports whether the connector holds one of wanted. A refusal leaves it unproven. The read is not cached.
+//
+// goneCodes are the error_code values that prove the securable is gone. A level
+// that names them can tell an absence from a routing miss, so a 404 carrying one
+// reports errSecurableGone and any other 404 refuses the read instead of passing
+// as unproven. A level that names none keeps every 404 unproven, because it has
+// no way to tell the two apart.
+func holdsPrivilegeOn(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	securableType, fullName string,
+	wanted []string,
+	goneCodes []string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if trust.ownPrincipal == "" || trust.workspace == "" {
+		return false, nil
+	}
+
+	var holds bool
+	rateLimit, err := client.ForEachUncachedPermissionsPage(ctx, trust.workspace, securableType, fullName, trust.ownPrincipal,
+		func(page []databricks.PrivilegeAssignment) (bool, error) {
+			for _, assignment := range page {
+				for _, privilege := range assignment.Privileges {
+					if slices.Contains(wanted, privilege) {
+						holds = true
+
+						return true, nil
+					}
+				}
+			}
+
+			return false, nil
+		})
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if databricks.IsSecurableGone(err, goneCodes...) {
+			return false, errSecurableGone
+		}
+		if len(goneCodes) > 0 && apiStatus(err) == http.StatusNotFound {
+			return false, refuseUnreadable(fmt.Sprintf(
+				"databricks-connector: failed to read the connector's own privileges on %s %s", securableType, fullName), err)
+		}
+		if !deniesTrust(err) {
+			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on %s %s: %w", securableType, fullName, err)
+		}
+		ctxzap.Extract(ctx).Debug("databricks-connector: the connector's own privileges on the securable cannot be read, so they stay unproven",
+			zap.String("securable_type", securableType),
+			zap.String("securable", fullName),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return holds, nil
+}
+
 // assignmentListError explains a failed read of the workspaces a metastore is
 // assigned to, which decides which workspaces its securables are read through.
 // A 404 is not an empty assignment list: the SDK would skip the child List and
