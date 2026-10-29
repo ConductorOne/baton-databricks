@@ -281,6 +281,9 @@ func (s workspaceScope) attached(
 	ids, rateLimit, err := client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
+		if databricks.IsSecurableGone(err, errorCodeMetastoreGone) {
+			return nil, false, errMetastoreGone
+		}
 		return nil, false, err
 	}
 
@@ -445,6 +448,10 @@ func ownPrincipalScimID(
 // A 404 is not an empty assignment list: the SDK would skip the child List and
 // ConductorOne would delete what it contained.
 func assignmentListError(metastoreID string, err error) error {
+	if errors.Is(err, errMetastoreGone) {
+		return err
+	}
+
 	return refuseUnreadable(
 		fmt.Sprintf("databricks-connector: failed to list the workspaces assigned to metastore %s", metastoreID), err)
 }
@@ -462,9 +469,14 @@ func workspaceForCatalog(
 	annos *annotations.Annotations,
 ) (*databricks.Workspace, *databricks.Catalog, error) {
 	var lastDeny error
+	allGone := len(usable) > 0
 	for i := range usable {
 		catalog, err := catalogThrough(ctx, client, usable[i].DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				continue
+			}
+			allGone = false
 			if deniesTrust(err) {
 				lastDeny = err
 				continue
@@ -474,6 +486,10 @@ func workspaceForCatalog(
 		if catalog != nil {
 			return &usable[i], catalog, nil
 		}
+		allGone = false
+	}
+	if allGone {
+		return nil, nil, errCatalogGone
 	}
 
 	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",

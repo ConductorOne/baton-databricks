@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -35,7 +36,8 @@ const (
 
 	// errorCodeCatalogGone is what Databricks names in error_code when the
 	// catalog a request addresses does not exist.
-	errorCodeCatalogGone = "CATALOG_DOES_NOT_EXIST"
+	errorCodeCatalogGone   = "CATALOG_DOES_NOT_EXIST"
+	errorCodeMetastoreGone = "METASTORE_DOES_NOT_EXIST"
 
 	// systemCatalog is the built-in catalog Databricks puts in every metastore.
 	// It is left out when its privilege list cannot be proved complete.
@@ -113,6 +115,8 @@ var catalogLevel = securableLevel{
 	trusts:          catalogGrantsAreTrustworthy,
 	goneErrorCodes:  []string{errorCodeCatalogGone},
 }
+
+var errCatalogGone = errors.New("catalog no longer exists")
 
 type catalogBuilder struct {
 	client   *databricks.Client
@@ -230,7 +234,7 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 		return nil, nil, status.Errorf(codes.InvalidArgument, "databricks-connector: invalid catalog page token: %v", err)
 	}
 
-	catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, route.Workspace, bag.PageToken(), ResourcesPageSize)
+	catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, route.Workspace, bag.PageToken(), ResourcesPageSize, false)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, catalogListingError(metastoreID, route.Workspace, err)
@@ -255,6 +259,9 @@ func (b *catalogBuilder) List(ctx context.Context, parentResourceID *v2.Resource
 			workspaceID:    route.WorkspaceID,
 		}, &annos)
 		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				continue
+			}
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if !trustworthy {
@@ -328,6 +335,13 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 
 	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
 	if err != nil {
+		// A metastore the account stopped listing has no catalogs left to list.
+		// The metastore syncer stops emitting it in the same sync, so pushing no
+		// route here empties the same set ConductorOne already removes.
+		if errors.Is(err, errMetastoreGone) {
+			return nil
+		}
+
 		return err
 	}
 
@@ -354,7 +368,9 @@ func (b *catalogBuilder) pushRoute(ctx context.Context, metastoreID string, bag 
 // metastoreOwner reads the owner of the metastore the catalogs hang from. It is
 // resolved once per metastore, with the route, because owning the metastore is
 // what makes a catalog's privilege read complete. A metastore the account no
-// longer lists has no owner to compare, which leaves the other rules to settle it.
+// longer lists is reported as errMetastoreGone: the account listing is what
+// proves the metastore is gone, and provisioning answers for a deleted parent
+// instead of failing every task against it.
 func metastoreOwner(
 	ctx context.Context,
 	client *databricks.Client,
@@ -373,10 +389,10 @@ func metastoreOwner(
 		}
 	}
 
-	ctxzap.Extract(ctx).Debug("databricks-connector: the account no longer lists the metastore, so its owner is unknown",
+	ctxzap.Extract(ctx).Debug("databricks-connector: the account no longer lists the metastore",
 		zap.String("metastore", metastoreID))
 
-	return "", nil
+	return "", errMetastoreGone
 }
 
 // catalogThrough reads one catalog through workspace, nil when that workspace
@@ -396,7 +412,7 @@ func catalogThrough(
 	switch {
 	case err == nil:
 	case databricks.IsSecurableGone(err, errorCodeCatalogGone):
-		return nil, nil
+		return nil, errCatalogGone
 	case deniesTrust(err):
 		return nil, err
 	default:
@@ -464,9 +480,9 @@ func catalogGrantsAreTrustworthy(
 		return true, nil
 	}
 
-	// The workspace admins group acts as the owner for a direct Admin of that workspace.
-	if workspaceAdminsGroupOwns(trust.owner, trust.workspaceID) {
-		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, trust.workspaceID, annos)
+	// The workspace admins group acts as the owner for a direct Admin of its workspace.
+	if ownerWorkspaceID, ok := catalogAdminWorkspaceID(trust.owner); ok {
+		admin, err := isWorkspaceAdmin(ctx, client, trust.ownPrincipal, ownerWorkspaceID, annos)
 		if err != nil || admin {
 			return admin, err
 		}
@@ -475,17 +491,20 @@ func catalogGrantsAreTrustworthy(
 	return holdsCatalogManage(ctx, client, trust, annos)
 }
 
-// workspaceAdminsGroupOwns reports whether owner is the system group Databricks
-// creates for a workspace, named _workspace_admins_<workspace>_<workspace id>.
-// That group is the default owner of the workspace catalog, and an object's owner
-// sees every grant on it. A direct Admin of the workspace is treated as a member
-// of the group; the group's membership itself is not listed.
-func workspaceAdminsGroupOwns(owner, workspaceID string) bool {
-	if owner == "" || workspaceID == "" {
-		return false
+func catalogAdminWorkspaceID(owner string) (string, bool) {
+	if !strings.HasPrefix(owner, workspaceAdminsGroupPrefix) {
+		return "", false
+	}
+	separator := strings.LastIndex(owner, "_")
+	if separator <= len(workspaceAdminsGroupPrefix) || separator == len(owner)-1 {
+		return "", false
+	}
+	id := owner[separator+1:]
+	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+		return "", false
 	}
 
-	return strings.HasPrefix(owner, workspaceAdminsGroupPrefix) && strings.HasSuffix(owner, "_"+workspaceID)
+	return id, true
 }
 
 // holdsCatalogManage asks the permissions endpoint for the connector's own
@@ -523,6 +542,13 @@ func holdsCatalogManage(
 		})
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
+		if databricks.IsSecurableGone(err, errorCodeCatalogGone) {
+			return false, errCatalogGone
+		}
+		if apiStatus(err) == http.StatusNotFound {
+			return false, refuseUnreadable(
+				fmt.Sprintf("databricks-connector: failed to read the connector's own privileges on catalog %s", trust.fullName), err)
+		}
 		if !deniesTrust(err) {
 			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on catalog %s: %w", trust.fullName, err)
 		}
@@ -544,6 +570,10 @@ func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, enti
 	annos := annotations.Annotations{}
 	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
 	if err != nil {
+		if errors.Is(err, errMetastoreGone) || errors.Is(err, errCatalogGone) {
+			return annos, status.Errorf(codes.NotFound, "databricks-connector: catalog %s is no longer on metastore %s",
+				entitlement.GetResource().GetId().GetResource(), entitlement.GetResource().GetParentResourceId().GetResource())
+		}
 		return annos, err
 	}
 
@@ -555,6 +585,10 @@ func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotat
 	// A catalog no workspace lists isn't proven gone, so this doesn't return GrantAlreadyRevoked.
 	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
 	if err != nil {
+		if errors.Is(err, errMetastoreGone) || errors.Is(err, errCatalogGone) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+			return annos, nil
+		}
 		return annos, err
 	}
 
@@ -577,15 +611,9 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 	if err != nil {
 		return nil, err
 	}
-
-	if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyWorkspace); workspace != "" {
-		served, err := catalogThrough(ctx, b.client, workspace, metastoreID, catalogName, annos)
-		if err != nil && !deniesTrust(err) {
-			return nil, err
-		}
-		if served != nil {
-			return entitlement, nil
-		}
+	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
+	if err != nil {
+		return nil, err
 	}
 
 	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
@@ -596,20 +624,46 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 	if err != nil {
 		return nil, assignmentListError(metastoreID, err)
 	}
+
+	profileWorkspace, _ := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyWorkspace)
+	for i := range usable {
+		if usable[i].DeploymentName != profileWorkspace {
+			continue
+		}
+		catalog, err := catalogThrough(ctx, b.client, profileWorkspace, metastoreID, catalogName, annos)
+		if err != nil && !errors.Is(err, errCatalogGone) && !deniesTrust(err) {
+			return nil, err
+		}
+		if catalog != nil {
+			routedResource, err := catalogResource(catalog, metastoreID, resource.GetParentResourceId(), catalogRoute{
+				Workspace:      usable[i].DeploymentName,
+				WorkspaceID:    strconv.Itoa(usable[i].ID),
+				WorkspaceName:  usable[i].Name,
+				MetastoreOwner: owner,
+			})
+			if err != nil {
+				return nil, err
+			}
+			copyEntitlement := proto.Clone(entitlement).(*v2.Entitlement)
+			copyEntitlement.Resource = routedResource
+			return copyEntitlement, nil
+		}
+	}
+
 	if len(usable) == 0 {
 		return nil, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+			"databricks-connector: metastore %s has no running workspace in sync scope to prove whether catalog %s was deleted",
+			metastoreID, catalogName)
 	}
 
 	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, annos)
 	if err != nil {
+		if errors.Is(err, errCatalogGone) {
+			return nil, b.confirmCatalogGone(ctx, metastoreID, catalogName, usable[0].DeploymentName, owner, annos)
+		}
 		return nil, err
 	}
 
-	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
-	if err != nil {
-		return nil, err
-	}
 	routed, err := catalogResource(catalog, metastoreID, resource.GetParentResourceId(), catalogRoute{
 		Workspace:      workspace.DeploymentName,
 		WorkspaceID:    strconv.Itoa(workspace.ID),
@@ -624,4 +678,41 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 	copyEntitlement.Resource = routed
 
 	return copyEntitlement, nil
+}
+
+func (b *catalogBuilder) confirmCatalogGone(
+	ctx context.Context,
+	metastoreID, catalogName, workspace, metastoreOwner string,
+	annos *annotations.Annotations,
+) error {
+	if !ownsPrincipal(b.clientID, metastoreOwner) || workspace == "" {
+		return status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: cannot prove whether catalog %s of metastore %s was deleted; the metastore owner must list it with include_unbound=true",
+			catalogName, metastoreID)
+	}
+
+	pageToken := ""
+	for {
+		catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize, true)
+		noteRateLimit(annos, rateLimit)
+		if err != nil {
+			return status.Errorf(codes.FailedPrecondition,
+				"databricks-connector: cannot prove whether catalog %s of metastore %s was deleted with include_unbound=true: %v",
+				catalogName, metastoreID, err)
+		}
+		for _, catalog := range catalogs {
+			if catalog.Name == catalogName && (catalog.MetastoreID == "" || catalog.MetastoreID == metastoreID) {
+				return status.Errorf(codes.FailedPrecondition,
+					"databricks-connector: catalog %s still exists but no workspace in sync scope can list it",
+					catalogName)
+			}
+		}
+		if next == "" {
+			return errCatalogGone
+		}
+		if next == pageToken {
+			return status.Errorf(codes.Internal, "databricks-connector: listing unbound catalogs repeated page token %q", next)
+		}
+		pageToken = next
+	}
 }
