@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -22,6 +23,26 @@ import (
 )
 
 const workspaceMemberEntitlement = "member"
+
+// workspaceSkipWarnOccurrences counts workspaceBuilder.Grants() calls that
+// skipped at least one workspace permission assignment for lack of a usable
+// principal — it is incremented once per call (at the `if skipped > 0` site),
+// so it counts affected workspaces, not skipped assignments — process-wide,
+// for the L7 sampling of the per-workspace "skipped workspace permission
+// assignments without a usable principal" Warn: the Warn emits at occurrence
+// 1, 10, 100, then every 1000, so warn volume is logarithmic in the number
+// of affected workspaces. The counter is process-local logging
+// bookkeeping, not connector sync state; a warm Lambda execution environment
+// keeps the process (and this counter) alive across invocations, while a
+// fresh process starts it at zero. Tests reset it via
+// resetWorkspaceSkipWarnOccurrencesForTest.
+var workspaceSkipWarnOccurrences atomic.Uint64
+
+// resetWorkspaceSkipWarnOccurrencesForTest resets the package-level warn
+// sampling counter; the counter persists across tests in one binary.
+func resetWorkspaceSkipWarnOccurrencesForTest() {
+	workspaceSkipWarnOccurrences.Store(0)
+}
 
 type workspaceBuilder struct {
 	client       *databricks.Client
@@ -213,8 +234,18 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 	}
 
 	var rv []*v2.Grant
+	skipped := 0
 	l.Debug("grants: workspace resource", zap.String("workspace_id", workspace), zap.Int("assignments_count", len(assignments)))
-	for _, assignment := range assignments {
+	for i, assignment := range assignments {
+		if !assignment.UsablePrincipal() {
+			skipped++
+			l.Debug("skipping workspace permission assignment without a usable principal",
+				zap.String("workspace_id", workspace),
+				zap.Int("assignment_index", i),
+				zap.String("assignment_error", assignment.Error),
+			)
+			continue
+		}
 		resourceType, err := prepareResourceType(assignment.Principal)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare resource type: %w", err)
@@ -236,6 +267,33 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, _ 
 		}
 
 		rv = append(rv, grant.NewGrant(resource, workspaceMemberEntitlement, resourceID, grant.WithAnnotation(annotations...)))
+	}
+
+	if skipped > 0 {
+		n := workspaceSkipWarnOccurrences.Add(1)
+		// ci-review §L7: logarithmic sampling for recurring per-resource warns —
+		// emit at occurrence 1, 10, 100, then every 1000.
+		if n == 1 || n == 10 || n == 100 || n%1000 == 0 {
+			l.Warn("skipped workspace permission assignments without a usable principal",
+				zap.String("workspace_id", workspace),
+				zap.String("workspace_name", resource.DisplayName),
+				zap.Int("skipped_count", skipped),
+				zap.Int("assignments_count", len(assignments)),
+				zap.Uint64("total_occurrences", n),
+			)
+		}
+	}
+
+	if skipped == len(assignments) && len(assignments) > 0 {
+		// Every assignment in the API response lacks a usable principal: emitting
+		// nothing would let C1 bucket the workspace's existing grants as deleted.
+		// Fail the sync instead so prior grant state is preserved (BUGBOT §5 +
+		// ci-review §S1). Entries that carry a valid principal ID alongside a
+		// non-empty Error still emit grants per plan lock I3; provisioning
+		// hard-fails on those, but changing sync emission here would alter grant
+		// identity for existing entries.
+		return nil, nil, fmt.Errorf("databricks-connector: workspace %s (%s): all %d permission assignments lack a usable principal; no grants were emitted to avoid deleting existing grants",
+			workspace, resource.DisplayName, skipped)
 	}
 
 	return rv, nil, nil

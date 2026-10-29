@@ -156,6 +156,21 @@ type WorkspaceAssignment struct {
 	Error string `json:"error"`
 }
 
+// UsablePrincipal reports whether the assignment carries a principal the
+// workspace grants sync can turn into a resource. The Databricks
+// permission-assignments API emits entries whose principal object is absent
+// (omitempty) or present but empty, and entries carrying a per-entry error
+// alongside a valid principal. Only the three identifying name fields are
+// tested — Principal.ID is deliberately NOT required, so identity derivation
+// (rs.NewResourceID(prepareResourceType(p), p.ID)) is unchanged for every
+// entry that syncs today. A valid principal with a non-empty Error is still
+// usable: the Error is ignored, exactly as today. Callers that must skip
+// principal-less entries should guard on this method and log the skip.
+func (a *WorkspaceAssignment) UsablePrincipal() bool {
+	return a.Principal != nil &&
+		(a.Principal.UserName != "" || a.Principal.GroupDisplayName != "" || a.Principal.ServicePrincipalAppID != "")
+}
+
 type Role struct {
 	Name string `json:"name"`
 }

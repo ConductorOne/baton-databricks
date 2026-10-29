@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -14,6 +15,10 @@ import (
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -396,5 +401,171 @@ func TestWorkspaceGrantServicePrincipal(t *testing.T) {
 	want := []string{"GET " + testAssignmentsPath, "PUT " + testMemberPath}
 	if !slices.Equal(requests, want) {
 		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+}
+
+func TestWorkspaceGrantsSkipAssignmentsWithoutUsablePrincipal(t *testing.T) {
+	m := &workspaceAssignmentsServer{assignments: []map[string]any{
+		{}, // no principal key at all
+		{"principal": map[string]any{}},
+		{"error": "failed to resolve principal 200"},
+		{"principal": map[string]any{"principal_id": 100, "user_name": "alice@example.com"}, "permissions": []string{"USER"}},
+		{"principal": map[string]any{"principal_id": 500, "group_name": "admins"}, "permissions": []string{"USER"}},
+	}}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	ctx := ctxzap.ToContext(context.Background(), zap.New(core))
+
+	// The package-level warn sampler persists across tests in one binary.
+	resetWorkspaceSkipWarnOccurrencesForTest()
+
+	resource, err := workspaceResource(ctx,
+		&databricks.Workspace{ID: testProvisioningWorkspaceID, Name: "ws", DeploymentName: "ws-deploy"},
+		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+	)
+	if err != nil {
+		t.Fatalf("workspaceResource: %v", err)
+	}
+
+	grants, results, err := w.Grants(ctx, resource, rs.SyncOpAttrs{})
+	if err != nil {
+		t.Fatalf("Grants: %v", err)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("expected 2 grants, got %d", len(grants))
+	}
+
+	userID, err := rs.NewResourceID(userResourceType, 100)
+	if err != nil {
+		t.Fatalf("NewResourceID user: %v", err)
+	}
+	// The group grant goes through groupGrantExpansion, the exact production path.
+	rawGroupID, err := rs.NewResourceID(groupResourceType, 500)
+	if err != nil {
+		t.Fatalf("NewResourceID group: %v", err)
+	}
+	expandedGroupID, _, err := groupGrantExpansion(ctx, rawGroupID.Resource, resource.ParentResourceId)
+	if err != nil {
+		t.Fatalf("groupGrantExpansion: %v", err)
+	}
+	wantIDs := []*v2.ResourceId{userID, expandedGroupID}
+	wantEntitlementID := testWorkspaceMemberEntitlement(t).GetId()
+	for i, g := range grants {
+		if g.GetPrincipal().GetId().GetResourceType() != wantIDs[i].GetResourceType() ||
+			g.GetPrincipal().GetId().GetResource() != wantIDs[i].GetResource() {
+			t.Errorf("grant %d: got principal %v, want %v", i, g.GetPrincipal().GetId(), wantIDs[i])
+		}
+		if g.GetEntitlement().GetId() != wantEntitlementID {
+			t.Errorf("grant %d: entitlement = %q, want %q", i, g.GetEntitlement().GetId(), wantEntitlementID)
+		}
+	}
+
+	// Grants() returns a nil SyncOpResults on success — no annotation kinds added (I8).
+	if results != nil {
+		t.Errorf("results = %v, want nil (no annotations added)", results)
+	}
+
+	// Per-entry skip Debug lines: exactly one per skipped entry, in order.
+	skipLogs := logs.FilterMessage("skipping workspace permission assignment without a usable principal").All()
+	if len(skipLogs) != 3 {
+		t.Fatalf("expected 3 skip Debug lines, got %d", len(skipLogs))
+	}
+	for i, e := range skipLogs {
+		if e.Level != zapcore.DebugLevel {
+			t.Errorf("skip log %d: level = %v, want Debug", i, e.Level)
+		}
+		gotIndex := -1
+		wantError := ""
+		for _, f := range e.Context {
+			switch f.Key {
+			case "assignment_index":
+				gotIndex = int(f.Integer)
+			case "assignment_error":
+				wantError = f.String
+			}
+		}
+		if gotIndex != i {
+			t.Errorf("skip log %d: assignment_index = %d", i, gotIndex)
+		}
+		wantErrors := []string{"", "", "failed to resolve principal 200"}
+		if wantError != wantErrors[i] {
+			t.Errorf("skip log %d: assignment_error = %q, want %q", i, wantError, wantErrors[i])
+		}
+	}
+
+	// Exactly one Warn summary with the locked fields.
+	warns := logs.FilterMessage("skipped workspace permission assignments without a usable principal")
+	if warns.Len() != 1 {
+		t.Fatalf("expected exactly 1 Warn summary, got %d", warns.Len())
+	}
+	we := warns.All()[0]
+	if we.Level != zapcore.WarnLevel {
+		t.Errorf("summary level = %v, want Warn", we.Level)
+	}
+	var skippedCount, assignmentsCount int
+	var totalOccurrences int64
+	var wsID, wsName string
+	for _, f := range we.Context {
+		switch f.Key {
+		case "skipped_count":
+			skippedCount = int(f.Integer)
+		case "assignments_count":
+			assignmentsCount = int(f.Integer)
+		case "total_occurrences":
+			totalOccurrences = f.Integer
+		case "workspace_id":
+			wsID = f.String
+		case "workspace_name":
+			wsName = f.String
+		}
+	}
+	if skippedCount != 3 || assignmentsCount != 5 || totalOccurrences != 1 || wsID != "123" || wsName != "ws" {
+		t.Errorf("Warn summary fields: skipped_count=%d assignments_count=%d total_occurrences=%d workspace_id=%q workspace_name=%q",
+			skippedCount, assignmentsCount, totalOccurrences, wsID, wsName)
+	}
+}
+
+// TestWorkspaceGrantsAllAssignmentsUnusable: when EVERY permission assignment
+// in the API response lacks a usable principal, Grants() fails instead of
+// silently emitting zero grants (which C1 would bucket as deletions).
+func TestWorkspaceGrantsAllAssignmentsUnusable(t *testing.T) {
+	m := &workspaceAssignmentsServer{assignments: []map[string]any{
+		{}, // no principal key at all
+		{"principal": map[string]any{}},
+		{"error": "failed to resolve principal 200"}, // principal-less despite the Error field
+	}}
+	w := newWorkspaceBuilderWithMock(t, m)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	ctx := ctxzap.ToContext(context.Background(), zap.New(core))
+	resetWorkspaceSkipWarnOccurrencesForTest()
+
+	resource, err := workspaceResource(ctx,
+		&databricks.Workspace{ID: testProvisioningWorkspaceID, Name: "ws", DeploymentName: "ws-deploy"},
+		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+	)
+	if err != nil {
+		t.Fatalf("workspaceResource: %v", err)
+	}
+
+	grants, results, err := w.Grants(ctx, resource, rs.SyncOpAttrs{})
+	if err == nil {
+		t.Fatalf("expected error when all assignments are principal-less, got grants=%d results=%v", len(grants), results)
+	}
+	if !strings.HasPrefix(err.Error(), "databricks-connector: ") {
+		t.Errorf("error = %q, want databricks-connector: prefix", err.Error())
+	}
+	if !strings.Contains(err.Error(), "all 3 permission assignments lack a usable principal") {
+		t.Errorf("error = %q, want all-assignments-unusable message", err.Error())
+	}
+	if len(grants) != 0 {
+		t.Errorf("grants = %d, want 0 (nothing emitted)", len(grants))
+	}
+
+	// The Warn summary still fired for the sampled skip count before the guard.
+	warns := logs.FilterMessage("skipped workspace permission assignments without a usable principal")
+	if warns.Len() != 1 {
+		t.Fatalf("expected exactly 1 Warn summary, got %d", warns.Len())
 	}
 }
