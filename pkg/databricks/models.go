@@ -134,6 +134,12 @@ type Workspace struct {
 	Name           string `json:"workspace_name"`
 	Status         string `json:"workspace_status"`
 	DeploymentName string `json:"deployment_name"`
+	StatusMessage  string `json:"workspace_status_message"`
+	Cloud          string `json:"cloud"`
+	AwsRegion      string `json:"aws_region"`
+	PricingTier    string `json:"pricing_tier"`
+	ComputeMode    string `json:"compute_mode"`
+	CreationTime   int64  `json:"creation_time"`
 }
 
 type WorkspacePrincipal struct {

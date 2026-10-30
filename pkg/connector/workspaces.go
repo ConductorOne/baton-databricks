@@ -78,8 +78,22 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
+	l := ctxzap.Extract(ctx)
 	matchedConfigured := make(map[string]struct{}, len(w.workspaces))
 	for _, workspace := range workspaces {
+		l.Debug("databricks-connector: listed account workspace",
+			zap.Int("workspace_id", workspace.ID),
+			zap.String("workspace_name", workspace.Name),
+			zap.String("deployment_name", workspace.DeploymentName),
+			zap.String("workspace_status", workspace.Status),
+			zap.String("workspace_status_message", workspace.StatusMessage),
+			zap.String("cloud", workspace.Cloud),
+			zap.String("aws_region", workspace.AwsRegion),
+			zap.String("pricing_tier", workspace.PricingTier),
+			zap.String("compute_mode", workspace.ComputeMode),
+			zap.Int64("creation_time", workspace.CreationTime),
+		)
+
 		// Skip workspaces outside the configured set when one was provided.
 		if len(w.workspaces) > 0 {
 			cfg, ok := matchConfiguredWorkspace(w.workspaces, workspace.DeploymentName, workspace.Name, strconv.Itoa(workspace.ID))
@@ -99,7 +113,6 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		rv = append(rv, wr)
 	}
 
-	l := ctxzap.Extract(ctx)
 	if len(w.workspaces) > 0 && len(matchedConfigured) == 0 {
 		l.Warn("databricks-connector: none of the configured workspaces matched any account workspace, sync will be empty",
 			zap.Strings("workspaces", configuredWorkspaceNames(w.workspaces)),
