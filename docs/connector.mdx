@@ -58,6 +58,8 @@ The connector authenticates with **OAuth** — an account-level service principa
 
 By default, the Databricks connector picks up access changes on its regular sync schedule. You can optionally turn on incremental sync, which checks Databricks' activity log between full syncs so that changes like new group members show up in C1 sooner. Full syncs still run as usual and remain the source of truth. Removed group memberships are picked up incrementally too, but deleted users, groups, and service principals are only reflected after the next full sync.
 
+Role assignments that Databricks stores in access-control rule sets are also only reflected after the next full sync. These are group roles such as group manager, service principal roles, and the account `marketplace.admin` role.
+
 Incremental sync is turned on by providing the ID of a Databricks SQL warehouse (the **SQL Warehouse ID** setting, `BATON_SQL_WAREHOUSE_ID`) and turned off by leaving it empty — there is no separate on/off switch. Ask your connector operator or C1 support contact to enable it for you.
 
 #### Incremental sync requirements
@@ -73,7 +75,7 @@ Your Databricks account must meet all of the following:
   - **Can use** on the SQL warehouse
 
 <Note>
-**We recommend a serverless SQL warehouse.** It starts in seconds, while a pro or classic warehouse can take several minutes to start. Each incremental update waits at most 5 minutes for the warehouse and query, so a slower start can delay updates until the next one. Serverless SQL warehouses require the Premium plan or above.
+**We recommend a serverless SQL warehouse.** It starts in seconds, while a pro or classic warehouse can take several minutes to start. The connector waits up to about 6 minutes for the warehouse to start and each query to finish, so a slower start can delay updates until the next one. Serverless SQL warehouses require the Premium plan or above.
 </Note>
 
 <Warning>
@@ -106,7 +108,7 @@ A Databricks user with the **Account admin** role, and the **Metastore admin** r
   </Step>
 </Steps>
 
-The SQL warehouse can live in any workspace in that region — the connector finds it automatically. Changes reach C1 roughly four hours after they happen: Databricks delivers audit log entries with a delay, so the connector waits before reading them.
+The SQL warehouse can live in any workspace in that region that is not listed in **Exclude Workspaces**, including a workspace outside **Workspaces** — the connector finds it automatically. **Workspaces** and **Exclude Workspaces** also limit which workspaces incremental sync updates, as they do for full syncs. Changes reach C1 roughly four hours after they happen: Databricks delivers audit log entries with a delay, so the connector waits before reading them.
 
 <Note>
 The incremental sync setup isn't checked when the connector starts, so a problem with it never blocks full syncs or provisioning. If something is missing, such as a permission or a warehouse that can't be found, every incremental update fails and the connector logs an error that names the cause until you fix it.
@@ -317,7 +319,7 @@ stringData:
   BATON_CLIENT_ID: <C1 client ID>
   BATON_CLIENT_SECRET: <C1 client secret>
   
-  # Databricks account ID (required for both credential options below)
+  # Databricks account ID (required)
   BATON_ACCOUNT_ID: <Databricks account ID>
 
   # Databricks credentials: OAuth
@@ -333,7 +335,7 @@ stringData:
   # Optional: exclude specific workspaces from the sync
   # (workspace name, deployment name, or numeric ID).
   # Mutually exclusive with BATON_WORKSPACES — set one or the other, never both.
-  BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
+  # BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
 
   # Optional: setting this enables incremental sync; leave it unset to disable it.
   # ID of the SQL warehouse used to query the system.access.audit log between full syncs.
