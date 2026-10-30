@@ -120,8 +120,15 @@ from ConductorOne.
 By default, `baton-databricks` does a full resync of every resource on every run.
 You can opt into an additional, cheap pathway that polls a Databricks audit log
 between full syncs to pick up access changes early. Full syncs still run as the
-correctness backstop; incremental sync does not detect deletions, which are
-only caught by the next full sync.
+correctness backstop. Incremental sync picks up added and removed group
+memberships, but deleted users, groups and service principals are only caught
+by the next full sync.
+
+Role assignments that Databricks stores in access-control rule sets (group roles
+such as `roles/group.manager`, service principal roles, and the account
+`marketplace.admin` role) are also only caught by the next full sync: they are
+logged under the `accountsAccessControl` audit service, which the connector does
+not query.
 
 **Incremental sync is enabled by setting `--sql-warehouse-id` (or
 `BATON_SQL_WAREHOUSE_ID`) and disabled by leaving it unset or empty.** There is
@@ -157,7 +164,8 @@ Incremental sync works only when all of the following are true:
   - `USE SCHEMA` and `SELECT` on the `system.access` schema
   - `CAN USE` on the SQL warehouse
 
-  For example, run as a metastore admin:
+  For example, run as a metastore admin, replacing `<application-id>` with the
+  service principal's application (client) ID:
 
   ```sql
   GRANT USE CATALOG ON CATALOG system TO `<application-id>`;
@@ -165,16 +173,20 @@ Incremental sync works only when all of the following are true:
   ```
 
 **We recommend a serverless SQL warehouse.** It starts in seconds, while a pro
-or classic warehouse can take several minutes. Each poll waits at most 5 minutes
-for its statement, including warehouse startup; a poll that runs out of time
-fails with a `DeadlineExceeded` error and is retried on the next poll. Serverless
-SQL warehouses require the Premium plan or above.
+or classic warehouse can take several minutes. Each poll waits at most about
+5.5 minutes for its statement, including warehouse startup: the statement
+request waits up to 30 seconds, then the connector polls for up to 5 more
+minutes. A poll that runs out of time fails with a `DeadlineExceeded` error and
+is retried on the next poll. Serverless SQL warehouses require the Premium plan
+or above.
 
 **Incremental sync covers one cloud region.** `system.access.audit` holds
 workspace-level events only for workspaces in the same cloud region as the
 workspace that queries it; account-level events are global ([system tables
 reference](https://docs.databricks.com/aws/en/admin/system-tables/)). The
-connector finds the warehouse's workspace automatically, and it receives
+connector finds the warehouse's workspace automatically, searching every
+workspace except those excluded with `--databricks-exclude-workspaces`, so the
+warehouse cannot live in an excluded workspace. It receives
 incremental updates only for workspaces in that region. Workspaces in other
 regions are still covered by full syncs.
 
