@@ -124,13 +124,21 @@
       "name": "databricks-client-secret",
       "displayName": "OAuth2 Client Secret",
       "description": "The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API",
-      "isRequired": true,
       "isSecret": true,
-      "stringField": {
-        "rules": {
-          "isRequired": true
-        }
-      }
+      "stringField": {}
+    },
+    {
+      "name": "databricks-token",
+      "displayName": "Workload Identity Token",
+      "description": "An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires.",
+      "isSecret": true,
+      "stringField": {}
+    },
+    {
+      "name": "databricks-token-file",
+      "displayName": "Workload Identity Token File",
+      "description": "Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh.",
+      "stringField": {}
     },
     {
       "name": "hostname",
@@ -165,6 +173,22 @@
       "fieldNames": [
         "workspaces",
         "databricks-exclude-workspaces"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_MUTUALLY_EXCLUSIVE",
+      "fieldNames": [
+        "databricks-client-secret",
+        "databricks-token",
+        "databricks-token-file"
+      ]
+    },
+    {
+      "kind": "CONSTRAINT_KIND_AT_LEAST_ONE",
+      "fieldNames": [
+        "databricks-client-secret",
+        "databricks-token",
+        "databricks-token-file"
       ]
     }
   ],

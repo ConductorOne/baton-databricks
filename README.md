@@ -18,9 +18,10 @@ right top corner that will open a dropdown menu with the account ID along other
 options.
 
 Another requirement is to have valid credentials to run the connector with. The
-connector authenticates with the OAuth client credentials flow, using an
-account-level service principal that works across the account and every
-workspace it has access to.
+connector authenticates as an account-level service principal that works across
+the account and every workspace it has access to. It can prove it is that
+service principal in two ways: with a client secret, which is the default, or
+with workload identity federation. See [Authentication](#authentication).
 
 To set this up, create a service principal and add an OAuth secret (client ID
 and secret) to it. You can do that by going to the user management tab and
@@ -98,13 +99,44 @@ it is enabled for the connector in ConductorOne.
 
 ## Authentication
 
-OAuth is the only authentication method: an account-level service principal's
-client ID and secret, supplied through `--databricks-client-id` and
-`--databricks-client-secret`. There is no personal access token (PAT) or
+The connector always authenticates as an account-level service principal, named
+by `--databricks-client-id`. There is no personal access token (PAT) or
 workspace-token option, and no username/password option.
 
-OAuth requires a reachable account API. If the account API check fails at
-startup, the connector fails validation rather than falling back to a
+Exactly one of the following credentials must be supplied. Passing more than one
+is a configuration error.
+
+### Client secret (default)
+
+Pass the service principal's OAuth secret to `--databricks-client-secret` (or
+`BATON_DATABRICKS_CLIENT_SECRET`). The connector runs the OAuth client
+credentials flow against the account token endpoint.
+
+### Workload identity federation
+
+Instead of a long-lived secret, the connector can present an externally issued
+JWT that identifies the workload, such as a SPIFFE JWT-SVID or a Kubernetes
+projected service account token, and exchange it for a short-lived Databricks
+OAuth token ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)).
+
+Create a [service principal federation policy](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange)
+on the same service principal, trusting the issuer, subject and audience of that
+JWT. Then supply the JWT with one of:
+
+- `--databricks-token-file` (or `BATON_DATABRICKS_TOKEN_FILE`): a path to the
+  token. The file is read again on every token refresh, so a rotated token is
+  picked up without restarting the connector. Prefer this for anything
+  long-running.
+- `--databricks-token` (or `BATON_DATABRICKS_TOKEN`): the JWT itself. The
+  connector cannot refresh it, so the sync fails once it expires.
+
+Nothing else changes: the exchange happens at the same account token endpoint,
+and the resulting token is used for both account and workspace APIs.
+
+### Validation
+
+Either method requires a reachable account API. If the account API check fails
+at startup, the connector fails validation rather than falling back to a
 workspace-only sync, even when `--workspaces` is set.
 
 To instead exclude specific workspaces from the sync, pass them to the
@@ -183,7 +215,7 @@ four hours after they happen.
 
 ## Group provisioning
 
-Account groups are provisioned through the OAuth client ID and secret flow.
+Account groups are provisioned as the authenticated service principal.
 [Here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.)
 are the different types of groups in Databricks.
 
@@ -285,8 +317,10 @@ Flags:
       --client-id string                                 The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string                             The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
-      --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
+      --databricks-client-secret string                  The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --databricks-token string                          An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires. ($BATON_DATABRICKS_TOKEN)
+      --databricks-token-file string                     Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh. ($BATON_DATABRICKS_TOKEN_FILE)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)

@@ -20,21 +20,24 @@ While developing the connector, please fill out this form. This information is n
 
 1. What credentials or information are needed to set up the connector? (For example, API key, client ID and secret, domain, etc.)
 
-   > The connector requires a Databricks account ID and OAuth credentials:
+   > The connector requires a Databricks account ID and a service principal OAuth client ID. It syncs the account and every workspace that service principal can access. The service principal is then authenticated in one of two ways:
    >
-   > - **OAuth**: a service principal OAuth client ID and client secret. Syncs the account and every workspace the service principal can access. This is the connector's only authentication method.
+   > - **OAuth client secret** (default): the service principal's OAuth client secret.
+   > - **Workload identity federation**: an externally issued JWT identifying the workload, such as a SPIFFE JWT-SVID or a Kubernetes projected service account token, supplied as a value or as a file path. The connector exchanges it for a short-lived Databricks token, so no long-lived secret is stored. This requires a service principal federation policy in Databricks.
+   >
+   > Exactly one of the two credentials is supplied.
    >
    > Google Cloud Platform and Azure Databricks customers also provide their Databricks domain, such as `gcp.databricks.com` or `azuredatabricks.net`. Account Hostname is optional: the connector derives it from Hostname when unset.
 
 2. For each item in the list above:
-
-   * How does a user create or look up that credential or info? Please include links to (non-gated) documentation, screenshots (of the UI or of gated docs), or a video of the process.
+   - How does a user create or look up that credential or info? Please include links to (non-gated) documentation, screenshots (of the UI or of gated docs), or a video of the process.
 
      > - **Account ID**: in the Databricks account console, open the menu next to your username in the upper-right corner; the account ID is shown there.
      > - **OAuth client ID and secret**: follow the [Databricks OAuth (M2M) documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and generate an OAuth secret.
+     > - **Workload identity federation**: follow the [Databricks OAuth token federation documentation](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange) to add a federation policy to that same service principal. The JWT itself comes from the workload's own platform, not from Databricks.
      > - **Deployment name**: the subdomain in the workspace URL (not the numeric workspace ID).
 
-   * Does the credential need any specific scopes or permissions? If so, list them here.
+   - Does the credential need any specific scopes or permissions? If so, list them here.
 
      > The credential must have admin access to each resource it reads or writes: account-admin on the Databricks account (for account-level sync and provisioning) and workspace-admin assigned directly to the service principal on each workspace being synced (Admin inherited only through a group is not enough).
      >
@@ -42,11 +45,11 @@ While developing the connector, please fill out this form. This information is n
      >
      > Unity Catalog adds a third layer on top of scopes and roles: standing on the securable itself. For each metastore being synced, the service principal must either own the metastore or be assigned Admin directly on at least one running workspace attached to it. Without that standing the sync fails, and ConductorOne keeps the grants it already has.
 
-   * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
+   - If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
      > No separate scopes: Databricks admin access covers both read (sync) and read-write (provision).
 
-   * What level of access or permissions does the user need in order to create the credentials? (For example, must be a super administrator, must have access to the admin console, etc.)
+   - What level of access or permissions does the user need in order to create the credentials? (For example, must be a super administrator, must have access to the admin console, etc.)
 
      > Account admin access to the Databricks account console (to create the service principal and OAuth secret), and workspace admin on each workspace being synced.
 
