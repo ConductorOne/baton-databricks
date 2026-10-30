@@ -17,7 +17,6 @@ var (
 		field.WithDisplayName("OAuth2 Client ID"),
 		field.WithRequired(true),
 	)
-	// Not required: FieldsMutuallyExclusive rejects a Required field.
 	DatabricksClientSecretField = field.StringField(
 		"databricks-client-secret",
 		field.WithDescription("The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API"),
