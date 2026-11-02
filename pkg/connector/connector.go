@@ -175,12 +175,12 @@ func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
 	databricksClientId := cfg.DatabricksClientId
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 
-	if cfg.DatabricksToken != "" || cfg.DatabricksTokenFile != "" {
+	if cfg.DatabricksOidcToken != "" || cfg.DatabricksOidcTokenFile != "" {
 		return databricks.NewTokenFederation(
 			accountID,
 			databricksClientId,
-			cfg.DatabricksToken,
-			cfg.DatabricksTokenFile,
+			cfg.DatabricksOidcToken,
+			cfg.DatabricksOidcTokenFile,
 			accountHostname,
 		)
 	}

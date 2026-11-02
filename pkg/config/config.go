@@ -23,14 +23,14 @@ var (
 		field.WithIsSecret(true),
 		field.WithDisplayName("OAuth2 Client Secret"),
 	)
-	DatabricksTokenField = field.StringField(
-		"databricks-token",
+	DatabricksOIDCTokenField = field.StringField(
+		"databricks-oidc-token",
 		field.WithDescription("An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires."),
 		field.WithIsSecret(true),
 		field.WithDisplayName("Workload Identity Token"),
 	)
-	DatabricksTokenFileField = field.StringField(
-		"databricks-token-file",
+	DatabricksOIDCTokenFileField = field.StringField(
+		"databricks-oidc-token-file",
 		field.WithDescription("Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh."),
 		field.WithDisplayName("Workload Identity Token File"),
 	)
@@ -69,8 +69,8 @@ var (
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
-		DatabricksTokenField,
-		DatabricksTokenFileField,
+		DatabricksOIDCTokenField,
+		DatabricksOIDCTokenFileField,
 		HostnameField,
 		WorkspacesField,
 		BaseURLField,
@@ -86,7 +86,7 @@ var Config = field.NewConfiguration(
 	field.WithIconUrl("/static/app-icons/databricks.svg"),
 	field.WithConstraints(
 		field.FieldsMutuallyExclusive(WorkspacesField, ExcludeWorkspacesField),
-		field.FieldsMutuallyExclusive(DatabricksClientSecretField, DatabricksTokenField, DatabricksTokenFileField),
-		field.FieldsAtLeastOneUsed(DatabricksClientSecretField, DatabricksTokenField, DatabricksTokenFileField),
+		field.FieldsMutuallyExclusive(DatabricksClientSecretField, DatabricksOIDCTokenField, DatabricksOIDCTokenFileField),
+		field.FieldsAtLeastOneUsed(DatabricksClientSecretField, DatabricksOIDCTokenField, DatabricksOIDCTokenFileField),
 	),
 )
