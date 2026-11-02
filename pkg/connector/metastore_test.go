@@ -71,6 +71,10 @@ type fakeAccount struct {
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
 
+	// workspaceGroups maps a deployment name to the SCIM groups that workspace serves.
+	// A workspace-local group is only there: the account answers its id with a 404.
+	workspaceGroups map[string]map[string]string
+
 	permHosts   []string
 	patches     []map[string]any
 	scimGets    map[string]int
@@ -167,8 +171,12 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 func (f *fakeAccount) scim(w http.ResponseWriter, r *http.Request) {
 	_, rest, _ := strings.Cut(r.URL.Path, "/scim/v2/")
 	kind, id, _ := strings.Cut(rest, "/")
+	groups := f.groups
+	if local, ok := f.workspaceGroups[r.Header.Get("X-Test-Workspace")]; ok {
+		groups = local
+	}
 	field, records := map[string]string{"Users": "userName", "Groups": "displayName", "ServicePrincipals": "applicationId"}[kind],
-		map[string]map[string]string{"Users": f.users, "Groups": f.groups, "ServicePrincipals": f.sps}[kind]
+		map[string]map[string]string{"Users": f.users, "Groups": groups, "ServicePrincipals": f.sps}[kind]
 	if id != "" {
 		f.scimGets[kind+"/"+id]++
 		if name, ok := records[id]; ok {

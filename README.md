@@ -239,6 +239,9 @@ A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
 privilege held by a group is expandable, so ConductorOne resolves the group's
 members as holders.
 
+Metastore privileges held by the built-in workspace admins group are synced as
+read-only grants. Databricks does not allow granting them back after revocation.
+
 `MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
 metastore level.
 

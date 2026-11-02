@@ -28,6 +28,7 @@ func testWorkspace(t *testing.T) *v2.Resource {
 	r, err := workspaceResource(context.Background(),
 		&databricks.Workspace{ID: testProvisioningWorkspaceID, Name: "ws", DeploymentName: "ws-deploy"},
 		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+		false,
 	)
 	if err != nil {
 		t.Fatalf("workspaceResource: %v", err)

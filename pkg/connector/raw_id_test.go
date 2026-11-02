@@ -42,7 +42,7 @@ func TestResourcesHaveRawId(t *testing.T) {
 		},
 		{
 			"workspace",
-			build(workspaceResource(ctx, &databricks.Workspace{Name: "ws", DeploymentName: "ws-1"}, account)),
+			build(workspaceResource(ctx, &databricks.Workspace{Name: "ws", DeploymentName: "ws-1"}, account, false)),
 			"ws-1",
 		},
 		{

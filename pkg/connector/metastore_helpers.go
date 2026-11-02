@@ -79,6 +79,7 @@ var (
 type syncPrincipals struct {
 	groups            bool
 	servicePrincipals bool
+	workspaceGroups   bool
 }
 
 func emitPrincipal(sync syncPrincipals, resourceType string) bool {
@@ -204,6 +205,13 @@ func unityPrincipalName(ctx context.Context, c *databricks.Client, principal *v2
 	return name, nil
 }
 
+// workspaceIsRunning reports whether a workspace serves its workspace-plane APIs. The
+// account API omits the status unless the workspace is changing state, so empty is
+// RUNNING.
+func workspaceIsRunning(status string) bool {
+	return status == "" || strings.EqualFold(status, workspaceStatusRunning)
+}
+
 // scopedWorkspaces indexes, by numeric id, the workspaces this sync may read
 // through, and marks which of them are RUNNING. ListWorkspaces already drops the
 // excluded ones.
@@ -233,7 +241,7 @@ func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotati
 			continue
 		}
 		scoped[id] = workspace
-		running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
+		running[id] = workspaceIsRunning(workspace.Status)
 	}
 
 	return scoped, running, nil
