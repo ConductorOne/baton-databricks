@@ -120,8 +120,17 @@ from ConductorOne.
 By default, `baton-databricks` does a full resync of every resource on every run.
 You can opt into an additional, cheap pathway that polls a Databricks audit log
 between full syncs to pick up access changes early. Full syncs still run as the
-correctness backstop; incremental sync does not detect deletions, which are
-only caught by the next full sync.
+correctness backstop. Incremental sync picks up added and removed group
+memberships, but deleted users, groups and service principals are only caught
+by the next full sync.
+
+Role assignments that Databricks stores in access-control rule sets (group roles
+such as `roles/group.manager`, service principal roles, and the account
+`marketplace.admin` role) are also only caught by the next full sync: the
+connector does not read the audit events Databricks writes for rule-set
+changes. A `roles/group.manager` change, for example, is logged as
+`updateRuleSet` under the `accountsAccessControl` audit service, which the
+connector does not query.
 
 **Incremental sync is enabled by setting `--sql-warehouse-id` (or
 `BATON_SQL_WAREHOUSE_ID`) and disabled by leaving it unset or empty.** There is
@@ -157,7 +166,8 @@ Incremental sync works only when all of the following are true:
   - `USE SCHEMA` and `SELECT` on the `system.access` schema
   - `CAN USE` on the SQL warehouse
 
-  For example, run as a metastore admin:
+  For example, run as a metastore admin, replacing `<application-id>` with the
+  service principal's application (client) ID:
 
   ```sql
   GRANT USE CATALOG ON CATALOG system TO `<application-id>`;
@@ -165,16 +175,21 @@ Incremental sync works only when all of the following are true:
   ```
 
 **We recommend a serverless SQL warehouse.** It starts in seconds, while a pro
-or classic warehouse can take several minutes. Each poll waits at most 5 minutes
-for its statement, including warehouse startup; a poll that runs out of time
-fails with a `DeadlineExceeded` error and is retried on the next poll. Serverless
-SQL warehouses require the Premium plan or above.
+or classic warehouse can take several minutes. Each statement gets up to 30
+seconds on the initial request, including warehouse startup, then up to 5 more
+minutes of polling. A statement still unfinished after that is cancelled, so a
+poll can take close to 6 minutes before it fails with a `DeadlineExceeded`
+error and is retried on the next poll. Serverless SQL warehouses require the
+Premium plan or above.
 
 **Incremental sync covers one cloud region.** `system.access.audit` holds
 workspace-level events only for workspaces in the same cloud region as the
 workspace that queries it; account-level events are global ([system tables
 reference](https://docs.databricks.com/aws/en/admin/system-tables/)). The
-connector finds the warehouse's workspace automatically, and it receives
+connector finds the warehouse's workspace automatically by checking each
+workspace the service principal can access, except those excluded with
+`--databricks-exclude-workspaces`; the `--workspaces` allowlist does not limit
+this search. It receives
 incremental updates only for workspaces in that region. Workspaces in other
 regions are still covered by full syncs.
 
@@ -306,7 +321,7 @@ Flags:
   -p, --provisioning                                     This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
-      --sql-warehouse-id string                          Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deletions are still only caught by full syncs). The warehouse can be in any workspace in the same cloud region as the workspaces to update incrementally; Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically. ($BATON_SQL_WAREHOUSE_ID)
+      --sql-warehouse-id string                          Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deleted users, groups and service principals are still only caught by full syncs). The warehouse can be in any workspace not excluded by databricks-exclude-workspaces, in the same cloud region as the workspaces to update incrementally; Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically. ($BATON_SQL_WAREHOUSE_ID)
       --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Defaults to pebble when unset. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)
