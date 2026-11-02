@@ -238,7 +238,9 @@ stringData:
   # issued JWT your federation policy trusts. The connector reads the file again
   # on every token refresh, so a rotated token needs no restart.
   # Set either the client secret or one of the token options, never more than one.
-  # BATON_DATABRICKS_TOKEN_FILE: /var/run/secrets/databricks/token
+  # Nothing creates this file for you: uncomment the matching volume and
+  # volumeMount in the Deployment below, or mount the JWT there yourself.
+  # BATON_DATABRICKS_OIDC_TOKEN_FILE: /var/run/secrets/databricks/token
 
   # Optional: limit the sync to specific workspaces
   # (workspace name, deployment name, or numeric ID).
@@ -295,6 +297,21 @@ spec:
         envFrom:
         - secretRef:
             name: baton-databricks-secrets
+        # Only for BATON_DATABRICKS_OIDC_TOKEN_FILE: mount the JWT at the path the
+        # secret points to. Leave this out when you use the client secret.
+        # volumeMounts:
+        # - name: databricks-oidc-token
+        #   mountPath: /var/run/secrets/databricks
+        #   readOnly: true
+      # volumes:
+      # - name: databricks-oidc-token
+      #   projected:
+      #     sources:
+      #     - serviceAccountToken:
+      #         path: token
+      #         # Must match the audience of the Databricks federation policy.
+      #         audience: <federation policy audience>
+      #         expirationSeconds: 3600
 ```
 
 ### Step 3: Deploy the connector

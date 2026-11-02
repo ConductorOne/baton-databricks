@@ -17,7 +17,7 @@ func TestCredentialConstraintsAreWellFormed(t *testing.T) {
 			t.Fatalf("constraint %+v is Invalid and will never be enforced", constraint)
 		}
 
-		if !constraintCovers(constraint, DatabricksClientSecretField, DatabricksTokenField, DatabricksTokenFileField) {
+		if !constraintCovers(constraint, DatabricksClientSecretField, DatabricksOIDCTokenField, DatabricksOIDCTokenFileField) {
 			continue
 		}
 
@@ -71,11 +71,11 @@ func TestCredentialValidation(t *testing.T) {
 		},
 		{
 			name: "workload identity token alone",
-			cfg:  Databricks{DatabricksToken: "subject-jwt"},
+			cfg:  Databricks{DatabricksOidcToken: "subject-jwt"},
 		},
 		{
 			name: "workload identity token file alone",
-			cfg:  Databricks{DatabricksTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a test fixture path, not a credential.
+			cfg:  Databricks{DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a test fixture path, not a credential.
 		},
 		{
 			name:    "no credential",
@@ -84,12 +84,12 @@ func TestCredentialValidation(t *testing.T) {
 		},
 		{
 			name:    "client secret and token together",
-			cfg:     Databricks{DatabricksClientSecret: "secret", DatabricksToken: "subject-jwt"},
+			cfg:     Databricks{DatabricksClientSecret: "secret", DatabricksOidcToken: "subject-jwt"},
 			wantErr: "mutually exclusive",
 		},
 		{
 			name:    "token and token file together",
-			cfg:     Databricks{DatabricksToken: "subject-jwt", DatabricksTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: test fixtures, not credentials.
+			cfg:     Databricks{DatabricksOidcToken: "subject-jwt", DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: test fixtures, not credentials.
 			wantErr: "mutually exclusive",
 		},
 	}

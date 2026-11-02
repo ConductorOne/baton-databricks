@@ -109,11 +109,11 @@ Create a [service principal federation policy](https://docs.databricks.com/aws/e
 on the same service principal, trusting the issuer, subject and audience of that
 JWT. Then supply the JWT with one of:
 
-- `--databricks-token-file` (or `BATON_DATABRICKS_TOKEN_FILE`): a path to the
+- `--databricks-oidc-token-file` (or `BATON_DATABRICKS_OIDC_TOKEN_FILE`): a path to the
   token. The file is read again on every token refresh, so a rotated token is
   picked up without restarting the connector. Prefer this for anything
   long-running.
-- `--databricks-token` (or `BATON_DATABRICKS_TOKEN`): the JWT itself. The
+- `--databricks-oidc-token` (or `BATON_DATABRICKS_OIDC_TOKEN`): the JWT itself. The
   connector cannot refresh it, so the sync fails once it expires.
 
 Nothing else changes: the exchange happens at the same account token endpoint,
@@ -188,8 +188,8 @@ Flags:
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
-      --databricks-token string                          An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires. ($BATON_DATABRICKS_TOKEN)
-      --databricks-token-file string                     Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh. ($BATON_DATABRICKS_TOKEN_FILE)
+      --databricks-oidc-token string                     An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires. ($BATON_DATABRICKS_OIDC_TOKEN)
+      --databricks-oidc-token-file string                Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh. ($BATON_DATABRICKS_OIDC_TOKEN_FILE)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)
