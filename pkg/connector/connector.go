@@ -11,6 +11,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/field"
 )
 
 type Databricks struct {
@@ -147,7 +148,17 @@ func New(
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+	// The auth method decides which fields are required. Validating without it
+	// would check the default group against a configuration built for another.
+	authMethod := ""
+	if opts != nil {
+		authMethod = opts.SelectedAuthMethod
+	}
+	if err := field.Validate(config.Config, cfg, field.WithAuthMethod(authMethod)); err != nil {
+		return nil, nil, err
+	}
+
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 	auth := prepareClientAuth(cfg)
 
@@ -169,19 +180,18 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 }
 
 // prepareClientAuth uses the client secret by default and switches to workload
-// identity federation when one of the token fields is set.
+// identity federation when a token file is configured.
 func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 
-	if cfg.DatabricksOidcToken != "" || cfg.DatabricksOidcTokenFile != "" {
+	if cfg.DatabricksOidcTokenFile != "" {
 		return databricks.NewTokenFederation(
 			accountID,
 			databricksClientId,
-			cfg.DatabricksOidcToken,
-			cfg.DatabricksOidcTokenFile,
 			accountHostname,
+			databricks.FileSubjectTokenSource{Path: cfg.DatabricksOidcTokenFile},
 		)
 	}
 

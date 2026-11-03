@@ -59,11 +59,37 @@ type OAuth2 struct {
 	cfg *clientcredentials.Config
 }
 
+// SubjectTokenSource yields the externally issued JWT that identifies the
+// workload. Token() asks for one on every exchange, so a source that cannot
+// produce a fresh token does not belong behind this interface.
+type SubjectTokenSource interface {
+	SubjectToken() (string, error)
+}
+
+// FileSubjectTokenSource reads the JWT from disk on every call, so whatever
+// rotates the file controls the lifetime and the connector needs no restart.
+type FileSubjectTokenSource struct {
+	Path string
+}
+
+func (f FileSubjectTokenSource) SubjectToken() (string, error) {
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		return "", uhttp.WrapErrors(codes.FailedPrecondition, fmt.Sprintf("failed to read workload identity token file %q", f.Path), err)
+	}
+
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", uhttp.WrapErrors(codes.FailedPrecondition, fmt.Sprintf("workload identity token file %q is empty", f.Path))
+	}
+
+	return token, nil
+}
+
 type TokenFederation struct {
-	clientID  string
-	tokenURL  string
-	token     string
-	tokenFile string
+	clientID string
+	tokenURL string
+	source   SubjectTokenSource
 }
 
 type federationTokenSource struct {
@@ -94,25 +120,11 @@ func accountTokenURL(accountHostname, accountID string) string {
 // subjectToken returns the JWT. A file is read on every call, so a rotated token is
 // picked up without restarting the connector.
 func (t *TokenFederation) subjectToken() (string, error) {
-	if t.tokenFile == "" {
-		if t.token == "" {
-			return "", uhttp.WrapErrors(codes.FailedPrecondition, "no workload identity token configured")
-		}
-
-		return t.token, nil
+	if t.source == nil {
+		return "", uhttp.WrapErrors(codes.FailedPrecondition, "no workload identity token source configured")
 	}
 
-	raw, err := os.ReadFile(t.tokenFile)
-	if err != nil {
-		return "", uhttp.WrapErrors(codes.FailedPrecondition, fmt.Sprintf("failed to read workload identity token file %q", t.tokenFile), err)
-	}
-
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return "", uhttp.WrapErrors(codes.FailedPrecondition, fmt.Sprintf("workload identity token file %q is empty", t.tokenFile))
-	}
-
-	return token, nil
+	return t.source.SubjectToken()
 }
 
 // tokenExpiry never returns the zero time, which oauth2 reads as a token that
@@ -187,12 +199,11 @@ func (o *OAuth2) Apply(req *http.Request) {
 
 // NewTokenFederation builds the federation auth. Exactly one of token or tokenFile
 // carries the JWT.
-func NewTokenFederation(accID, clientID, token, tokenFile, accountHostname string) *TokenFederation {
+func NewTokenFederation(accID, clientID, accountHostname string, source SubjectTokenSource) *TokenFederation {
 	return &TokenFederation{
-		clientID:  clientID,
-		tokenURL:  accountTokenURL(accountHostname, accID),
-		token:     token,
-		tokenFile: tokenFile,
+		clientID: clientID,
+		tokenURL: accountTokenURL(accountHostname, accID),
+		source:   source,
 	}
 }
 

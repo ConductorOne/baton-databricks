@@ -8,7 +8,6 @@ type Databricks struct {
 	AccountId string `mapstructure:"account-id"`
 	DatabricksClientId string `mapstructure:"databricks-client-id"`
 	DatabricksClientSecret string `mapstructure:"databricks-client-secret"`
-	DatabricksOidcToken string `mapstructure:"databricks-oidc-token"`
 	DatabricksOidcTokenFile string `mapstructure:"databricks-oidc-token-file"`
 	Hostname string `mapstructure:"hostname"`
 	Workspaces []string `mapstructure:"workspaces"`

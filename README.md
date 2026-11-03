@@ -107,14 +107,23 @@ OAuth token ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)).
 
 Create a [service principal federation policy](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange)
 on the same service principal, trusting the issuer, subject and audience of that
-JWT. Then supply the JWT with one of:
+JWT. Then select the method and point the connector at the token:
 
-- `--databricks-oidc-token-file` (or `BATON_DATABRICKS_OIDC_TOKEN_FILE`): a path to the
-  token. The file is read again on every token refresh, so a rotated token is
-  picked up without restarting the connector. Prefer this for anything
-  long-running.
-- `--databricks-oidc-token` (or `BATON_DATABRICKS_OIDC_TOKEN`): the JWT itself. The
-  connector cannot refresh it, so the sync fails once it expires.
+```
+--auth-method workload-identity-file \
+  --databricks-oidc-token-file /var/run/secrets/token
+```
+
+`--auth-method` (or `BATON_AUTH_METHOD`) is required here. Without it the
+connector validates against the default method and asks for a client secret.
+
+The file is read again on every token refresh, so whatever rotates it controls
+the lifetime and the connector needs no restart.
+
+This method runs the connector yourself: on the command line or in service mode.
+A ConductorOne-hosted connector has no file system you control, so the option is
+not offered there. Hosted support needs ConductorOne to issue the JWT, which is
+tracked in CXE-1557.
 
 Nothing else changes: the exchange happens at the same account token endpoint,
 and the resulting token is used for both account and workspace APIs.
@@ -186,10 +195,9 @@ Flags:
       --client-id string                                 The client ID used to authenticate with ConductorOne ($BATON_CLIENT_ID)
       --client-secret string                             The client secret used to authenticate with ConductorOne ($BATON_CLIENT_SECRET)
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
-      --databricks-client-secret string                  The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
+      --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
-      --databricks-oidc-token string                     An externally issued JWT identifying the workload, exchanged for a Databricks OAuth token. The connector does not refresh it, so the sync fails once the JWT expires. ($BATON_DATABRICKS_OIDC_TOKEN)
-      --databricks-oidc-token-file string                Path to a file holding an externally issued JWT identifying the workload. The file must exist where the connector runs, and it is read again on every token refresh. ($BATON_DATABRICKS_OIDC_TOKEN_FILE)
+      --databricks-oidc-token-file string                required: Path to a file holding an externally issued JWT identifying the workload. The file is read again on every token refresh, so an external rotation is picked up without a restart. ($BATON_DATABRICKS_OIDC_TOKEN_FILE)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)
