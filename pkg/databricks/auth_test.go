@@ -44,7 +44,14 @@ func exchangeServer(t *testing.T, handler func(form url.Values) (int, string)) (
 	return server, received
 }
 
-func newTestTokenSource(t *testing.T, tokenURL, token, tokenFile string) *federationTokenSource {
+// stubSubjectTokenSource stands in for a real source so the exchange itself can
+// be tested without a file. Production offers no static source: a fixed JWT
+// cannot be refreshed.
+type stubSubjectTokenSource string
+
+func (s stubSubjectTokenSource) SubjectToken() (string, error) { return string(s), nil }
+
+func newTestTokenSource(t *testing.T, tokenURL string, source SubjectTokenSource) *federationTokenSource {
 	t.Helper()
 
 	ctx := context.Background()
@@ -55,7 +62,7 @@ func newTestTokenSource(t *testing.T, tokenURL, token, tokenFile string) *federa
 
 	return &federationTokenSource{
 		ctx:        ctx,
-		auth:       &TokenFederation{clientID: "sp-client-id", tokenURL: tokenURL, token: token, tokenFile: tokenFile},
+		auth:       &TokenFederation{clientID: "sp-client-id", tokenURL: tokenURL, source: source},
 		httpClient: httpClient,
 	}
 }
@@ -76,7 +83,7 @@ func TestTokenFederationExchange(t *testing.T) {
 		return http.StatusOK, `{"access_token":"databricks-token","token_type":"Bearer","expires_in":3600}`
 	})
 
-	source := newTestTokenSource(t, server.URL, "subject-jwt", "")
+	source := newTestTokenSource(t, server.URL, stubSubjectTokenSource("subject-jwt"))
 
 	token, err := source.Token()
 	if err != nil {
@@ -115,7 +122,7 @@ func TestTokenFederationRereadsTokenFile(t *testing.T) {
 	})
 
 	path := writeTokenFile(t, "first-jwt\n")
-	source := newTestTokenSource(t, server.URL, "", path)
+	source := newTestTokenSource(t, server.URL, FileSubjectTokenSource{Path: path})
 
 	if _, err := source.Token(); err != nil {
 		t.Fatalf("first Token: %v", err)
@@ -173,7 +180,7 @@ func TestTokenFederationExchangeErrors(t *testing.T) {
 				return tt.status, tt.body
 			})
 
-			_, err := newTestTokenSource(t, server.URL, "subject-jwt", "").Token()
+			_, err := newTestTokenSource(t, server.URL, stubSubjectTokenSource("subject-jwt")).Token()
 			if err == nil {
 				t.Fatal("Token succeeded, want an error")
 			}
@@ -209,7 +216,7 @@ func TestTokenFederationExchangeErrorsAreClassified(t *testing.T) {
 				return tt.status, `{"error":"invalid_grant","error_description":"no matching federation policy"}`
 			})
 
-			_, err := newTestTokenSource(t, server.URL, "subject-jwt", "").Token()
+			_, err := newTestTokenSource(t, server.URL, stubSubjectTokenSource("subject-jwt")).Token()
 			if err == nil {
 				t.Fatal("Token succeeded, want an error")
 			}
@@ -241,14 +248,13 @@ func TestTokenFederationSubjectToken(t *testing.T) {
 	}{
 		{"missing file", filepath.Join(t.TempDir(), "absent.jwt"), "failed to read"},
 		{"empty file", writeTokenFile(t, "   \n"), "is empty"},
-		{"no credential at all", "", "no workload identity token configured"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := newTestTokenSource(t, "", "", tt.file).Token()
+			_, err := newTestTokenSource(t, "", FileSubjectTokenSource{Path: tt.file}).Token()
 			if err == nil {
 				t.Fatal("Token succeeded, want an error")
 			}
@@ -361,5 +367,19 @@ func TestAccountTokenURL(t *testing.T) {
 				t.Errorf("accountTokenURL = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A federation built without a source cannot answer an exchange, and it must
+// say so instead of reading an empty path.
+func TestTokenFederationWithoutASourceIsRefused(t *testing.T) {
+	t.Parallel()
+
+	_, err := (&TokenFederation{clientID: "sp-client-id"}).subjectToken()
+	if err == nil {
+		t.Fatal("subjectToken succeeded with no source, want an error")
+	}
+	if !strings.Contains(err.Error(), "no workload identity token source configured") {
+		t.Errorf("error = %q, want it to name the missing source", err)
 	}
 }

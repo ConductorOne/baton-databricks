@@ -7,90 +7,104 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/field"
 )
 
-// An Invalid relationship makes field.Validate reject every configuration with a
-// bare "invalid relationship constraint", so the connector would not start at all.
-func TestCredentialConstraintsAreWellFormed(t *testing.T) {
-	var mutuallyExclusive, atLeastOne int
-
-	for _, constraint := range Config.Constraints {
-		if constraint.Kind == field.Invalid {
-			t.Fatalf("constraint %+v is Invalid and will never be enforced", constraint)
+// Validation skips every field the selected group does not list, so a group
+// that forgets a required field silently stops checking it.
+func TestEveryAuthGroupCarriesTheRequiredCommonFields(t *testing.T) {
+	for _, group := range Config.FieldGroups {
+		fields := group.FieldMap()
+		for _, required := range []field.SchemaField{AccountIdField, DatabricksClientIdField} {
+			if _, ok := fields[required.FieldName]; !ok {
+				t.Errorf("group %q omits %q, so it would no longer be validated", group.Name, required.FieldName)
+			}
 		}
-
-		if !constraintCovers(constraint, DatabricksClientSecretField, DatabricksOIDCTokenField, DatabricksOIDCTokenFileField) {
-			continue
-		}
-
-		switch constraint.Kind {
-		case field.MutuallyExclusive:
-			mutuallyExclusive++
-		case field.AtLeastOne:
-			atLeastOne++
-		case field.Invalid, field.RequiredTogether, field.Dependents:
-		}
-	}
-
-	if mutuallyExclusive != 1 {
-		t.Errorf("found %d mutually exclusive credential constraints, want 1", mutuallyExclusive)
-	}
-	if atLeastOne != 1 {
-		t.Errorf("found %d at-least-one credential constraints, want 1", atLeastOne)
 	}
 }
 
-func constraintCovers(constraint field.SchemaFieldRelationship, want ...field.SchemaField) bool {
-	if len(constraint.Fields) != len(want) {
-		return false
-	}
-
-	present := make(map[string]bool, len(constraint.Fields))
-	for _, f := range constraint.Fields {
-		present[f.FieldName] = true
-	}
-
-	for _, f := range want {
-		if !present[f.FieldName] {
-			return false
+func TestAuthGroupsOfferOneCredentialEach(t *testing.T) {
+	var defaults []string
+	for _, group := range Config.FieldGroups {
+		if group.Default {
+			defaults = append(defaults, group.Name)
 		}
 	}
+	if len(defaults) != 1 || defaults[0] != "client-secret" {
+		t.Errorf("default groups = %v, want exactly [client-secret]", defaults)
+	}
 
-	return true
+	for _, tt := range []struct {
+		group, holds, omits string
+	}{
+		{"client-secret", DatabricksClientSecretField.FieldName, DatabricksOIDCTokenFileField.FieldName},
+		{"workload-identity-file", DatabricksOIDCTokenFileField.FieldName, DatabricksClientSecretField.FieldName},
+	} {
+		fields := Config.FieldGroupFields(tt.group)
+		if _, ok := fields[tt.holds]; !ok {
+			t.Errorf("group %q does not offer %q", tt.group, tt.holds)
+		}
+		if _, ok := fields[tt.omits]; ok {
+			t.Errorf("group %q also offers %q, so the two credentials are not separated", tt.group, tt.omits)
+		}
+	}
+}
+
+// A hosted connector has no file system the tenant admin controls, so the token
+// file must never reach the web form.
+func TestTheTokenFileIsNotOfferedToHostedTenants(t *testing.T) {
+	if DatabricksOIDCTokenFileField.ExportTarget != field.ExportTargetCLIOnly {
+		t.Errorf("databricks-oidc-token-file ExportTarget = %q, want %q",
+			DatabricksOIDCTokenFileField.ExportTarget, field.ExportTargetCLIOnly)
+	}
+	for _, group := range Config.FieldGroups {
+		if group.Name != "workload-identity-file" {
+			continue
+		}
+		if group.ExportTarget != field.ExportTargetCLIOnly {
+			t.Errorf("group %q ExportTarget = %q, want %q", group.Name, group.ExportTarget, field.ExportTargetCLIOnly)
+		}
+	}
 }
 
 func TestCredentialValidation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		cfg     Databricks
-		wantErr string
+		name       string
+		authMethod string
+		cfg        Databricks
+		wantErr    string
 	}{
 		{
-			name: "client secret alone",
-			cfg:  Databricks{DatabricksClientSecret: "secret"},
+			name:       "client secret under its own method",
+			authMethod: "client-secret",
+			cfg:        Databricks{DatabricksClientSecret: "secret"},
 		},
 		{
-			name: "workload identity token alone",
-			cfg:  Databricks{DatabricksOidcToken: "subject-jwt"},
+			name:       "client secret missing under its own method",
+			authMethod: "client-secret",
+			cfg:        Databricks{},
+			wantErr:    "databricks-client-secret",
 		},
 		{
-			name: "workload identity token file alone",
-			cfg:  Databricks{DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a test fixture path, not a credential.
+			name:       "token file under its own method",
+			authMethod: "workload-identity-file",
+			cfg:        Databricks{DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a test fixture path, not a credential.
 		},
 		{
-			name:    "no credential",
+			name:       "token file missing under its own method",
+			authMethod: "workload-identity-file",
+			cfg:        Databricks{},
+			wantErr:    "databricks-oidc-token-file",
+		},
+		{
+			// The secret belongs to the other group, so it is not asked for here.
+			name:       "token file alone does not require the secret",
+			authMethod: "workload-identity-file",
+			cfg:        Databricks{DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a test fixture path, not a credential.
+		},
+		{
+			name:    "no method selected falls back to the default group",
 			cfg:     Databricks{},
-			wantErr: "at least one",
-		},
-		{
-			name:    "client secret and token together",
-			cfg:     Databricks{DatabricksClientSecret: "secret", DatabricksOidcToken: "subject-jwt"},
-			wantErr: "mutually exclusive",
-		},
-		{
-			name:    "token and token file together",
-			cfg:     Databricks{DatabricksOidcToken: "subject-jwt", DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: test fixtures, not credentials.
-			wantErr: "mutually exclusive",
+			wantErr: "databricks-client-secret",
 		},
 	}
 
@@ -102,23 +116,26 @@ func TestCredentialValidation(t *testing.T) {
 			cfg.AccountId = "acc-1"
 			cfg.DatabricksClientId = "sp-client-id"
 
-			err := field.Validate(Config, &cfg)
+			err := field.Validate(Config, &cfg, field.WithAuthMethod(tt.authMethod))
 
 			switch {
 			case tt.wantErr == "" && err != nil:
 				t.Errorf("Validate returned %v, want no error", err)
 			case tt.wantErr != "" && err == nil:
-				t.Errorf("Validate succeeded, want an error containing %q", tt.wantErr)
-			case tt.wantErr != "" && !strings.Contains(strings.ToLower(err.Error()), tt.wantErr):
-				t.Errorf("Validate returned %q, want it to contain %q", err, tt.wantErr)
+				t.Errorf("Validate succeeded, want an error naming %q", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("Validate returned %q, want it to name %q", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestClientSecretIsNotRequired(t *testing.T) {
-	if DatabricksClientSecretField.Required {
-		t.Error("databricks-client-secret is Required, which makes the mutually exclusive constraint Invalid")
+func TestCredentialFieldRequirements(t *testing.T) {
+	if !DatabricksClientSecretField.Required {
+		t.Error("databricks-client-secret must be required: its group offers no other credential")
+	}
+	if !DatabricksOIDCTokenFileField.Required {
+		t.Error("databricks-oidc-token-file must be required: its group offers no other credential")
 	}
 	if !DatabricksClientIdField.Required {
 		t.Error("databricks-client-id must stay required: federation is per service principal")
