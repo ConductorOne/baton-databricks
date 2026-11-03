@@ -238,9 +238,11 @@ func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotati
 				continue
 			}
 		}
-		// A workspace that will not become RUNNING is left out of scope entirely,
-		// so a metastore attached only to one is skipped rather than failing every
-		// sync. Only a status that can still change keeps the metastore waiting.
+		// A workspace that will never serve its APIs is left out of scope, which
+		// lets ConductorOne prune the metastores that routed through it. A status
+		// that can still change keeps the metastore waiting instead, and so does
+		// CANCELLING, because pruning a metastore while its workspace is still
+		// being deleted would delete grants that are still in force.
 		if !workspaceIsUsable(workspace.Status) {
 			continue
 		}

@@ -296,8 +296,10 @@ func TestMetastoreListFailsWhenAnAssignmentListCannotBeRead(t *testing.T) {
 	}
 }
 
-// A workspace that will not become RUNNING leaves the metastore out of the sync
-// instead of failing it on every run; one that can still change keeps it waiting.
+// A terminal workspace leaves the metastore out of the sync instead of failing it
+// on every run. One that can still change keeps it waiting, and so does
+// CANCELLING: the deletion is still running, and pruning the metastore now would
+// delete grants that are still in force.
 func TestMetastoreListSeparatesTerminalFromPendingWorkspaces(t *testing.T) {
 	tests := []struct {
 		workspaceStatus string
