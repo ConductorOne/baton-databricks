@@ -4,6 +4,13 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/field"
 )
 
+// Auth method names. The connector branches on the selected one, so the group
+// definitions and that branch read the same constant.
+const (
+	ClientSecretAuthMethod         = "client-secret"
+	WorkloadIdentityFileAuthMethod = "workload-identity-file"
+)
+
 var (
 	AccountIdField = field.StringField(
 		"account-id",
@@ -80,14 +87,14 @@ var (
 	// working without a restart.
 	fieldGroups = []field.SchemaFieldGroup{
 		{
-			Name:        "client-secret",
+			Name:        ClientSecretAuthMethod,
 			DisplayName: "Client Secret",
 			HelpText:    "Authenticate with the Databricks service principal's OAuth client ID and client secret.",
 			Default:     true,
 			Fields:      append(append([]field.SchemaField{}, commonFields...), DatabricksClientSecretField),
 		},
 		{
-			Name:        "workload-identity-file",
+			Name:        WorkloadIdentityFileAuthMethod,
 			DisplayName: "Workload Identity (token file)",
 			HelpText: "Exchange an externally issued JWT for a Databricks token. " +
 				"The JWT is read from a file on every exchange, so whatever writes that file controls the lifetime.",
