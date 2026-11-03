@@ -156,7 +156,11 @@ func schemaResource(
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+		rs.WithAnnotation(
+			&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: volumeResourceType.Id},
+			&v2.RawId{Id: resourceID},
+		),
 	)
 }
 
@@ -321,8 +325,44 @@ func (b *schemaBuilder) pushRoute(
 	return nil
 }
 
+// schemaThrough finds one schema in the listing of workspace, nil when that
+// workspace does not list it. Its caller has already proven the listing holds
+// every schema in the catalog, so an absence here is the schema being gone.
+func schemaThrough(
+	ctx context.Context,
+	client *databricks.Client,
+	workspace, catalogName, schemaName string,
+	annos *annotations.Annotations,
+) (*databricks.Schema, error) {
+	pageToken := ""
+	for {
+		schemas, next, rateLimit, err := client.ListSchemas(ctx, workspace, catalogName, pageToken, ResourcesPageSize)
+		noteRateLimit(annos, rateLimit)
+		if err != nil {
+			return nil, schemaListingError(catalogName, workspace, err)
+		}
+
+		for _, schema := range schemas {
+			if schema.Name == schemaName {
+				return &schema, nil
+			}
+		}
+
+		if next == "" {
+			return nil, nil
+		}
+		if next == pageToken {
+			return nil, status.Errorf(codes.Internal,
+				"databricks-connector: the schemas of catalog %s repeat page token %q through workspace %s",
+				catalogName, next, workspace)
+		}
+		pageToken = next
+	}
+}
+
 // schemaListingError returns NotFound only when Databricks names the missing
-// catalog; any other refusal leaves the schema listing unknown.
+// catalog. Any other refusal leaves the listing unknown rather than empty: a
+// short list would read as deletions in C1.
 func schemaListingError(catalogName, workspace string, err error) error {
 	if databricks.IsSecurableGone(err, errorCodeCatalogGone) {
 		return uhttp.WrapErrors(codes.NotFound,

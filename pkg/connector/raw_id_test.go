@@ -84,6 +84,19 @@ func TestResourcesHaveRawId(t *testing.T) {
 				&v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: "ms1::cat"}, schemaRoute{})),
 			"ms1::cat.sch",
 		},
+		{
+			// A table and a volume extend the schema's id with their own name.
+			"table",
+			build(tableResource(&databricks.Table{Name: "orders"}, "ms1", "cat", "sch",
+				&v2.ResourceId{ResourceType: schemaResourceType.Id, Resource: "ms1::cat.sch"}, schemaChildRoute{})),
+			"ms1::cat.sch.orders",
+		},
+		{
+			"volume",
+			build(volumeResource(&databricks.Volume{Name: "files"}, "ms1", "cat", "sch",
+				&v2.ResourceId{ResourceType: schemaResourceType.Id, Resource: "ms1::cat.sch"}, schemaChildRoute{})),
+			"ms1::cat.sch.files",
+		},
 	}
 
 	for _, tc := range cases {
