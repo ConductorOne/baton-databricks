@@ -7,32 +7,46 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
-// The token file is what selects workload identity federation. The static JWT
-// field is gone, so a configuration without a file authenticates with the
-// client secret.
+// The selected auth method decides the credential. A field left over from
+// another deployment must not change it.
 func TestPrepareClientAuthSelectsTheCredential(t *testing.T) {
 	t.Parallel()
 
+	const bothSet = "both fields set"
+
 	tests := []struct {
-		name      string
-		cfg       config.Databricks
-		federated bool
+		name       string
+		authMethod string
+		cfg        config.Databricks
+		federated  bool
 	}{
 		{
-			name: "client secret",
-			cfg:  config.Databricks{DatabricksClientSecret: "secret"},
+			name:       "client secret",
+			authMethod: config.ClientSecretAuthMethod,
+			cfg:        config.Databricks{DatabricksClientSecret: "secret"},
 		},
 		{
-			name:      "token file",
-			cfg:       config.Databricks{DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a fixture path, not a credential.
-			federated: true,
+			name:       "token file",
+			authMethod: config.WorkloadIdentityFileAuthMethod,
+			cfg:        config.Databricks{DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a fixture path, not a credential.
+			federated:  true,
 		},
 		{
-			// The file wins: a secret left over from an earlier configuration
-			// must not silently take the federated deployment back to it.
-			name:      "both",
-			cfg:       config.Databricks{DatabricksClientSecret: "secret", DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a fixture path, not a credential.
-			federated: true,
+			name:       bothSet + " under the client secret method",
+			authMethod: config.ClientSecretAuthMethod,
+			cfg:        config.Databricks{DatabricksClientSecret: "secret", DatabricksOidcTokenFile: "/leftover/token"},
+		},
+		{
+			name:       bothSet + " under the token file method",
+			authMethod: config.WorkloadIdentityFileAuthMethod,
+			cfg:        config.Databricks{DatabricksClientSecret: "secret", DatabricksOidcTokenFile: "/var/run/secrets/token"}, //nolint:gosec // G101: a fixture path, not a credential.
+			federated:  true,
+		},
+		{
+			// No method selected falls back to the default group, which
+			// validation has already checked for a client secret.
+			name: "no method selected",
+			cfg:  config.Databricks{DatabricksClientSecret: "secret", DatabricksOidcTokenFile: "/leftover/token"},
 		},
 	}
 
@@ -45,7 +59,7 @@ func TestPrepareClientAuthSelectsTheCredential(t *testing.T) {
 			cfg.DatabricksClientId = "sp-client-id"
 			cfg.Hostname = "cloud.databricks.com"
 
-			auth := prepareClientAuth(&cfg)
+			auth := prepareClientAuth(&cfg, tt.authMethod)
 			_, federated := auth.(*databricks.TokenFederation)
 			if federated != tt.federated {
 				t.Errorf("prepareClientAuth returned %T, federated = %v, want %v", auth, federated, tt.federated)

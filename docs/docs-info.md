@@ -20,9 +20,9 @@ While developing the connector, please fill out this form. This information is n
    > The connector requires a Databricks account ID and a service principal OAuth client ID. It syncs the account and every workspace that service principal can access. The service principal is then authenticated in one of two ways:
    >
    > - **OAuth client secret** (default): the service principal's OAuth client secret.
-   > - **Workload identity federation**: an externally issued JWT identifying the workload, such as a SPIFFE JWT-SVID or a Kubernetes projected service account token, supplied as a value or as a file path. The connector exchanges it for a short-lived Databricks token, so no long-lived secret is stored. This requires a service principal federation policy in Databricks.
+   > - **Workload identity federation**: an externally issued JWT identifying the workload, such as a SPIFFE JWT-SVID or a Kubernetes projected service account token, read from a file. The connector exchanges it for a short-lived Databricks token, so no long-lived secret is stored. This requires a service principal federation policy in Databricks. It is available only when you run the connector yourself, on the command line or in service mode, and is selected with `--auth-method workload-identity-file`.
    >
-   > Exactly one of the two credentials is supplied.
+   > The authentication method selects the credential.
    >
    > Google Cloud Platform and Azure Databricks customers also provide the account hostname and hostname.
 

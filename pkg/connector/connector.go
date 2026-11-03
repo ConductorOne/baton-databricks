@@ -160,7 +160,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	}
 
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(cfg)
+	auth := prepareClientAuth(cfg, authMethod)
 
 	cb, err := New(
 		ctx,
@@ -179,14 +179,15 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	return cb, nil, nil
 }
 
-// prepareClientAuth uses the client secret by default and switches to workload
-// identity federation when a token file is configured.
-func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
+// prepareClientAuth follows the selected auth method, not whichever field
+// happens to be set: a token file left over from another deployment must not
+// silently replace the credential the operator chose.
+func prepareClientAuth(cfg *config.Databricks, authMethod string) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
 
-	if cfg.DatabricksOidcTokenFile != "" {
+	if authMethod == config.WorkloadIdentityFileAuthMethod {
 		return databricks.NewTokenFederation(
 			accountID,
 			databricksClientId,
