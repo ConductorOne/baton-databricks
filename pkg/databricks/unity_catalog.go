@@ -119,6 +119,10 @@ func (c *Client) ListCatalogs(
 // through workspaceId, which is a deployment name. It answers what draining
 // ListCatalogs cannot: a 404 naming CATALOG_DOES_NOT_EXIST is the catalog not
 // existing, while any other refusal is this workspace not seeing it.
+// The name is checked against the assembled URL for the same reason
+// permissionsUrl checks it: a name holding "?", "#" or "%" would otherwise
+// address a different catalog, and a caller that writes to what comes back
+// would write to that one.
 func (c *Client) GetCatalog(
 	ctx context.Context,
 	workspaceId, name string,
@@ -129,10 +133,22 @@ func (c *Client) GetCatalog(
 ) {
 	var res Catalog
 
+	if name == "" {
+		return nil, nil, invalidArgument("catalog name is required")
+	}
+
 	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogCatalogsEndpoint, name)
+	if !addressesSecurable(u, "/"+name) {
+		return nil, nil, invalidArgument("cannot address catalog %q: the name does not survive URL assembly", name)
+	}
+
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read catalog %s: %w", name, err))
+	}
+
+	if res.Name != name {
+		return nil, ratelimitData, invalidArgument("asked Databricks for catalog %q and it answered with %q", name, res.Name)
 	}
 
 	return &res, ratelimitData, nil
