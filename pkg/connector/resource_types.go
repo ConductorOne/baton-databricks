@@ -101,4 +101,20 @@ var (
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
 		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
 	}
+
+	tableResourceType = &v2.ResourceType{
+		Id:          "table",
+		DisplayName: "Table",
+		Annotations: annotationsForSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
+	}
+
+	volumeResourceType = &v2.ResourceType{
+		Id:          "volume",
+		DisplayName: "Volume",
+		Annotations: annotations.New(
+			&v2.OptInRequired{},
+			&v2.SkipEntitlements{},
+			capabilityPermissions(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
+		),
+	}
 )

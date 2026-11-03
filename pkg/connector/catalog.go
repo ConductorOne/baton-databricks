@@ -122,7 +122,6 @@ var errCatalogGone = errors.New("catalog no longer exists")
 
 type catalogBuilder struct {
 	securableOps
-	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 }
 
