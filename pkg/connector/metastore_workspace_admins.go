@@ -56,7 +56,7 @@ func (r *workspaceAdminResolver) resolve(ctx context.Context, assignment databri
 	if id == "" || id == "0" {
 		var rateLimit *v2.RateLimitDescription
 		var err error
-		id, rateLimit, err = r.metastore.client.FindGroupID(ctx, workspace.DeploymentName, "admins")
+		id, rateLimit, err = r.metastore.client.FindGroupID(ctx, workspace.DeploymentName, workspaceAdminsGroupName)
 		noteRateLimit(r.annos, rateLimit)
 		if err != nil {
 			return nil, refuseUnreadable("databricks-connector: failed to resolve workspace admins group", err)
@@ -70,7 +70,7 @@ func (r *workspaceAdminResolver) resolve(ctx context.Context, assignment databri
 		if err != nil {
 			return nil, refuseUnreadable("databricks-connector: failed to resolve workspace admins group", err)
 		}
-		if name != "admins" {
+		if name != workspaceAdminsGroupName {
 			return nil, nil // Never map an alias to another group or reuse a deleted ID's name.
 		}
 	}

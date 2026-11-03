@@ -76,8 +76,27 @@ func (s *workspaceScimServer) handler(t *testing.T) http.HandlerFunc {
 			encode(group)
 			return
 		}
+		// A workspace holds many groups and only the filtered one may come back, so
+		// the mock applies the filter: without it the listing answers with all of
+		// them and a caller that dropped the filter fails instead of passing.
+		all := []map[string]any{
+			{"id": "wg-eng", "displayName": "engineering"},
+			group,
+			{"id": "wg-ds", "displayName": "data-science"},
+		}
+		matched := all
+		if filter := r.URL.Query().Get("filter"); filter != "" {
+			_, want, _ := strings.Cut(filter, " eq ")
+			want = strings.Trim(want, `"`)
+			matched = nil
+			for _, candidate := range all {
+				if candidate["displayName"] == want {
+					matched = append(matched, candidate)
+				}
+			}
+		}
 		// A real workspace reports every group it has in totalResults, not the filtered count.
-		encode(map[string]any{"totalResults": 40, "Resources": []map[string]any{group}})
+		encode(map[string]any{"totalResults": 40, "Resources": matched})
 	}
 }
 

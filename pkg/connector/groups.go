@@ -40,6 +40,11 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 	return strings.Join([]string{parentResourceId.ResourceType, parentResourceId.Resource, groupResourceType.Id, groupId}, "/")
 }
 
+// workspaceAdminsGroupName is the name Databricks gives the built-in admins
+// group in every workspace. The group is addressed by this name, not by an id,
+// so the listing filter and the alias check must agree on it.
+const workspaceAdminsGroupName = "admins"
+
 // groupResource builds a group resource. workspaceName qualifies the display name of a
 // workspace-scoped group: Databricks names the built-in group "admins" in every
 // workspace, so a metastore shared by several of them would otherwise list each holder
@@ -103,8 +108,11 @@ func (g *groupBuilder) workspaceDisplayName(ctx context.Context, deploymentName 
 	return workspace.Name, nil
 }
 
-// List returns all the groups from the database as resource objects.
-// Groups include a GroupTrait because they are the 'shape' of a standard group.
+// List returns groups as resource objects, with a GroupTrait because they are the
+// 'shape' of a standard group. Under the account it returns every group. Under a
+// workspace parent it returns only the built-in admins group, on a single page:
+// the other workspace-local groups are not synced, and the privileges this one
+// holds on a metastore are what the workspace parent exists for.
 func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil {
 		return nil, nil, nil
@@ -114,7 +122,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 	vars := []databricks.Vars{databricks.NewGroupAttrVars()}
 	if parentResourceID.ResourceType == workspaceResourceType.Id {
 		workspaceId = parentResourceID.Resource
-		vars = append(vars, databricks.NewFilterVars(`displayName eq "admins"`))
+		vars = append(vars, databricks.NewFilterVars(`displayName eq "`+workspaceAdminsGroupName+`"`))
 	}
 
 	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})

@@ -170,8 +170,10 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	workspaceAdmins := &workspaceAdminResolver{metastore: m, annos: &annos}
 	var rv []*v2.Grant
 	for _, assignment := range assignments {
-		// The alias names its own workspace, so resolving it first skips three account
-		// lookups that would always miss.
+		// The alias names its own workspace, so resolving it first answers without the
+		// three account lookups that would always miss. It answers nothing when the
+		// workspace is out of scope, is not RUNNING, has no admins group or carries
+		// another name, and the account resolver still runs for those rows.
 		var principalId *v2.ResourceId
 		var err error
 		workspaceAdmin := false
