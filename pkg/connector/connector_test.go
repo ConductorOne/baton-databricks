@@ -75,7 +75,7 @@ func TestWillSyncResourceType(t *testing.T) {
 
 // The SDK derives capabilities and Grant/Revoke dispatch from the registered
 // syncers, so leaving metastore out of a sync must not unregister it.
-func TestResourceSyncersAlwaysRegisterTheMetastoreBuilder(t *testing.T) {
+func TestResourceSyncersAlwaysRegisterTheUnityCatalogBuilders(t *testing.T) {
 	t.Parallel()
 
 	d := &Databricks{opts: &cli.ConnectorOpts{
@@ -87,7 +87,9 @@ func TestResourceSyncersAlwaysRegisterTheMetastoreBuilder(t *testing.T) {
 	for _, syncer := range d.ResourceSyncers(ctx) {
 		registered = append(registered, syncer.ResourceType(ctx).GetId())
 	}
-	if !slices.Contains(registered, metastoreResourceType.Id) {
-		t.Fatalf("registered syncers = %v, want them to include %s", registered, metastoreResourceType.Id)
+	for _, want := range []string{metastoreResourceType.Id, catalogResourceType.Id} {
+		if !slices.Contains(registered, want) {
+			t.Errorf("registered syncers = %v, want them to include %s", registered, want)
+		}
 	}
 }

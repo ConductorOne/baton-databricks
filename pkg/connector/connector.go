@@ -29,6 +29,12 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.ResourceSyncerV2 {
+	workspaces := configuredWorkspaceSet(d.workspaces)
+	principals := syncPrincipals{
+		groups:            d.willSyncResourceType(groupResourceType.Id),
+		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
+	}
+
 	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
@@ -36,10 +42,8 @@ func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.Resou
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.clientID, configuredWorkspaceSet(d.workspaces), syncPrincipals{
-			groups:            d.willSyncResourceType(groupResourceType.Id),
-			servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
-		}),
+		newMetastoreBuilder(d.client, d.clientID, workspaces, principals),
+		newCatalogBuilder(d.client, d.clientID, workspaces, principals),
 	}
 }
 
@@ -71,7 +75,7 @@ func (d *Databricks) Metadata(_ context.Context) (*v2.ConnectorMetadata, error) 
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton, " +
-			"along with Unity Catalog metastores and the privileges granted on them",
+			"along with Unity Catalog data assets — metastores and catalogs — and the privileges granted on them",
 		AccountCreationSchema: &v2.ConnectorAccountCreationSchema{
 			FieldMap: map[string]*v2.ConnectorAccountCreationSchema_Field{
 				"email": {
@@ -154,8 +158,10 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 		_, ok := matchConfiguredWorkspace(configuredWorkspaceSet(d.workspaces), w.DeploymentName, w.Name, strconv.Itoa(w.ID))
 		return ok
 	}) {
+		// ListWorkspaces already dropped the excluded ones, so a name that is
+		// only excluded would otherwise be reported as absent from the account.
 		return annos, fmt.Errorf(
-			"databricks-connector: none of the configured workspaces (%s) is on the account",
+			"databricks-connector: none of the configured workspaces (%s) is on the account and not excluded by databricks-exclude-workspaces",
 			strings.Join(d.workspaces, ", "))
 	}
 

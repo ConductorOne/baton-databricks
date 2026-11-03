@@ -51,7 +51,12 @@ func TestProvisioningPreReadsAreNotServedFromTheCache(t *testing.T) {
 	ctx := context.Background()
 
 	// Grant's pre-read: nothing is held yet, so the Grant proceeds to the PATCH.
-	held, _, err := c.DrainPermissions(ctx, "ws", SecurableMetastore, "ms-1")
+	var held []PrivilegeAssignment
+	_, err = c.ForEachUncachedPermissionsPage(ctx, "ws", SecurableMetastore, "ms-1", "",
+		func(page []PrivilegeAssignment) (bool, error) {
+			held = append(held, page...)
+			return false, nil
+		})
 	if err != nil {
 		t.Fatalf("Grant pre-read: %v", err)
 	}
@@ -110,7 +115,8 @@ func TestASyncReadAfterAGrantSeesThePostChangeState(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if _, _, err := c.DrainPermissions(ctx, "ws", SecurableMetastore, "ms-1"); err != nil {
+	if _, err := c.ForEachUncachedPermissionsPage(ctx, "ws", SecurableMetastore, "ms-1", "",
+		func([]PrivilegeAssignment) (bool, error) { return false, nil }); err != nil {
 		t.Fatalf("Grant pre-read: %v", err)
 	}
 	if _, _, err := c.UpdatePermissions(ctx, "ws", SecurableMetastore, "ms-1",

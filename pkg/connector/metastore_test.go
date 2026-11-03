@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/types/grant"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"google.golang.org/grpc/codes"
@@ -57,24 +58,26 @@ func newWorkspaceRoutedClient(t *testing.T, handler http.HandlerFunc) (*databric
 
 // fakeAccount serves the account, Unity Catalog and SCIM endpoints the metastore syncer calls.
 type fakeAccount struct {
-	metastores  []map[string]any
-	assignments map[string]any // metastore id -> []int workspace ids, or an HTTP status
-	workspaces  []map[string]any
-	permissions []map[string]any
-	permStatus  int
-	patchStatus int
-	users       map[string]string // id -> userName
-	groups      map[string]string // id -> displayName
-	sps         map[string]string // id -> applicationId
+	metastores          []map[string]any
+	assignments         map[string]any // metastore id -> []int workspace ids, or an HTTP status
+	assignmentErrorCode map[string]string
+	workspaces          []map[string]any
+	permissions         []map[string]any
+	permStatus          int
+	patchStatus         int
+	users               map[string]string // id -> userName
+	groups              map[string]string // id -> displayName
+	sps                 map[string]string // id -> applicationId
 
 	// workspaceMembers maps a workspace id to its permission assignments, or to
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
 
-	permHosts   []string
-	patches     []map[string]any
-	scimGets    map[string]int
-	memberLists []string
+	permHosts      []string
+	patches        []map[string]any
+	scimGets       map[string]int
+	memberLists    []string
+	metastoreLists int
 }
 
 func defaultFakeAccount() *fakeAccount {
@@ -111,12 +114,14 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 		encode := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 		switch {
 		case strings.HasSuffix(path, "/metastores"):
+			f.metastoreLists++
 			encode(map[string]any{"metastores": f.metastores})
 		case strings.Contains(path, "/metastores/") && strings.HasSuffix(path, "/workspaces"):
 			parts := strings.Split(path, "/")
 			switch v := f.assignments[parts[len(parts)-2]].(type) {
 			case int:
-				http.Error(w, `{"message":"denied"}`, v)
+				w.WriteHeader(v)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error_code": f.assignmentErrorCode[parts[len(parts)-2]], "message": "denied"})
 			default:
 				encode(map[string]any{"workspace_ids": v})
 			}
@@ -165,12 +170,20 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 }
 
 func (f *fakeAccount) scim(w http.ResponseWriter, r *http.Request) {
+	serveSCIM(w, r, f.users, f.groups, f.sps, f.scimGets)
+}
+
+// serveSCIM answers account SCIM by id (/Users/{id}) and by filter (id or name eq).
+// gets, when given, counts the reads by id.
+func serveSCIM(w http.ResponseWriter, r *http.Request, users, groups, sps map[string]string, gets map[string]int) {
 	_, rest, _ := strings.Cut(r.URL.Path, "/scim/v2/")
 	kind, id, _ := strings.Cut(rest, "/")
 	field, records := map[string]string{"Users": "userName", "Groups": "displayName", "ServicePrincipals": "applicationId"}[kind],
-		map[string]map[string]string{"Users": f.users, "Groups": f.groups, "ServicePrincipals": f.sps}[kind]
+		map[string]map[string]string{"Users": users, "Groups": groups, "ServicePrincipals": sps}[kind]
 	if id != "" {
-		f.scimGets[kind+"/"+id]++
+		if gets != nil {
+			gets[kind+"/"+id]++
+		}
 		if name, ok := records[id]; ok {
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, field: name})
 			return
@@ -246,6 +259,55 @@ func testSyncedMetastore(t *testing.T, workspace string) *v2.Resource {
 	return r
 }
 
+// A profile workspace is kept when it still serves, with ownership refreshed
+// from the account. A detached workspace falls through to the live route.
+func TestMetastoreGrantKeepsAProfileWorkspaceThatStillServes(t *testing.T) {
+	f := defaultFakeAccount()
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "eng")
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "eng",
+	}, testAccountResourceID, "wsa", "1", "prod")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	if f.metastoreLists != 1 {
+		t.Errorf("listed metastores %d times, want one fresh owner read", f.metastoreLists)
+	}
+	if routed != entitlement {
+		t.Error("a profile workspace that still serves was replaced")
+	}
+}
+
+func TestMetastoreGrantReresolvesAProfileWorkspaceThatIsGone(t *testing.T) {
+	f := defaultFakeAccount()
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "eng")
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "eng",
+	}, testAccountResourceID, "gone", "9", "old")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	if f.metastoreLists == 0 {
+		t.Error("a profile workspace that is not attached did not resolve the route live")
+	}
+	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyWorkspace)
+	if workspace != "wsa" {
+		t.Errorf("workspace = %q, want wsa", workspace)
+	}
+}
+
 // testMetastore is the resource a provisioning call carries: an id, no profile.
 func testMetastore(t *testing.T) *v2.Resource {
 	t.Helper()
@@ -274,7 +336,7 @@ func TestMetastoreListFailsWhenAnAssignmentListCannotBeRead(t *testing.T) {
 			f.assignments = map[string]any{"ms-a": code}
 			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
 
-			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+			resources, _, err := m.List(context.Background(), testAccountResourceID, newTestSyncAttrs(t))
 			if status.Code(err) != want {
 				t.Fatalf("List = %v, want %s", err, want)
 			}
@@ -313,7 +375,7 @@ func TestMetastoreListSeparatesTerminalFromPendingWorkspaces(t *testing.T) {
 			}
 			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
 
-			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+			resources, _, err := m.List(context.Background(), testAccountResourceID, newTestSyncAttrs(t))
 			if test.wantErr != (err != nil) {
 				t.Fatalf("List error = %v, want error: %v", err, test.wantErr)
 			}
@@ -350,7 +412,7 @@ func TestMetastoreListRoutesTheOwnerThroughTheFirstScopedWorkspace(t *testing.T)
 			}
 			m := newTestMetastoreBuilder(t, f, test.allowlist, syncPrincipals{})
 
-			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+			resources, _, err := m.List(context.Background(), testAccountResourceID, newTestSyncAttrs(t))
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}
@@ -416,7 +478,7 @@ func TestMetastoreListRoutesOnlyThroughAWorkspaceItCanFullyRead(t *testing.T) {
 			f.workspaceMembers = map[string]any{"1": test.members}
 			m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, test.clientID)
 
-			resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+			resources, _, err := m.List(context.Background(), testAccountResourceID, newTestSyncAttrs(t))
 			switch {
 			case test.wantRouted && err != nil:
 				t.Fatalf("List: %v", err)
@@ -452,7 +514,7 @@ func TestMetastoreListRoutesThroughTheWorkspaceWhereStandingHolds(t *testing.T) 
 	f.workspaceMembers = map[string]any{"1": nil, "2": adminByAppID}
 	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
 
-	resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+	resources, _, err := m.List(context.Background(), testAccountResourceID, newTestSyncAttrs(t))
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -476,7 +538,7 @@ func TestMetastoreGrantsReadThroughTheRoutedWorkspace(t *testing.T) {
 	}
 	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
 
-	grants, _, err := m.Grants(context.Background(), testSyncedMetastore(t, "wsb"), rs.SyncOpAttrs{})
+	grants, _, err := m.Grants(context.Background(), testSyncedMetastore(t, "wsb"), newTestSyncAttrs(t))
 	if err != nil {
 		t.Fatalf("Grants: %v", err)
 	}
@@ -509,7 +571,7 @@ func TestMetastoreGrantsKeepThePermissionsStatus(t *testing.T) {
 			f.permStatus = test.code
 			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
 
-			grants, _, err := m.Grants(context.Background(), testSyncedMetastore(t, "wsa"), rs.SyncOpAttrs{})
+			grants, _, err := m.Grants(context.Background(), testSyncedMetastore(t, "wsa"), newTestSyncAttrs(t))
 			if status.Code(err) != test.want {
 				t.Fatalf("Grants = %v, want %s", err, test.want)
 			}
@@ -525,7 +587,7 @@ func TestMetastoreGrantsFailWithoutARouteOnTheProfile(t *testing.T) {
 	f := defaultFakeAccount()
 	m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
 
-	grants, _, err := m.Grants(context.Background(), testMetastore(t), rs.SyncOpAttrs{})
+	grants, _, err := m.Grants(context.Background(), testMetastore(t), newTestSyncAttrs(t))
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("Grants = %v, want FailedPrecondition", err)
 	}
@@ -644,6 +706,35 @@ func TestMetastoreRevoke(t *testing.T) {
 	annos, err := m.Revoke(context.Background(), g)
 	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
 		t.Fatalf("second Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+}
+
+// A metastore deleted after the sync is proven gone by its assignment list,
+// which the profile workspace check reads first.
+func TestMetastoreProvisioningOnADeletedMetastoreWithAProfile(t *testing.T) {
+	for _, verb := range []string{"grant", "revoke"} {
+		t.Run(verb, func(t *testing.T) {
+			f := defaultFakeAccount()
+			f.assignments["ms-a"] = http.StatusNotFound
+			f.assignmentErrorCode = map[string]string{"ms-a": errorCodeMetastoreGone}
+			m := newTestMetastoreBuilder(t, f, nil, syncPrincipals{})
+			g := grant.NewGrant(testSyncedMetastore(t, "wsa"), "CREATE_CATALOG", alice.GetId())
+
+			if verb == "grant" {
+				_, err := m.Grant(context.Background(), alice, g.GetEntitlement())
+				if status.Code(err) != codes.NotFound {
+					t.Fatalf("Grant error = %v, want NotFound", err)
+				}
+			} else {
+				annos, err := m.Revoke(context.Background(), g)
+				if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+					t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+				}
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
 	}
 }
 
