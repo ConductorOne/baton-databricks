@@ -396,6 +396,11 @@ func catalogThrough(
 		return nil, errCatalogGone
 	case deniesTrust(err):
 		return nil, err
+	case status.Code(err) == codes.InvalidArgument:
+		// The name does not survive URL assembly, or Databricks answered with a
+		// different catalog. Either way the answer does not describe the catalog
+		// asked for, and a provisioning write must not be addressed from it.
+		return nil, err
 	default:
 		return nil, catalogListingError(metastoreID, workspace, err)
 	}
