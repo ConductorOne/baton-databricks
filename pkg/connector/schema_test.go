@@ -794,3 +794,54 @@ func TestSchemaRevokeOnADroppedSchemaIsAlreadyRevoked(t *testing.T) {
 		})
 	}
 }
+
+// The trust probe is the first read that can prove a schema gone, and it runs
+// before the permissions read. A schema deleted between List and Grants must
+// not fail the sync at the earlier of the two reads that see the same deletion.
+// The principal owns nothing here, so the probe actually runs: with ownership
+// the trust check short-circuits and never reaches it.
+func TestSchemaGrantsOnADroppedSecurableDoesNotFailTheSync(t *testing.T) {
+	for _, errorCode := range []string{errorCodeSchemaGone, errorCodeCatalogGone} {
+		t.Run(errorCode, func(t *testing.T) {
+			f := &fakeSchemaAccount{
+				metastoreOwner: "other-team",
+				catalogOwner:   "someone",
+				permStatus:     map[string]int{"wsa": http.StatusNotFound},
+				permErrorCode:  errorCode,
+			}
+			b := newTestSchemaBuilderAs(t, f, testOwnPrincipal)
+
+			grants, _, err := b.Grants(context.Background(),
+				testSchema(t, "sales", "someone", "someone", "other-team", "wsa"), rs.SyncOpAttrs{})
+			if err != nil {
+				t.Fatalf("Grants = %v, want no error for a securable proven gone", err)
+			}
+			if len(grants) != 0 {
+				t.Errorf("emitted %d grants, want none", len(grants))
+			}
+		})
+	}
+}
+
+// Revoke on a schema whose parent catalog was dropped reports the grant already
+// revoked for a principal that owns neither the metastore nor the catalog, so
+// the trust probe is what answers rather than the ownership short-circuit.
+func TestSchemaRevokeOnADroppedParentIsAlreadyRevokedForANonOwner(t *testing.T) {
+	f := &fakeSchemaAccount{
+		metastoreOwner: "other-team",
+		catalogOwner:   "someone",
+		users:          map[string]string{"1": "alice@example.com"},
+		permStatus:     map[string]int{"wsa": http.StatusNotFound},
+		permErrorCode:  errorCodeCatalogGone,
+	}
+	b := newTestSchemaBuilderAs(t, f, testOwnPrincipal)
+	g := grant.NewGrant(testSchema(t, "sales", "someone", "someone", "other-team", "wsa"), "SELECT", alice.GetId())
+
+	annos, err := b.Revoke(context.Background(), g)
+	if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+		t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+	}
+	if len(f.patches) != 0 {
+		t.Errorf("patches = %v, want none", f.patches)
+	}
+}

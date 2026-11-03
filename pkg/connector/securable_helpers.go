@@ -179,6 +179,15 @@ func (o securableOps) syncGrants(
 	// partial, so Grants does not prove it again.
 	if pageToken == "" && level.securableType != databricks.SecurableMetastore && level.securableType != databricks.SecurableCatalog {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
+			// The trust read is the first call that can prove the securable gone,
+			// and one deleted between List and this read is not a failed sync.
+			// The permissions read below answers the same way, so answering
+			// differently here would fail the sync on the earlier of two reads
+			// that see the same deletion.
+			if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+				return nil, &rs.SyncOpResults{Annotations: annos}, nil
+			}
+
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 	}
