@@ -153,6 +153,27 @@ func (c *Client) IsWorkspaceNameExcluded(deploymentName string) bool {
 	return ok
 }
 
+// IsWorkspaceExcluded reports whether any identifier of one workspace matches the
+// databricks-exclude-workspaces set. It is isWorkspaceExcluded for a caller that
+// holds the identifiers without a Workspace value, such as a resource profile. An
+// empty identifier is skipped rather than matched, so a missing one cannot widen
+// the match the way a zero-value ID would.
+func (c *Client) IsWorkspaceExcluded(name, deploymentName, id string) bool {
+	if len(c.excludeWorkspaces) == 0 {
+		return false
+	}
+	for _, key := range []string{name, deploymentName, id} {
+		if key == "" {
+			continue
+		}
+		if _, ok := c.excludeWorkspaces[strings.ToLower(key)]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (c *Client) workspaceUrl(workspaceId string) *url.URL {
 	return &url.URL{
 		Scheme: "https",

@@ -93,6 +93,29 @@ func TestUpdatePermissionsDrainsFromPatchToken(t *testing.T) {
 	}
 }
 
+func TestListCatalogsCanIncludeUnboundCatalogs(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+	var includeUnbound string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		includeUnbound = r.URL.Query().Get("include_unbound")
+		_ = json.NewEncoder(w).Encode(catalogsResponse{})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, _, _, err := c.ListCatalogs(context.Background(), "ws", "", 100, true); err != nil {
+		t.Fatalf("ListCatalogs: %v", err)
+	}
+	if includeUnbound != "true" {
+		t.Fatalf("include_unbound = %q, want true", includeUnbound)
+	}
+}
+
 type hostRewriter struct {
 	host http.RoundTripper
 	addr string
