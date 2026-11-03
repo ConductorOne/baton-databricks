@@ -257,16 +257,36 @@ func (m *metastoreBuilder) entitlementOnLiveRoute(
 			break
 		}
 	}
+	liveOwner := metastores[found].Owner
+	profileOwner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
+	// The recorded workspace was picked under the owner the last sync saw, and
+	// the owner decides which workspaces read every privilege: with the
+	// connector owning the metastore any of them does, otherwise only the ones
+	// it is a direct Admin of. A transfer can therefore leave the recorded
+	// workspace unreadable while another attached one still works, so the route
+	// is kept only when it still reads under the live owner.
+	if workspace != nil && profileOwner != liveOwner {
+		readable := ownsPrincipal(m.clientID, liveOwner)
+		if !readable {
+			readable, err = isWorkspaceAdmin(ctx, m.client, m.clientID, strconv.Itoa(workspace.ID), annos)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !readable {
+			workspace = nil
+		}
+	}
+
 	if workspace == nil {
-		workspace, err = pickReadableWorkspace(ctx, m.client, m.clientID, metastores[found].Owner, metastoreID, usable, annos)
+		workspace, err = pickReadableWorkspace(ctx, m.client, m.clientID, liveOwner, metastoreID, usable, annos)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
 		workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
 		workspaceName, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceName)
-		if owner == metastores[found].Owner && workspaceID == strconv.Itoa(workspace.ID) && workspaceName == workspace.Name {
+		if profileOwner == liveOwner && workspaceID == strconv.Itoa(workspace.ID) && workspaceName == workspace.Name {
 			return entitlement, nil
 		}
 	}
