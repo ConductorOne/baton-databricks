@@ -149,8 +149,9 @@ func (c *Client) Get(
 // The cache holds a GET 200 for an hour and a PATCH does not invalidate it, so a
 // read that decides whether a write still has to happen must not be served from
 // it: the write would be skipped against a page that predates the last change.
-// uhttp still records the fresh response, so the entry a later reader sees is the
-// one this call just observed.
+// Cache-Control is part of the cache key, so the entry this call writes is not
+// the one a normal read looks up: the shared sync entry is left as it was
+// rather than refreshed.
 func (c *Client) GetUncached(
 	ctx context.Context,
 	urlAddress *url.URL,

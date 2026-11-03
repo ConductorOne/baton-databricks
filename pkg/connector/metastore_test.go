@@ -308,6 +308,76 @@ func TestMetastoreGrantReresolvesAProfileWorkspaceThatIsGone(t *testing.T) {
 	}
 }
 
+// The profile workspace was picked under the owner the last sync saw. When the
+// metastore is transferred, the connector may no longer read every privilege
+// through it while another attached workspace still works, so the route is
+// picked again instead of reused. Reusing it refused the write with
+// PermissionDenied even though the documented rule was satisfied elsewhere.
+func TestMetastoreGrantRepicksTheRouteWhenTheOwnerChanged(t *testing.T) {
+	f := defaultFakeAccount()
+	f.metastores = []map[string]any{{"metastore_id": "ms-a", "name": "main", "owner": "someone-else"}}
+	f.assignments = map[string]any{"ms-a": []int{1, 2}}
+	f.workspaces = []map[string]any{
+		{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+		{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "RUNNING"},
+	}
+	// Admin on wsb only, which is not the workspace the profile recorded.
+	f.workspaceMembers = map[string]any{"1": nil, "2": adminByAppID}
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "app-9",
+	}, testAccountResourceID, "wsa", "1", "prod")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyWorkspace)
+	if workspace != "wsb" {
+		t.Errorf("workspace = %q, want wsb, the one the connector is still Admin of", workspace)
+	}
+}
+
+// A profile workspace the connector still reads under the live owner is kept,
+// so a transfer that does not move what the connector can read costs no extra
+// walk. Only the owner on the profile is refreshed.
+func TestMetastoreGrantKeepsTheRouteWhenItStillReadsUnderTheNewOwner(t *testing.T) {
+	f := defaultFakeAccount()
+	f.metastores = []map[string]any{{"metastore_id": "ms-a", "name": "main", "owner": "someone-else"}}
+	f.assignments = map[string]any{"ms-a": []int{1, 2}}
+	f.workspaces = []map[string]any{
+		{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+		{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "RUNNING"},
+	}
+	f.workspaceMembers = map[string]any{"1": adminByAppID, "2": nil}
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "app-9",
+	}, testAccountResourceID, "wsa", "1", "prod")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyWorkspace)
+	if workspace != "wsa" {
+		t.Errorf("workspace = %q, want wsa kept", workspace)
+	}
+	if owner, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyOwner); owner != "someone-else" {
+		t.Errorf("owner on the profile = %q, want the live someone-else", owner)
+	}
+}
+
 // testMetastore is the resource a provisioning call carries: an id, no profile.
 func testMetastore(t *testing.T) *v2.Resource {
 	t.Helper()
