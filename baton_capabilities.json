@@ -4,13 +4,36 @@
     {
       "resourceType": {
         "id": "account",
-        "displayName": "Account"
+        "displayName": "Account",
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "Account admin"
+              }
+            ]
+          }
+        ]
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
-      "permissions": {}
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "Account admin"
+          }
+        ]
+      }
     },
     {
       "resourceType": {
@@ -18,13 +41,109 @@
         "displayName": "Group",
         "traits": [
           "TRAIT_GROUP"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "Account admin"
+              }
+            ]
+          }
+        ]
+      },
+      "capabilities": [
+        "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
+        "CAPABILITY_PROVISION"
+      ],
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "Account admin"
+          }
+        ]
+      }
+    },
+    {
+      "resourceType": {
+        "id": "metastore",
+        "displayName": "Metastore",
+        "traits": [
+          "TRAIT_APP"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.OptInRequired"
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "unity-catalog"
+              },
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "provisioning"
+              },
+              {
+                "permission": "Account admin"
+              },
+              {
+                "permission": "Workspace admin"
+              }
+            ]
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.SkipEntitlements"
+          }
         ]
       },
       "capabilities": [
         "CAPABILITY_SYNC",
         "CAPABILITY_PROVISION"
       ],
-      "permissions": {}
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "unity-catalog"
+          },
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "provisioning"
+          },
+          {
+            "permission": "Account admin"
+          },
+          {
+            "permission": "Workspace admin"
+          }
+        ]
+      },
+      "optInRequired": true
     },
     {
       "resourceType": {
@@ -32,13 +151,36 @@
         "displayName": "Role",
         "traits": [
           "TRAIT_ROLE"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "Account admin"
+              }
+            ]
+          }
         ]
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
-      "permissions": {}
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "Account admin"
+          }
+        ]
+      }
     },
     {
       "resourceType": {
@@ -46,13 +188,42 @@
         "displayName": "Service Principal",
         "traits": [
           "TRAIT_GROUP"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "Account admin"
+              }
+            ]
+          }
         ]
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
-      "permissions": {}
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "Account admin"
+          }
+        ]
+      }
     },
     {
       "resourceType": {
@@ -64,15 +235,36 @@
         "annotations": [
           {
             "@type": "type.googleapis.com/c1.connector.v2.SkipEntitlementsAndGrants"
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "scim"
+              },
+              {
+                "permission": "Account admin"
+              }
+            ]
           }
         ]
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_ACCOUNT_PROVISIONING",
         "CAPABILITY_RESOURCE_DELETE"
       ],
-      "permissions": {}
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "scim"
+          },
+          {
+            "permission": "Account admin"
+          }
+        ]
+      }
     },
     {
       "resourceType": {
@@ -80,20 +272,52 @@
         "displayName": "Workspace",
         "traits": [
           "TRAIT_GROUP"
+        ],
+        "annotations": [
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
+            "permissions": [
+              {
+                "permission": "provisioning"
+              },
+              {
+                "permission": "access-management"
+              },
+              {
+                "permission": "Account admin"
+              }
+            ]
+          }
         ]
       },
       "capabilities": [
         "CAPABILITY_SYNC",
+        "CAPABILITY_TARGETED_SYNC",
         "CAPABILITY_PROVISION"
       ],
-      "permissions": {}
+      "permissions": {
+        "permissions": [
+          {
+            "permission": "provisioning"
+          },
+          {
+            "permission": "access-management"
+          },
+          {
+            "permission": "Account admin"
+          }
+        ]
+      }
     }
   ],
   "connectorCapabilities": [
     "CAPABILITY_PROVISION",
     "CAPABILITY_SYNC",
     "CAPABILITY_ACCOUNT_PROVISIONING",
-    "CAPABILITY_RESOURCE_DELETE"
+    "CAPABILITY_RESOURCE_DELETE",
+    "CAPABILITY_TARGETED_SYNC",
+    "CAPABILITY_EVENT_FEED_V2",
+    "CAPABILITY_SERVICE_MODE_TARGETED_SYNC"
   ],
   "credentialDetails": {
     "capabilityAccountProvisioning": {
