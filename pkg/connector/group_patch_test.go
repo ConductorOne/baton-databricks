@@ -302,7 +302,7 @@ func testWorkspaceGroup(t *testing.T) *v2.Resource {
 	r, err := groupResource(context.Background(), &databricks.Group{
 		BaseResponse: databricks.BaseResponse{ID: "g-target"},
 		DisplayName:  "Target Group",
-	}, parent)
+	}, parent, "")
 	if err != nil {
 		t.Fatalf("groupResource: %v", err)
 	}

@@ -50,7 +50,7 @@ func testTargetGroupResource(t *testing.T, nativeGroupID string) *v2.Resource {
 		BaseResponse: databricks.BaseResponse{ID: nativeGroupID},
 		DisplayName:  "Target Group",
 	}
-	r, err := groupResource(context.Background(), group, parent)
+	r, err := groupResource(context.Background(), group, parent, "")
 	if err != nil {
 		t.Fatalf("groupResource: %v", err)
 	}
@@ -439,7 +439,7 @@ func newTestGroupBuilder(t *testing.T, members *[]databricks.Member, ruleSetCall
 func testAccountGroup(t *testing.T) *v2.Resource {
 	t.Helper()
 	parent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId}
-	g, err := groupResource(context.Background(), &databricks.Group{ID: "g1", DisplayName: "all users"}, parent)
+	g, err := groupResource(context.Background(), &databricks.Group{ID: "g1", DisplayName: "all users"}, parent, "")
 	if err != nil {
 		t.Fatalf("groupResource: %v", err)
 	}

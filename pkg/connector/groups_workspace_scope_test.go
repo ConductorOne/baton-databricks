@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 )
@@ -19,6 +20,9 @@ type workspaceScimServer struct {
 	adminsMembers []string
 	// accountHolds are the ids the account plane answers for, by SCIM kind.
 	accountHolds map[string][]string
+	// workspaceName is the name the account lists for deployment "wsa". Empty keeps the
+	// default, so a test that does not care about the display name reads the same.
+	workspaceName string
 }
 
 const testAdminsGroupID = "9"
@@ -30,6 +34,16 @@ func (s *workspaceScimServer) handler(t *testing.T) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		encode := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 		account := strings.Contains(r.URL.Path, "/accounts/")
+		if strings.HasSuffix(r.URL.Path, "/workspaces") {
+			name := s.workspaceName
+			if name == "" {
+				name = "prod"
+			}
+			encode([]map[string]any{
+				{"workspace_id": 1, "workspace_name": name, "deployment_name": "wsa", "workspace_status": "RUNNING"},
+			})
+			return
+		}
 		_, rest, _ := strings.Cut(r.URL.Path, "/scim/v2/")
 		kind, id, _ := strings.Cut(rest, "/")
 
@@ -148,5 +162,58 @@ func TestWorkspaceGroupMembershipIsNotOffered(t *testing.T) {
 	}
 	if got := entitlements[0].GetGrantableTo(); len(got) != 0 {
 		t.Errorf("workspace group membership is grantable to %v, want nothing", got)
+	}
+}
+
+// Databricks names the built-in group "admins" in every workspace. A metastore shared by
+// several of them lists one holder per workspace for the same privileges, so the name has
+// to say which workspace it came from. An account group keeps the name Databricks gives it.
+func TestWorkspaceGroupNameNamesItsWorkspace(t *testing.T) {
+	srv := &workspaceScimServer{workspaceName: "prod"}
+	client, _ := newWorkspaceRoutedClient(t, srv.handler(t))
+	g := newGroupBuilder(client)
+
+	resources, _, err := g.List(context.Background(),
+		&v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "wsa"}, rs.SyncOpAttrs{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 1 {
+		t.Fatalf("listed %d groups, want 1", len(resources))
+	}
+	if got := resources[0].DisplayName; got != "admins (prod)" {
+		t.Errorf("display name = %q, want %q", got, "admins (prod)")
+	}
+	// The unqualified name stays on the resource profile for anything matching on the
+	// Databricks name, and the resource ID is untouched.
+	if profile, _ := rs.GetProfileStringValue(resources[0].GetProfile(), "display_name"); profile != "admins" {
+		t.Errorf("profile display_name = %q, want the unqualified %q", profile, "admins")
+	}
+	if got := resources[0].GetId().GetResource(); got != "workspace/wsa/group/"+testAdminsGroupID {
+		t.Errorf("resource id = %q, want it unchanged by the display name", got)
+	}
+}
+
+// Two workspaces holding the same privileges must not read as one principal, and an
+// account group must not grow a suffix.
+func TestGroupNameQualifiedOnlyUnderAWorkspace(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, workspaceName, want string
+		parent                    *v2.ResourceId
+	}{
+		{"account group", "", "admins", &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acc-1"}},
+		{"workspace prod", "prod", "admins (prod)", &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "wsa"}},
+		{"workspace dev", "dev", "admins (dev)", &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "wsb"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := groupResource(ctx, &databricks.Group{ID: "9", DisplayName: "admins"}, tc.parent, tc.workspaceName)
+			if err != nil {
+				t.Fatalf("groupResource: %v", err)
+			}
+			if r.DisplayName != tc.want {
+				t.Errorf("display name = %q, want %q", r.DisplayName, tc.want)
+			}
+		})
 	}
 }

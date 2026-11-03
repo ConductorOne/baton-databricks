@@ -750,3 +750,49 @@ func TestMetastoreProvisioningRefusesAPartialPrivilegeList(t *testing.T) {
 		})
 	}
 }
+
+// A cancelling workspace holds its metastore rather than pruning it, because pruning
+// during the deletion would report the metastore to ConductorOne as gone and delete its
+// grants. The wait is bounded: the account stops listing the workspace when the deletion
+// finishes, and the metastore is then left out of the sync with no error. The error that
+// covers the wait names the workspace and its status, so it does not read as a
+// misconfigured sync scope.
+func TestMetastoreCancellingWorkspaceHoldsTheMetastoreUntilItIsGone(t *testing.T) {
+	cancelling := func() *fakeAccount {
+		f := defaultFakeAccount()
+		f.assignments = map[string]any{"ms-a": []int{1}}
+		f.workspaces = []map[string]any{
+			{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": workspaceStatusCancelling},
+		}
+		return f
+	}
+
+	t.Run("while cancelling, the sync waits and says on what", func(t *testing.T) {
+		m := newTestMetastoreBuilder(t, cancelling(), nil, syncEverything)
+		resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+		if err == nil {
+			t.Fatal("List succeeded, want the metastore held back while its workspace is deleted")
+		}
+		if len(resources) != 0 {
+			t.Errorf("listed %d metastores, want none", len(resources))
+		}
+		for _, want := range []string{"wsa", workspaceStatusCancelling} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("once the account stops listing it, the sync recovers", func(t *testing.T) {
+		f := cancelling()
+		f.workspaces = nil
+		m := newTestMetastoreBuilder(t, f, nil, syncEverything)
+		resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+		if err != nil {
+			t.Fatalf("List = %v, want no error once the workspace is gone", err)
+		}
+		if len(resources) != 0 {
+			t.Errorf("listed %d metastores, want none: nothing in scope serves it", len(resources))
+		}
+	})
+}

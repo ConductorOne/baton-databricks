@@ -190,8 +190,8 @@ func TestMetastoreProvisioningRejectsAWorkspaceLocalGroup(t *testing.T) {
 }
 
 // Metastores are opt-in while workspaces always sync, so reading Unity Catalog to decide
-// what a workspace offers turned a green sync red for every tenant that cannot read it.
-// Only a RUNNING workspace serves SCIM, so only it offers its admins group.
+// what a workspace offers would fail the whole workspace type on a tenant that cannot read
+// that plane. Only a RUNNING workspace serves SCIM, so only it offers its admins group.
 func TestWorkspaceListDoesNotDependOnUnityCatalog(t *testing.T) {
 	f := defaultFakeAccount()
 	f.assignments = map[string]any{"ms-a": http.StatusForbidden}

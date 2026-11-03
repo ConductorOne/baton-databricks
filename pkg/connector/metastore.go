@@ -102,9 +102,10 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if workspace == nil {
-			if pending {
+			if len(pending) > 0 {
 				return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.FailedPrecondition,
-					"databricks-connector: metastore %s has no running workspace in sync scope", metastore.MetastoreID)
+					"databricks-connector: metastore %s has no running workspace in sync scope, waiting on %s",
+					metastore.MetastoreID, strings.Join(pending, ", "))
 			}
 			l.Debug("databricks-connector: metastore has no workspace in sync scope; skipping it",
 				zap.String("metastore", metastore.MetastoreID))

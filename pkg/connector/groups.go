@@ -40,7 +40,12 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 	return strings.Join([]string{parentResourceId.ResourceType, parentResourceId.Resource, groupResourceType.Id, groupId}, "/")
 }
 
-func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
+// groupResource builds a group resource. workspaceName qualifies the display name of a
+// workspace-scoped group: Databricks names the built-in group "admins" in every
+// workspace, so a metastore shared by several of them would otherwise list each holder
+// of the same privileges under one indistinguishable name. It is empty for an account
+// group. The unqualified name stays in the profile.
+func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId, workspaceName string) (*v2.Resource, error) {
 	profile := map[string]any{
 		"display_name": group.DisplayName,
 		"group_id":     group.ID,
@@ -59,8 +64,13 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 	// under workspaces stays unique for match_baton_id.
 	options = append(options, rs.WithAnnotation(&v2.RawId{Id: groupId}))
 
+	displayName := group.DisplayName
+	if workspaceName != "" {
+		displayName = fmt.Sprintf("%s (%s)", group.DisplayName, workspaceName)
+	}
+
 	resource, err := rs.NewGroupResource(
-		group.DisplayName,
+		displayName,
 		groupResourceType,
 		groupId,
 		nil,
@@ -72,6 +82,25 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 	}
 
 	return resource, nil
+}
+
+// workspaceDisplayName returns the name of the workspace a group hangs off, or an empty
+// string for an account group. GetWorkspace reuses the account workspace listing, which
+// the workspace syncer has already made in this sync, so it answers from the cache.
+func (g *groupBuilder) workspaceDisplayName(ctx context.Context, deploymentName string, annos *annotations.Annotations) (string, error) {
+	if deploymentName == "" {
+		return "", nil
+	}
+
+	workspace, rateLimitData, err := g.client.GetWorkspace(ctx, deploymentName)
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return "", fmt.Errorf("databricks-connector: failed to read the workspace %s a group hangs off: %w", deploymentName, err)
+	}
+
+	return workspace.Name, nil
 }
 
 // List returns all the groups from the database as resource objects.
@@ -102,11 +131,17 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
 	}
 
+	annos := annotations.Annotations{}
+	workspaceName, err := g.workspaceDisplayName(ctx, workspaceId, &annos)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
+	}
+
 	var rv []*v2.Resource
 	for _, group := range groups {
 		gCopy := group
 
-		gr, err := groupResource(ctx, &gCopy, parentResourceID)
+		gr, err := groupResource(ctx, &gCopy, parentResourceID, workspaceName)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -124,7 +159,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+	return rv, &rs.SyncOpResults{NextPageToken: nextPage, Annotations: annos}, nil
 }
 
 // Entitlements return all entitlements relevant to the group.
@@ -374,9 +409,14 @@ func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, paren
 		return nil, annos, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 	}
 
-	resource, err := groupResource(ctx, group, parentResourceId)
+	workspaceName, err := g.workspaceDisplayName(ctx, workspaceId, &annos)
 	if err != nil {
-		return nil, nil, err
+		return nil, annos, err
+	}
+
+	resource, err := groupResource(ctx, group, parentResourceId, workspaceName)
+	if err != nil {
+		return nil, annos, err
 	}
 
 	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed group",

@@ -115,6 +115,7 @@ func testProvisioningGroup(t *testing.T) *v2.Resource {
 	r, err := groupResource(context.Background(),
 		&databricks.Group{ID: testProvisioningPrincipalID, DisplayName: "admins"},
 		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("groupResource: %v", err)
