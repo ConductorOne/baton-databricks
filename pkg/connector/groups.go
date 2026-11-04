@@ -224,35 +224,51 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 	return rv, nil, nil
 }
 
-// accountHolds reports whether the account plane holds the member a workspace group
-// lists. The lookups are filtered lists, so an id of the wrong kind answers with no
-// match rather than the 400 a by-id read returns.
-func (g *groupBuilder) accountHolds(ctx context.Context, memberType, memberID string) (bool, *v2.RateLimitDescription, error) {
-	switch memberType {
-	case "Users":
-		userName, rateLimitData, err := g.client.FindUsername(ctx, "", memberID)
-		if err != nil {
-			return false, rateLimitData, fmt.Errorf("databricks-connector: failed to look up user %s on the account: %w", memberID, err)
-		}
-
-		return userName != "", rateLimitData, nil
-	case "Groups":
-		displayName, rateLimitData, err := g.client.FindGroupDisplayName(ctx, "", memberID)
-		if err != nil {
-			return false, rateLimitData, fmt.Errorf("databricks-connector: failed to look up group %s on the account: %w", memberID, err)
-		}
-
-		return displayName != "", rateLimitData, nil
-	case "ServicePrincipals":
-		appID, rateLimitData, err := g.client.FindServicePrincipalAppID(ctx, "", memberID)
-		if err != nil {
-			return false, rateLimitData, fmt.Errorf("databricks-connector: failed to look up service principal %s on the account: %w", memberID, err)
-		}
-
-		return appID != "", rateLimitData, nil
-	default:
-		return false, nil, fmt.Errorf("databricks-connector: invalid member type: %s", memberType)
+// splitMemberRef splits a SCIM member ref such as "Users/123" into its type and id.
+func splitMemberRef(ref string) (string, string, error) {
+	memberType, memberID, found := strings.Cut(ref, "/")
+	if !found || memberType == "" || memberID == "" || strings.Contains(memberID, "/") {
+		return "", "", fmt.Errorf("databricks-connector: invalid member format of %s", ref)
 	}
+
+	return memberType, memberID, nil
+}
+
+// accountHeld reports, per member type, which member ids the account holds. It resolves the
+// whole page in one request per type, and a member the account does not hold is absent.
+func (g *groupBuilder) accountHeld(ctx context.Context, members []databricks.Member) (map[string]map[string]struct{}, *v2.RateLimitDescription, error) {
+	idsByType := make(map[string][]string)
+	for _, member := range members {
+		memberType, memberID, err := splitMemberRef(member.Ref)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		switch memberType {
+		case "Users", "Groups", "ServicePrincipals":
+			idsByType[memberType] = append(idsByType[memberType], memberID)
+		default:
+			return nil, nil, fmt.Errorf("databricks-connector: invalid member type: %s", memberType)
+		}
+	}
+
+	held := make(map[string]map[string]struct{}, len(idsByType))
+	var rateLimitData *v2.RateLimitDescription
+
+	for memberType, ids := range idsByType {
+		heldIDs, typeRateLimitData, err := g.client.FindAccountHeldIDs(ctx, memberType, ids)
+		if typeRateLimitData != nil {
+			rateLimitData = typeRateLimitData
+		}
+
+		if err != nil {
+			return nil, rateLimitData, fmt.Errorf("databricks-connector: failed to look up %s on the account: %w", memberType, err)
+		}
+
+		held[memberType] = heldIDs
+	}
+
+	return held, rateLimitData, nil
 }
 
 // Grants return all grants relevant to the group.
@@ -303,26 +319,33 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 		zap.String("cursor", cursor),
 	)
 
-	for _, member := range members {
-		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
-		pp := strings.Split(member.Ref, "/")
-		if len(pp) != 2 {
-			return nil, nil, fmt.Errorf("databricks-connector: invalid member format of %s", member.Ref)
+	// Only the account syncs members, so one it does not hold is workspace-local and has no
+	// resource to point a grant at.
+	var held map[string]map[string]struct{}
+	if isWorkspaceGroup {
+		heldByType, rateLimitData, err := g.accountHeld(ctx, members)
+		if rateLimitData != nil {
+			annos.WithRateLimiting(rateLimitData)
+		}
+		if err != nil {
+			return nil, nil, err
 		}
 
-		memberType, memberID := pp[0], pp[1]
+		held = heldByType
+	}
+
+	for _, member := range members {
+		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
+		memberType, memberID, err := splitMemberRef(member.Ref)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		var resourceId *v2.ResourceId
 		var anns []protoreflect.ProtoMessage
 
-		// Only the account syncs members, so one it does not hold is workspace-local
-		// and has no resource to point a grant at.
 		if isWorkspaceGroup {
-			held, rateLimitData, err := g.accountHolds(ctx, memberType, memberID)
-			annos.WithRateLimiting(rateLimitData)
-			if err != nil {
-				return nil, nil, err
-			}
-			if !held {
+			if _, ok := held[memberType][memberID]; !ok {
 				l.Debug("databricks-connector: skipping a workspace-local member the account does not hold",
 					zap.String("group", resource.Id.Resource),
 					zap.String("member", member.Ref))

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,6 +24,13 @@ type workspaceScimServer struct {
 	// workspaceName is the name the account lists for deployment "wsa". Empty keeps the
 	// default, so a test that does not care about the display name reads the same.
 	workspaceName string
+	// accountReads counts the filtered reads the connector sends to the account plane.
+	accountReads int
+	// maxFilterTerms refuses a filter wider than Databricks does. Zero accepts any width.
+	maxFilterTerms int
+	// pageCap serves fewer rows than matched while still reporting the true totalResults, the
+	// way a server that clamps the page would. Zero serves every match.
+	pageCap int
 }
 
 const testAdminsGroupID = "9"
@@ -48,16 +56,36 @@ func (s *workspaceScimServer) handler(t *testing.T) http.HandlerFunc {
 		kind, id, _ := strings.Cut(rest, "/")
 
 		if account {
-			filter := r.URL.Query().Get("filter")
-			_, value, _ := strings.Cut(filter, " eq ")
-			value = strings.Trim(value, `"`)
-			if slices.Contains(s.accountHolds[kind], value) {
-				encode(map[string]any{"totalResults": 1, "Resources": []map[string]any{
-					{"id": value, "userName": "u" + value, "displayName": "g" + value, "applicationId": "a" + value},
-				}})
+			// One row per term it holds, as the account does: matching only the first term would
+			// let a caller that dropped the rest still pass.
+			s.accountReads++
+			terms := strings.Split(r.URL.Query().Get("filter"), " or ")
+			// Databricks counts an n-term chain as 2n-1 nodes and refuses above 200.
+			if s.maxFilterTerms > 0 && len(terms) > s.maxFilterTerms {
+				w.WriteHeader(http.StatusBadRequest)
+				encode(map[string]any{
+					"schemas":  []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
+					"scimType": "InvalidFilter",
+					"detail":   "SCIM filter exceeds max nodes: 200",
+					"status":   "400",
+				})
 				return
 			}
-			encode(map[string]any{"totalResults": 0})
+			var resources []map[string]any
+			for _, term := range terms {
+				_, value, _ := strings.Cut(term, " eq ")
+				value = strings.Trim(strings.TrimSpace(value), `"`)
+				if slices.Contains(s.accountHolds[kind], value) {
+					resources = append(resources, map[string]any{
+						"id": value, "userName": "u" + value, "displayName": "g" + value, "applicationId": "a" + value,
+					})
+				}
+			}
+			matched := len(resources)
+			if s.pageCap > 0 && len(resources) > s.pageCap {
+				resources = resources[:s.pageCap]
+			}
+			encode(map[string]any{"totalResults": matched, "Resources": resources})
 			return
 		}
 
@@ -232,6 +260,88 @@ func TestGroupNameQualifiedOnlyUnderAWorkspace(t *testing.T) {
 			}
 			if r.DisplayName != tc.want {
 				t.Errorf("display name = %q, want %q", r.DisplayName, tc.want)
+			}
+		})
+	}
+}
+
+// Member resolution reads the account once per member type, splits a list wider than one
+// filter, and fails a clamped page instead of reading it as "the account does not hold these".
+func TestWorkspaceGroupGrantsResolveMembersInBatches(t *testing.T) {
+	users := func(n int) ([]string, []string) {
+		refs := make([]string, 0, n)
+		ids := make([]string, 0, n)
+		for i := range n {
+			id := strconv.Itoa(1000 + i)
+			refs = append(refs, "Users/"+id)
+			ids = append(ids, id)
+		}
+
+		return refs, ids
+	}
+	manyRefs, manyIDs := users(250)
+
+	for _, tt := range []struct {
+		name       string
+		members    []string
+		holds      map[string][]string
+		pageCap    int
+		wantGrants int
+		wantReads  int
+		wantErr    string
+	}{
+		{
+			name:    "one read per member type, not one per member",
+			members: []string{"Users/100", "Users/101", "Users/102", "Users/103", "Groups/200", "Groups/201", "ServicePrincipals/300"},
+			holds: map[string][]string{
+				"Users": {"100", "101", "102", "103"}, "Groups": {"200", "201"}, "ServicePrincipals": {"300"},
+			},
+			wantGrants: 7,
+			wantReads:  3,
+		},
+		{
+			name:       "a list wider than one filter is split",
+			members:    manyRefs,
+			holds:      map[string][]string{"Users": manyIDs},
+			wantGrants: 250,
+			wantReads:  3,
+		},
+		{
+			name:    "a clamped page fails instead of dropping members",
+			members: []string{"Users/100", "Users/101", "Users/102"},
+			holds:   map[string][]string{"Users": {"100", "101", "102"}},
+			pageCap: 2,
+			wantErr: "of 3 matched Users",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := &workspaceScimServer{
+				adminsMembers: tt.members, accountHolds: tt.holds,
+				maxFilterTerms: 100, pageCap: tt.pageCap,
+			}
+			client, _ := newWorkspaceRoutedClient(t, srv.handler(t))
+
+			grants, _, err := newGroupBuilder(client).Grants(context.Background(), testWorkspaceGroupResource(t), rs.SyncOpAttrs{})
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Grants returned %d grants, want an error naming the short page", len(grants))
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Grants: %v", err)
+			}
+			if len(grants) != tt.wantGrants {
+				t.Errorf("grants = %d, want %d", len(grants), tt.wantGrants)
+			}
+			if srv.accountReads != tt.wantReads {
+				t.Errorf("account reads = %d, want %d for %d members", srv.accountReads, tt.wantReads, len(tt.members))
 			}
 		})
 	}
