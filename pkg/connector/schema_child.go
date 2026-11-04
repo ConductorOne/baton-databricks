@@ -159,11 +159,28 @@ func pushSchemaChildRoute(
 	}
 
 	fullName := catalogName + schemaNameSeparator + schemaName
-	var sawCatalog bool
+	var sawCatalog, sawGone bool
+	var lastDeny error
 	for i := range usable {
 		workspace := usable[i]
 		catalog, err := catalogThrough(ctx, client, workspace.DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
+			// A workspace that does not serve the catalog says nothing about the
+			// schema below it, so the walk goes on. Returning the error instead
+			// reaches the SDK as NotFound for a 404 carrying no code, which it
+			// reads as a warning: the children would be emitted as none and
+			// ConductorOne would delete them.
+			if errors.Is(err, errCatalogGone) {
+				sawGone = true
+
+				continue
+			}
+			if deniesTrust(err) {
+				lastDeny = err
+
+				continue
+			}
+
 			return err
 		}
 		if catalog == nil {
@@ -233,8 +250,18 @@ func pushSchemaChildRoute(
 		return nil
 	}
 	if !sawCatalog {
-		return status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+		// Every workspace named the catalog as gone and none refused the read.
+		// The catalog syncer drops it in the same sync, so this empties what
+		// ConductorOne is already removing.
+		if sawGone && lastDeny == nil {
+			return nil
+		}
+		msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
+		if lastDeny != nil {
+			msg = fmt.Sprintf("%s: %s", msg, lastDeny.Error())
+		}
+
+		return status.Errorf(codes.FailedPrecondition, "%s", msg)
 	}
 
 	return status.Errorf(codes.PermissionDenied,

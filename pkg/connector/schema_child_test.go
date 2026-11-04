@@ -190,3 +190,69 @@ func TestSchemaChildListTellsADeletedSchemaFromAnInvisibleOne(t *testing.T) {
 		})
 	}
 }
+
+// A workspace that does not serve the catalog answers the catalog read with a
+// 404 carrying no error code, the same answer a routing or permission miss
+// gives. The schema syncer walks on to the next workspace; listing a schema's
+// children must do the same. Returning that error instead reaches the SDK as
+// codes.NotFound, which it reads as a warning: the listing finishes green with
+// no resources and ConductorOne deletes every table and volume under the schema.
+func TestSchemaChildListTriesTheNextWorkspaceWhenOneDoesNotServeTheCatalog(t *testing.T) {
+	for _, errorCode := range []string{"", errorCodeCatalogGone} {
+		name := "bare 404"
+		if errorCode != "" {
+			name = errorCode
+		}
+		t.Run(name, func(t *testing.T) {
+			f := &fakeSchemaAccount{
+				second:           true,
+				metastoreOwner:   "eng",
+				catalogOwner:     "eng",
+				catalogStatus:    map[string]int{"wsa": http.StatusNotFound},
+				catalogErrorCode: errorCode,
+				schemas:          []map[string]any{{"name": "sales", "owner": "eng"}},
+				tables:           []map[string]any{{"name": "orders", "owner": "eng", "table_type": "MANAGED"}},
+			}
+			tables, _ := newTestChildBuildersAs(t, f, "eng")
+
+			listed, err := listAllChildren(t, tables.List)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(listed) != 1 {
+				t.Fatalf("listed %d table(s), want 1 through the second workspace", len(listed))
+			}
+			if workspace, _ := rs.GetProfileStringValue(rs.GetProfile(listed[0]), profileKeyWorkspace); workspace != "wsb" {
+				t.Errorf("profile[%s] = %q, want wsb", profileKeyWorkspace, workspace)
+			}
+		})
+	}
+}
+
+// Every workspace naming the catalog as gone, with none refusing the read, is
+// the catalog being dropped. The catalog syncer removes it in the same sync, so
+// the children listing empties what ConductorOne is already removing instead of
+// failing the sync.
+func TestSchemaChildListIsEmptyWhenEveryWorkspaceSaysTheCatalogIsGone(t *testing.T) {
+	f := &fakeSchemaAccount{
+		second:           true,
+		metastoreOwner:   "eng",
+		catalogOwner:     "eng",
+		catalogStatus:    map[string]int{"wsa": http.StatusNotFound, "wsb": http.StatusNotFound},
+		catalogErrorCode: errorCodeCatalogGone,
+		schemas:          []map[string]any{{"name": "sales", "owner": "eng"}},
+		tables:           []map[string]any{{"name": "orders", "owner": "eng", "table_type": "MANAGED"}},
+	}
+	tables, _ := newTestChildBuildersAs(t, f, "eng")
+
+	listed, err := listAllChildren(t, tables.List)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("listed %d table(s), want none under a catalog that is gone", len(listed))
+	}
+	if want := []string{"wsa", "wsb"}; !slices.Equal(f.catalogReads, want) {
+		t.Errorf("catalog reads = %v, want %v: both workspaces are asked before the listing empties", f.catalogReads, want)
+	}
+}
