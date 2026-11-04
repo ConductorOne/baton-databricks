@@ -101,15 +101,17 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalParam: "targetUserId", revoke: true},
 	},
 	{auditServiceAccounts, "removeGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
+	// updateUser/updateGroup rows carry no entitlement detail, and workspace SCIM entitlement changes are
+	// logged only as these actions (no ACL row), so every workspace entitlement role is refreshed.
 	{auditServiceAccounts, "updateGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+		roleNames: entitlements,
 	},
 	// "add"/"delete" are the real user-lifecycle events; deleteUser is a parameterless PII purge.
 	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId"},
 	{auditServiceAccounts, "updateUser"}: {
 		resourceType: userResourceType, idParam: "targetUserId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+		roleNames: entitlements,
 	},
 	{auditServiceAccounts, "delete"}:         {resourceType: userResourceType, idParam: "targetUserId"},
 	{auditServiceAccounts, "activateUser"}:   {resourceType: userResourceType, idParam: "targetUserId"},

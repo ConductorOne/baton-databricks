@@ -505,8 +505,50 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 			want: []wantResource{
 				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "updateGroup in a workspace refreshes the group and every workspace entitlement role",
+			row: auditLogRow{
+				ActionName:    "updateGroup",
+				ServiceName:   "accounts",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "account-level updateUser refreshes only the user",
+			row: auditLogRow{
+				ActionName:    "updateUser",
+				ServiceName:   "accounts",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name: "account-level updateGroup refreshes only the group",
+			row: auditLogRow{
+				ActionName:    "updateGroup",
+				ServiceName:   "accounts",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
 			},
 		},
 		{
