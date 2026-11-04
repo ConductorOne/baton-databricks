@@ -101,8 +101,11 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalParam: "targetUserId", revoke: true},
 	},
 	{auditServiceAccounts, "removeGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
-	// updateUser/updateGroup rows carry no entitlement detail, and workspace SCIM entitlement changes are
-	// logged only as these actions (no ACL row), so every workspace entitlement role is refreshed.
+	// Workspace entitlements change through two paths that log different rows. The admin UI's
+	// access toggles log changeDatabricksWorkspaceAcl / changeDatabricksSqlAcl (mapped below to their
+	// single role). Workspace SCIM writes log only updateUser/updateGroup, with no ACL row and no
+	// detail about which entitlement changed, so those actions refresh every workspace entitlement role.
+	// Keep both mappings: each covers a path the other doesn't.
 	{auditServiceAccounts, "updateGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		roleNames: entitlements,
