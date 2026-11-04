@@ -246,7 +246,12 @@ account, as in full sync.
 | 25 | −2h | 0 | accounts / `add` | targetUserId bob | none: newer than the 4-hour lag cutoff |
 | 26 | −72h | 0 | accounts / `add` | targetUserId carol | none: older than the feed start |
 
-That adds up to 31 events.
+The table lists what each row maps to, 31 events in all. Within one poll, `ListEvents` keeps
+only the last change for each resource (by resource and parent ID), because a resource change
+makes C1 re-read the resource's current state anyway. Grant and revoke events are never
+collapsed. Several resources appear more than once (bob in rows 2, 11 and 12, `account_admin` in
+10 and 11, the ws-alpha roles in 19 and 23, and others), so the poll emits 21 events, each with
+the ID of the last row that named its resource.
 
 ## curl examples
 

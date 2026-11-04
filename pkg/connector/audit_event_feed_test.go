@@ -1465,8 +1465,10 @@ func TestListEventsCachesPrincipalTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
 	}
-	if len(events) != 5 {
-		t.Fatalf("len(events) = %d, want 5", len(events))
+	// Three sp-1 grants, plus one g-1 change: both gone-1 rows fall back to the same group
+	// change, and only the last is kept.
+	if len(events) != 4 {
+		t.Fatalf("len(events) = %d, want 4", len(events))
 	}
 	for _, id := range []string{"sp-1", "gone-1"} {
 		for _, kind := range []string{"Users", "Groups", "ServicePrincipals"} {
@@ -1505,5 +1507,93 @@ func TestResolvePrincipalTypeDoesNotCacheErrors(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("lookup made %d calls, want 2 (the error must not be cached)", n)
+	}
+}
+
+// TestListEventsDropsDuplicateResourceChanges verifies that when a page names the same resource
+// more than once (the same user, or the same workspace role refreshed by several updateUser rows),
+// only the last change is kept, with its own row's ID, and grant events are never collapsed.
+func TestListEventsDropsDuplicateResourceChanges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"statement_id": "stmt-1",
+			"status":       map[string]any{"state": "SUCCEEDED"},
+			"manifest": map[string]any{
+				"schema": map[string]any{
+					"columns": []map[string]any{
+						{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+						{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+					},
+				},
+			},
+			"result": map[string]any{
+				"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-1"}`},
+					{"evt-2", "2026-01-01T00:01:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-2"}`},
+					{"evt-3", "2026-01-01T00:02:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-1"}`},
+					{"evt-4", "2026-01-01T00:03:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+					{"evt-5", "2026-01-01T00:04:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("failed to encode mock statement response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", &databricks.NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	feed := newAuditEventFeed(client, nil, "wh-1")
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	// evt-1 is fully superseded: evt-3 names u-1 and the same four roles again. evt-2 keeps only
+	// u-2, its roles are superseded by evt-3. evt-4 and evt-5: one grant each.
+	want := []string{"evt-2/0", "evt-3/0", "evt-3/1", "evt-3/2", "evt-3/3", "evt-3/4", "evt-4/0", "evt-5/0"}
+	got := make([]string, 0, len(events))
+	for _, e := range events {
+		got = append(got, e.GetId())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event IDs = %v, want %v", got, want)
+	}
+	for _, e := range events[6:] {
+		if e.GetCreateGrantEvent() == nil {
+			t.Errorf("event %s = %+v, want a CreateGrantEvent", e.GetId(), e)
+		}
 	}
 }
