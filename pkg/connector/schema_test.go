@@ -33,6 +33,14 @@ type fakeSchemaAccount struct {
 	schemas []map[string]any
 	// schemaStatus fails the schemas listing with that status.
 	schemaStatus int
+	// schemaGetStatus fails the single-schema read on that deployment name, with
+	// schemaGetErrorCode as the vendor error_code. SCHEMA_DOES_NOT_EXIST is what
+	// both a deleted schema and one the caller cannot see answer.
+	schemaGetStatus    map[string]int
+	schemaGetErrorCode string
+	// tables and volumes are what a schema's children listings return.
+	tables  []map[string]any
+	volumes []map[string]any
 	// assignments maps a securable's full name to the privilege assignments on it.
 	assignments map[string][]map[string]any
 	// ownPrivileges answers a read filtered by principal, keyed by
@@ -58,6 +66,8 @@ type fakeSchemaAccount struct {
 
 	routed        int
 	schemaPages   int
+	schemaReads   []string
+	childReads    []string
 	catalogPages  int
 	patches       []map[string]any
 	permHosts     []string
@@ -114,6 +124,12 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 			f.serveCatalog(w, r)
 		case strings.HasSuffix(path, "/unity-catalog/schemas"):
 			f.serveSchemas(w, r)
+		case strings.Contains(path, "/unity-catalog/schemas/"):
+			f.serveSchema(w, r)
+		case strings.HasSuffix(path, "/unity-catalog/tables"):
+			f.serveSchemaChildren(w, r, "tables", f.tables)
+		case strings.HasSuffix(path, "/unity-catalog/volumes"):
+			f.serveSchemaChildren(w, r, "volumes", f.volumes)
 		case strings.Contains(path, "/unity-catalog/effective-permissions/"):
 			_, securable, _ := strings.Cut(path, "/unity-catalog/effective-permissions/")
 			f.serveEffectivePermissions(w, r, securable)

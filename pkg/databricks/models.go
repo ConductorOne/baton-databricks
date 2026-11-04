@@ -188,6 +188,9 @@ type Catalog struct {
 type Schema struct {
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
+
+	// FullName is "{catalog}.{schema}", which a single schema read is checked against.
+	FullName string `json:"full_name"`
 }
 
 type Table struct {

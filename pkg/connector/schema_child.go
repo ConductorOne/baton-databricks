@@ -192,11 +192,16 @@ func pushSchemaChildRoute(
 		}
 
 		schema, err := schemaThrough(ctx, client, route.Workspace, catalogName, schemaName, annos)
+		// A schema named as missing is read like one absent from the listing:
+		// proof of deletion only for a caller that sees the whole catalog.
+		if errors.Is(err, errSchemaGone) {
+			schema, err = nil, nil
+		}
 		if err != nil {
 			return err
 		}
 		if schemasComplete && schema == nil {
-			ctxzap.Extract(ctx).Debug("databricks-connector: the schema is no longer listed; listing none of its children",
+			ctxzap.Extract(ctx).Debug("databricks-connector: the schema is no longer there; listing none of its children",
 				zap.String("resource_type", resourceType.Id),
 				zap.String("schema", fullName),
 				zap.String("workspace", route.Workspace))

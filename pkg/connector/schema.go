@@ -364,39 +364,36 @@ func (b *schemaBuilder) pushRoute(
 		catalogName, schemaListRemedy)
 }
 
-// schemaThrough finds one schema in the listing of workspace, nil when that
-// workspace does not list it. Its caller has already proven the listing holds
-// every schema in the catalog, so an absence here is the schema being gone.
+// errSchemaGone marks a schema Databricks named as missing.
+var errSchemaGone = errors.New("schema no longer exists")
+
+// schemaThrough reads one schema through workspace. It reports errSchemaGone
+// when Databricks names the schema missing, which proves nothing on its own: a
+// caller without catalog-wide visibility is answered the same way for a schema
+// it merely cannot see, so the caller decides what the absence means. Every
+// other refusal, a 404 carrying no code included, leaves the schema unknown
+// rather than absent: read as an empty result the SDK would skip the children
+// and ConductorOne would delete every table and volume under it.
 func schemaThrough(
 	ctx context.Context,
 	client *databricks.Client,
 	workspace, catalogName, schemaName string,
 	annos *annotations.Annotations,
 ) (*databricks.Schema, error) {
-	pageToken := ""
-	for {
-		schemas, next, rateLimit, err := client.ListSchemas(ctx, workspace, catalogName, pageToken, ResourcesPageSize)
-		noteRateLimit(annos, rateLimit)
-		if err != nil {
-			return nil, schemaListingError(catalogName, workspace, err)
-		}
-
-		for _, schema := range schemas {
-			if schema.Name == schemaName {
-				return &schema, nil
-			}
-		}
-
-		if next == "" {
-			return nil, nil
-		}
-		if next == pageToken {
-			return nil, status.Errorf(codes.Internal,
-				"databricks-connector: the schemas of catalog %s repeat page token %q through workspace %s",
-				catalogName, next, workspace)
-		}
-		pageToken = next
+	schema, rateLimit, err := client.GetSchema(ctx, workspace, catalogName+schemaNameSeparator+schemaName)
+	noteRateLimit(annos, rateLimit)
+	switch {
+	case err == nil:
+	case databricks.IsSecurableGone(err, errorCodeSchemaGone):
+		return nil, errSchemaGone
+	case status.Code(err) == codes.InvalidArgument:
+		// The answer does not describe the schema asked for.
+		return nil, err
+	default:
+		return nil, schemaListingError(catalogName, workspace, err)
 	}
+
+	return schema, nil
 }
 
 // schemaListingError returns NotFound only when Databricks names the missing
