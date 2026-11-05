@@ -120,10 +120,9 @@ const childListRemedy = "the connector's service principal must own the metastor
 	"or hold ALL_PRIVILEGES on the catalog"
 
 // pushSchemaChildRoute records a workspace that can list every table or volume
-// of the schema. It walks the running in-scope workspaces until one lists the
-// catalog and the child listing is complete. An error from a workspace stops
-// the walk. An empty result is an error: it would make ConductorOne delete
-// the tables and volumes.
+// of the schema, walking the running in-scope workspaces until one serves the
+// catalog and the child listing is complete. A workspace that does not serve it
+// is skipped; an empty result is an error unless every workspace named it gone.
 func pushSchemaChildRoute(
 	ctx context.Context,
 	client *databricks.Client,
