@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -154,6 +155,14 @@ func TestSchemaChildListTellsADeletedSchemaFromAnInvisibleOne(t *testing.T) {
 			clientID: "eng", catalogOwner: "eng",
 			wantErr: codes.FailedPrecondition,
 		},
+		{
+			// CATALOG_DOES_NOT_EXIST names the parent, not this schema, and
+			// one workspace is not every workspace, so it does not prove the
+			// subtree is gone.
+			name:     "a 404 naming the parent catalog is not proof either",
+			clientID: "eng", catalogOwner: "eng", errorCode: errorCodeCatalogGone,
+			wantErr: codes.FailedPrecondition,
+		},
 	}
 
 	for _, test := range tests {
@@ -254,5 +263,31 @@ func TestSchemaChildListIsEmptyWhenEveryWorkspaceSaysTheCatalogIsGone(t *testing
 	}
 	if want := []string{"wsa", "wsb"}; !slices.Equal(f.catalogReads, want) {
 		t.Errorf("catalog reads = %v, want %v: both workspaces are asked before the listing empties", f.catalogReads, want)
+	}
+}
+
+// Every workspace refusing the catalog read is not the catalog being gone. The
+// listing must fail and keep what ConductorOne already has, and the refusal has
+// to reach the operator rather than be swallowed into a generic message.
+func TestSchemaChildListFailsWhenEveryWorkspaceRefusesTheCatalog(t *testing.T) {
+	f := &fakeSchemaAccount{
+		second:         true,
+		metastoreOwner: "eng",
+		catalogOwner:   "eng",
+		catalogStatus:  map[string]int{"wsa": http.StatusForbidden, "wsb": http.StatusForbidden},
+		schemas:        []map[string]any{{"name": "sales", "owner": "eng"}},
+		tables:         []map[string]any{{"name": "orders", "owner": "eng", "table_type": "MANAGED"}},
+	}
+	tables, _ := newTestChildBuildersAs(t, f, "eng")
+
+	listed, err := listAllChildren(t, tables.List)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("List error = %v, want FailedPrecondition", err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("listed %d table(s), want none", len(listed))
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("List error = %v, want the refusal named in the message", err)
 	}
 }

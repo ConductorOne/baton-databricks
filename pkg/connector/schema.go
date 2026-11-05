@@ -368,19 +368,17 @@ func (b *schemaBuilder) pushRoute(
 var errSchemaGone = errors.New("schema no longer exists")
 
 // schemaThrough reads one schema through workspace. It reports errSchemaGone
-// when Databricks names the schema missing, which proves nothing on its own: a
-// caller without catalog-wide visibility is answered the same way for a schema
-// it merely cannot see, so the caller decides what the absence means. Every
-// other refusal, a 404 carrying no code included, leaves the schema unknown
-// rather than absent: read as an empty result the SDK would skip the children
-// and ConductorOne would delete every table and volume under it.
+// when Databricks names the schema itself missing, which proves nothing on its
+// own, so the caller decides what that absence means. Every other refusal leaves
+// the schema unknown: read as empty, C1 would delete its tables and volumes.
 func schemaThrough(
 	ctx context.Context,
 	client *databricks.Client,
 	workspace, catalogName, schemaName string,
 	annos *annotations.Annotations,
 ) (*databricks.Schema, error) {
-	schema, rateLimit, err := client.GetSchema(ctx, workspace, catalogName+schemaNameSeparator+schemaName)
+	fullName := catalogName + schemaNameSeparator + schemaName
+	schema, rateLimit, err := client.GetSchema(ctx, workspace, fullName)
 	noteRateLimit(annos, rateLimit)
 	switch {
 	case err == nil:
@@ -390,7 +388,9 @@ func schemaThrough(
 		// The answer does not describe the schema asked for.
 		return nil, err
 	default:
-		return nil, schemaListingError(catalogName, workspace, err)
+		return nil, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: schema %s cannot be read through workspace %s, "+
+				"so its tables and volumes are unknown", fullName, workspace), err)
 	}
 
 	return schema, nil
