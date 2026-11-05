@@ -188,6 +188,21 @@ type Catalog struct {
 type Schema struct {
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
+
+	// FullName is "{catalog}.{schema}", which a single schema read is checked against.
+	FullName string `json:"full_name"`
+}
+
+type Table struct {
+	Name      string `json:"name"`
+	Owner     string `json:"owner"`
+	TableType string `json:"table_type"`
+}
+
+type Volume struct {
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	VolumeType string `json:"volume_type"`
 }
 
 type PrivilegeAssignment struct {
@@ -233,6 +248,16 @@ type catalogsResponse struct {
 
 type schemasResponse struct {
 	Schemas       []Schema `json:"schemas"`
+	NextPageToken string   `json:"next_page_token"`
+}
+
+type tablesResponse struct {
+	Tables        []Table `json:"tables"`
+	NextPageToken string  `json:"next_page_token"`
+}
+
+type volumesResponse struct {
+	Volumes       []Volume `json:"volumes"`
 	NextPageToken string   `json:"next_page_token"`
 }
 

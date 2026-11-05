@@ -26,6 +26,12 @@ const (
 	// https://docs.databricks.com/api/workspace/schemas/list
 	unityCatalogSchemasEndpoint = "/api/2.1/unity-catalog/schemas"
 
+	// https://docs.databricks.com/api/workspace/tables/list
+	unityCatalogTablesEndpoint = "/api/2.1/unity-catalog/tables"
+
+	// https://docs.databricks.com/api/workspace/volumes/list
+	unityCatalogVolumesEndpoint = "/api/2.1/unity-catalog/volumes"
+
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
@@ -41,10 +47,15 @@ const (
 	SecurableMetastore = "metastore"
 	SecurableCatalog   = "catalog"
 	SecurableSchema    = "schema"
+	SecurableTable     = "table"
+	SecurableVolume    = "volume"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
 	permissionsMaxResults uint = 0
+
+	// The tables endpoint rejects a max_results above this ceiling.
+	unityCatalogTablesMaxResults uint = 50
 )
 
 // ListMetastores (GET /api/2.0/accounts/{account_id}/metastores). Not paginated.
@@ -124,6 +135,32 @@ func (c *Client) ListCatalogs(
 	return res.Catalogs, res.NextPageToken, ratelimitData, nil
 }
 
+// GetVolume (GET /api/2.1/unity-catalog/volumes/{full_name}) reads one volume
+// through workspaceId, which is a deployment name. The permissions endpoint
+// answers a missing volume with the generic RESOURCE_DOES_NOT_EXIST, which an
+// unreachable workspace also answers, so this read is what separates the two:
+// measured on a live tenant it returns 200 for a volume that exists and 404 for
+// one that does not, and it names SCHEMA_DOES_NOT_EXIST when the parent is what
+// is missing.
+func (c *Client) GetVolume(
+	ctx context.Context,
+	workspaceId, fullName string,
+) (
+	*Volume,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res Volume
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogVolumesEndpoint, fullName)
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read volume %s: %w", fullName, err))
+	}
+
+	return &res, ratelimitData, nil
+}
+
 // GetCatalog (GET /api/2.1/unity-catalog/catalogs/{name}) reads one catalog
 // through workspaceId, which is a deployment name. It answers what draining
 // ListCatalogs cannot: a 404 naming CATALOG_DOES_NOT_EXIST is the catalog not
@@ -163,6 +200,48 @@ func (c *Client) GetCatalog(
 	return &res, ratelimitData, nil
 }
 
+// GetSchema (GET /api/2.1/unity-catalog/schemas/{full_name}) reads one schema
+// through workspaceId, which is a deployment name. full_name is "{catalog}.{schema}".
+// It separates the two answers draining ListSchemas runs together: a 404 naming
+// SCHEMA_DOES_NOT_EXIST is Databricks naming the schema missing, which a caller
+// that merely cannot see it is answered with too, and any other refusal is this
+// workspace not serving it. Which of the two a named 404 is belongs to the
+// caller. The name is checked against the assembled URL for the same reason
+// permissionsUrl checks it.
+func (c *Client) GetSchema(
+	ctx context.Context,
+	workspaceId, fullName string,
+) (
+	*Schema,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res Schema
+
+	if fullName == "" {
+		return nil, nil, invalidArgument("schema full name is required")
+	}
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogSchemasEndpoint, fullName)
+	if !addressesSecurable(u, "/"+fullName) {
+		return nil, nil, invalidArgument("cannot address schema %q: the name does not survive URL assembly", fullName)
+	}
+
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read schema %s: %w", fullName, err))
+	}
+
+	// An answer about another schema, or one that names no schema at all, does not
+	// describe the one asked for, and its owner is what decides whether the
+	// children listing is complete.
+	if res.FullName != fullName {
+		return nil, ratelimitData, invalidArgument("asked Databricks for schema %q and it answered with %q", fullName, res.FullName)
+	}
+
+	return &res, ratelimitData, nil
+}
+
 // ListSchemas (GET /api/2.1/unity-catalog/schemas?catalog_name=) reads one page of
 // the schemas of catalogName, through workspaceId, which is a deployment name.
 // Unlike the catalogs listing, this one pages, so the cursor is passed through.
@@ -190,6 +269,71 @@ func (c *Client) ListSchemas(
 	}
 
 	return res.Schemas, res.NextPageToken, ratelimitData, nil
+}
+
+// ListTables (GET /api/2.1/unity-catalog/tables?catalog_name=&schema_name=) pages
+// the tables, views and materialized views in a schema. schema_name is mandatory,
+// and a max_results above the endpoint's ceiling of 50 is clamped rather than sent.
+func (c *Client) ListTables(
+	ctx context.Context,
+	workspaceId, catalogName, schemaName, pageToken string,
+	maxResults uint,
+) (
+	[]Table,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	if maxResults > unityCatalogTablesMaxResults {
+		maxResults = unityCatalogTablesMaxResults
+	}
+
+	var res tablesResponse
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogTablesEndpoint)
+	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
+		catalogName: catalogName,
+		schemaName:  schemaName,
+		maxResults:  &maxResults,
+		pageToken:   pageToken,
+		// Without this the listing carries every column and property of every
+		// table, which is the bulk of the response and none of it is read here.
+		omitTablePayload: true,
+	})
+	if err != nil {
+		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId,
+			fmt.Errorf("failed to list tables in schema %s.%s: %w", catalogName, schemaName, err))
+	}
+
+	return res.Tables, res.NextPageToken, ratelimitData, nil
+}
+
+// ListVolumes (GET /api/2.1/unity-catalog/volumes?catalog_name=&schema_name=) pages a schema's volumes.
+func (c *Client) ListVolumes(
+	ctx context.Context,
+	workspaceId, catalogName, schemaName, pageToken string,
+	maxResults uint,
+) (
+	[]Volume,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res volumesResponse
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogVolumesEndpoint)
+	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
+		catalogName: catalogName,
+		schemaName:  schemaName,
+		maxResults:  &maxResults,
+		pageToken:   pageToken,
+	})
+	if err != nil {
+		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId,
+			fmt.Errorf("failed to list volumes in schema %s.%s: %w", catalogName, schemaName, err))
+	}
+
+	return res.Volumes, res.NextPageToken, ratelimitData, nil
 }
 
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).

@@ -29,6 +29,10 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*schemaBuilder)(nil)
 const (
 	securableTypeSchema = "SCHEMA"
 
+	// errorCodeSchemaGone is what Databricks names in error_code when the schema
+	// a request addresses does not exist.
+	errorCodeSchemaGone = "SCHEMA_DOES_NOT_EXIST"
+
 	// informationSchema is the read-only schema Databricks puts in every catalog.
 	// Its privileges are not grantable, so it is left out of the sync.
 	informationSchema = "information_schema"
@@ -57,10 +61,6 @@ const (
 	// schemaListRemedy is what a refusal to sync a catalog whose schema listing
 	// would be partial tells the operator.
 	schemaListRemedy = "the connector's service principal must own the metastore or the catalog, or hold MANAGE, USE_SCHEMA or ALL_PRIVILEGES on the catalog"
-
-	// errorCodeSchemaGone is what Databricks names in error_code when the schema
-	// a request addresses does not exist.
-	errorCodeSchemaGone = "SCHEMA_DOES_NOT_EXIST"
 )
 
 // schemaPrivileges is the catalog set minus the three that stop at the catalog.
@@ -90,7 +90,6 @@ var schemaLevel = securableLevel{
 
 type schemaBuilder struct {
 	securableOps
-	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 }
 
@@ -169,7 +168,11 @@ func schemaResource(
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+		rs.WithAnnotation(
+			&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: volumeResourceType.Id},
+			&v2.RawId{Id: resourceID},
+		),
 	)
 }
 
@@ -361,8 +364,41 @@ func (b *schemaBuilder) pushRoute(
 		catalogName, schemaListRemedy)
 }
 
+// errSchemaGone marks a schema Databricks named as missing.
+var errSchemaGone = errors.New("schema no longer exists")
+
+// schemaThrough reads one schema through workspace. It reports errSchemaGone
+// when Databricks names the schema itself missing, which proves nothing on its
+// own, so the caller decides what that absence means. Every other refusal leaves
+// the schema unknown: read as empty, C1 would delete its tables and volumes.
+func schemaThrough(
+	ctx context.Context,
+	client *databricks.Client,
+	workspace, catalogName, schemaName string,
+	annos *annotations.Annotations,
+) (*databricks.Schema, error) {
+	fullName := catalogName + schemaNameSeparator + schemaName
+	schema, rateLimit, err := client.GetSchema(ctx, workspace, fullName)
+	noteRateLimit(annos, rateLimit)
+	switch {
+	case err == nil:
+	case databricks.IsSecurableGone(err, errorCodeSchemaGone):
+		return nil, errSchemaGone
+	case status.Code(err) == codes.InvalidArgument:
+		// The answer does not describe the schema asked for.
+		return nil, err
+	default:
+		return nil, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: schema %s cannot be read through workspace %s, "+
+				"so its tables and volumes are unknown", fullName, workspace), err)
+	}
+
+	return schema, nil
+}
+
 // schemaListingError returns NotFound only when Databricks names the missing
-// catalog; any other refusal leaves the schema listing unknown.
+// catalog. Any other refusal leaves the listing unknown rather than empty: a
+// short list would read as deletions in C1.
 func schemaListingError(catalogName, workspace string, err error) error {
 	if databricks.IsSecurableGone(err, errorCodeCatalogGone) {
 		return uhttp.WrapErrors(codes.NotFound,

@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
+	"strconv"
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -95,6 +98,43 @@ func TestUpdatePermissionsDrainsFromPatchToken(t *testing.T) {
 	}
 }
 
+// omit_username is deliberately absent: it also drops owner, and the drop is
+// silent — the response still parses and every owner simply becomes empty. The
+// exact-set assertion is what makes adding it fail here.
+func TestListTablesSendsOnlyTheOmitColumnsAndPropertiesPayloadVars(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	var query url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tablesResponse{Tables: []Table{{Name: "t"}}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if _, _, _, err := c.ListTables(context.Background(), "ws", "main", "default", "", unityCatalogTablesMaxResults); err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+
+	want := url.Values{
+		"catalog_name":    []string{"main"},
+		"schema_name":     []string{"default"},
+		"max_results":     []string{strconv.FormatUint(uint64(unityCatalogTablesMaxResults), 10)},
+		"omit_columns":    []string{"true"},
+		"omit_properties": []string{"true"},
+	}
+	if !reflect.DeepEqual(query, want) {
+		t.Fatalf("query = %v, want exactly %v", query, want)
+	}
+}
+
 func TestListCatalogsCanIncludeUnboundCatalogs(t *testing.T) {
 	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
 	var includeUnbound string
@@ -177,6 +217,63 @@ func TestGetCatalogRefusesAMismatchedAnswer(t *testing.T) {
 	}
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("GetCatalog returned %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+// A schema read addresses one securable by its dotted full name. The same URL
+// check GetCatalog makes applies: a name holding "?", "#" or "%" would address
+// a different schema, and its owner is what decides whether the connector can
+// list every table and volume under it.
+func TestGetSchemaRefusesANameThatChangesTheURLOrAMismatchedAnswer(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	var requested []string
+	var answer any = Schema{Name: "other", FullName: "main.other", Owner: "eng"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(answer)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for _, fullName := range []string{"main.sales?x", "main.sales#x", "main.sales%x", ""} {
+		got, _, err := c.GetSchema(context.Background(), "ws", fullName)
+		if err == nil {
+			t.Fatalf("GetSchema(%q) returned schema %+v, want an error", fullName, got)
+		}
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("GetSchema(%q) returned %v, want InvalidArgument", fullName, status.Code(err))
+		}
+	}
+	if len(requested) != 0 {
+		t.Fatalf("GetSchema sent %v, want no request at all", requested)
+	}
+
+	// An answer about another schema does not describe the one asked for. Neither
+	// does one that names no schema at all: its owner would still be read as this
+	// schema's, and that owner decides whether the children listing is complete.
+	for _, body := range []any{
+		Schema{Name: "other", FullName: "main.other", Owner: "eng"},
+		map[string]any{"name": "sales", "owner": "eng"},
+	} {
+		answer = body
+		requested = nil
+		got, _, err := c.GetSchema(context.Background(), "ws", "main.sales")
+		if err == nil {
+			t.Fatalf("GetSchema returned schema %+v for answer %+v, want an error", got, body)
+		}
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("GetSchema returned %v for answer %+v, want InvalidArgument", status.Code(err), body)
+		}
+		if want := []string{"/api/2.1/unity-catalog/schemas/main.sales"}; !reflect.DeepEqual(requested, want) {
+			t.Fatalf("GetSchema requested %v, want %v", requested, want)
+		}
 	}
 }
 

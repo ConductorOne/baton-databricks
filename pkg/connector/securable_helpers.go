@@ -39,6 +39,15 @@ type securableOps struct {
 	level    securableLevel
 }
 
+// withLevel returns the ops addressed at another level. A table's privilege set
+// follows its table_type, so that level is decided per resource rather than once
+// on the builder.
+func (o securableOps) withLevel(level securableLevel) securableOps {
+	o.level = level
+
+	return o
+}
+
 type securableLevel struct {
 	// securableType is the endpoint path segment, lowercase. It is not the
 	// uppercase securable_type a listed securable carries.
@@ -65,6 +74,16 @@ type securableLevel struct {
 	// of absence: an unbound or unprivileged workspace answers 404 too.
 	goneErrorCodes []string
 
+	// ambiguousGoneCodes are codes a missing securable shares with a workspace
+	// that cannot serve it, so on their own they prove nothing. A level that
+	// names any must also set confirmGone.
+	ambiguousGoneCodes []string
+
+	// confirmGone reads the securable itself to settle an ambiguous code. A
+	// level whose codes are all unambiguous leaves it nil.
+	confirmGone func(ctx context.Context, client *databricks.Client, fullName, workspace string,
+		annos *annotations.Annotations) (bool, error)
+
 	// trusts reports whether the connector reads every privilege assignment on
 	// the securable. What proves that differs per level, so the rule travels
 	// with the level rather than being decided by the shared path.
@@ -83,9 +102,14 @@ type securableTrust struct {
 	// metastoreOwner is empty on a metastore, whose own owner is in owner.
 	metastoreOwner string
 
-	// parentOwner is the owner of the securable one level up, which only a
-	// schema has: the levels above it hang from the metastore directly.
+	// parentOwner is the owner of the catalog the securable belongs to, which a
+	// schema, a table and a volume have: the levels above a catalog hang from
+	// the metastore directly.
 	parentOwner string
+
+	// schemaOwner is the owner of the schema the securable belongs to, which
+	// only a table and a volume have.
+	schemaOwner string
 
 	fullName    string
 	workspace   string
@@ -108,21 +132,23 @@ func ensureGrantsAreTrustworthy(
 	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
 	metastoreOwner, _ := rs.GetProfileStringValue(profile, profileKeyMetastoreOwner)
 	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
-	// Only a schema hangs from a securable other than the metastore, so at the
-	// other levels this key is absent and the owner above is the metastore's.
+	// A metastore and a catalog hang from the metastore directly, so these keys
+	// are absent there and the only owner above is the metastore's.
 	parentOwner, _ := rs.GetProfileStringValue(profile, profileKeyCatalogOwner)
+	schemaOwner, _ := rs.GetProfileStringValue(profile, profileKeySchemaOwner)
 
 	trustworthy, err := level.trusts(ctx, client, securableTrust{
 		ownPrincipal:   clientID,
 		owner:          owner,
 		metastoreOwner: metastoreOwner,
 		parentOwner:    parentOwner,
+		schemaOwner:    schemaOwner,
 		fullName:       fullName,
 		workspace:      workspace,
 		workspaceID:    workspaceID,
 	}, annos)
 	if err != nil {
-		return trustReadError(level, fullName, workspace, err)
+		return trustReadError(ctx, client, level, fullName, workspace, err, annos)
 	}
 	if !trustworthy {
 		return status.Errorf(codes.PermissionDenied,
@@ -136,11 +162,20 @@ func ensureGrantsAreTrustworthy(
 // trustReadError classifies the 404 a trust read left for the level. A proven
 // absence reports errSecurableGone; an unproven one is refused, because read as
 // an empty result ConductorOne deletes everything the securable held.
-func trustReadError(level securableLevel, fullName, workspace string, err error) error {
+func trustReadError(
+	ctx context.Context,
+	client *databricks.Client,
+	level securableLevel,
+	fullName, workspace string,
+	err error,
+	annos *annotations.Annotations,
+) error {
 	if !errors.Is(err, errTrustRead404) {
 		return err
 	}
-	if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+	// A volume names the generic code, which a workspace that cannot serve it
+	// returns too, so absence is confirmed by reading the securable itself.
+	if securableIsGone(ctx, client, level, fullName, workspace, err, annos) {
 		return errSecurableGone
 	}
 
@@ -195,10 +230,7 @@ func (o securableOps) syncGrants(
 	assignments, nextPageToken, rateLimit, err := client.ListPermissions(ctx, workspace, level.securableType, fullName, "", pageToken)
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		// A securable deleted between List and this read is not a failed sync.
-		// Only a level that names its gone codes can reach this: with none,
-		// IsSecurableGone is false and every 404 still refuses the read.
-		if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+		if securableIsGone(ctx, client, level, fullName, workspace, err, &annos) {
 			return nil, &rs.SyncOpResults{Annotations: annos}, nil
 		}
 		return nil, &rs.SyncOpResults{Annotations: annos}, refuseUnreadable(fmt.Sprintf(
@@ -227,9 +259,6 @@ func (o securableOps) syncGrants(
 		options := groupSecurableGrantOptions(principalId)
 		for _, privilege := range assignment.Privileges {
 			if !slices.Contains(level.privileges, privilege) {
-				// A privilege Databricks added after this connector shipped is not
-				// an entitlement, so it cannot be emitted. Say so rather than
-				// dropping it without a trace.
 				l.Debug("databricks-connector: the securable reports a privilege this connector does not model",
 					zap.String("securable", resourceID),
 					zap.String("privilege", privilege))
@@ -446,10 +475,7 @@ func (o securableOps) revoke(
 		})
 	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		// Databricks names the missing securable in error_code. That is the only
-		// answer that proves it is gone, so there is nothing left to revoke: a
-		// bare 404 also comes back from a workspace the securable is not bound to.
-		if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+		if securableIsGone(ctx, client, level, change.fullName, change.workspace, err, &annos) {
 			annos.Update(&v2.GrantAlreadyRevoked{})
 
 			return annos, nil
@@ -489,4 +515,36 @@ func (o securableOps) revoke(
 // for a securable Databricks named as missing.
 func isSecurableGoneSentinel(err error) bool {
 	return errors.Is(err, errCatalogGone) || errors.Is(err, errMetastoreGone)
+}
+
+// securableIsGone reports whether err proves the securable no longer exists. An
+// unambiguous code settles it alone. A code a missing securable shares with a
+// workspace that cannot serve it is settled by reading the securable, and a read
+// that does not answer leaves the absence unproven rather than assuming it.
+func securableIsGone(
+	ctx context.Context,
+	client *databricks.Client,
+	level securableLevel,
+	fullName, workspace string,
+	err error,
+	annos *annotations.Annotations,
+) bool {
+	if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+		return true
+	}
+	if level.confirmGone == nil || !databricks.IsSecurableGone(err, level.ambiguousGoneCodes...) {
+		return false
+	}
+
+	gone, confirmErr := level.confirmGone(ctx, client, fullName, workspace, annos)
+	if confirmErr != nil {
+		ctxzap.Extract(ctx).Debug("databricks-connector: could not confirm whether the securable is gone",
+			zap.String("securable", fullName),
+			zap.String("workspace", workspace),
+			zap.Error(confirmErr))
+
+		return false
+	}
+
+	return gone
 }

@@ -83,6 +83,9 @@ baton resources
 - Roles
 - Metastores
 - Catalogs (under their metastore)
+- Schemas (under their catalog)
+- Tables (under their schema)
+- Volumes (under their schema)
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
@@ -95,9 +98,9 @@ other metastores and their grants from ConductorOne. Catalogs must also be
 visible through a listed workspace. A list that names no workspace on the
 account is rejected during credential validation, before any sync runs.
 
-Metastores and catalogs are opt-in: each resource type stays off until enabled
-for the connector in ConductorOne. Catalog sync uses the existing OAuth
-credentials and configuration fields.
+Metastores, catalogs, schemas, tables, and volumes are Unity Catalog securables
+and are opt-in: each type stays off until it is enabled for the connector in
+ConductorOne. They use the existing OAuth credentials and configuration fields.
 
 ## Authentication
 
@@ -223,6 +226,8 @@ account
 └── metastore
     └── catalog
         └── schema
+            ├── table
+            └── volume
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
@@ -264,11 +269,11 @@ type) are excluded, regardless of ownership.
 
 ## Unity Catalog provisioning
 
-A metastore or catalog privilege can be granted to and revoked from a user,
-group or service principal. The `owner` entitlement is read-only: granting or
-revoking it fails with an `InvalidArgument` error.
+A privilege on a metastore, catalog, schema, table, or volume can be granted to
+and revoked from a user, group or service principal. The `owner` entitlement is
+read-only: granting or revoking it fails with an `InvalidArgument` error.
 
-If a catalog becomes unreachable, provisioning must distinguish deletion from
+If a securable becomes unreachable, provisioning must distinguish deletion from
 a workspace binding or visibility change. Requests can fail with
 `FailedPrecondition` when deletion cannot be proved.
 
@@ -276,9 +281,14 @@ a workspace binding or visibility change. Requests can fail with
 
 The service principal must own the metastore, or be assigned **Admin** directly
 on at least one running workspace attached to it. Admin inherited only through a
-group is not enough. Databricks answers an under-permissioned read with HTTP 200
-and only the rows the caller may see, so the connector reads a metastore only
-through a workspace that passes that check. When no attached workspace does, the
+group is not enough. The connector reads a metastore only through a workspace
+that passes that check. Listing every schema takes ownership of the catalog, or
+`MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that catalog. Listing every table
+or volume needs more: ownership of the metastore, the catalog, or the schema,
+direct Admin when the workspace admins group owns the catalog, or
+`ALL_PRIVILEGES` on the catalog. `MANAGE` and `USE_SCHEMA` are not enough for
+tables or volumes. Databricks answers an under-permissioned read with HTTP 200
+and only the rows the caller may see. The connector refuses that read, so the
 sync fails and ConductorOne keeps the grants it already has.
 
 For a catalog's full grants list, the service principal must own the metastore
