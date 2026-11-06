@@ -71,6 +71,10 @@ type fakeAccount struct {
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
 
+	// workspaceGroups maps a deployment name to the SCIM groups that workspace serves.
+	// A workspace-local group is only there: the account answers its id with a 404.
+	workspaceGroups map[string]map[string]string
+
 	permHosts   []string
 	patches     []map[string]any
 	scimGets    map[string]int
@@ -167,8 +171,12 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 func (f *fakeAccount) scim(w http.ResponseWriter, r *http.Request) {
 	_, rest, _ := strings.Cut(r.URL.Path, "/scim/v2/")
 	kind, id, _ := strings.Cut(rest, "/")
+	groups := f.groups
+	if local, ok := f.workspaceGroups[r.Header.Get("X-Test-Workspace")]; ok {
+		groups = local
+	}
 	field, records := map[string]string{"Users": "userName", "Groups": "displayName", "ServicePrincipals": "applicationId"}[kind],
-		map[string]map[string]string{"Users": f.users, "Groups": f.groups, "ServicePrincipals": f.sps}[kind]
+		map[string]map[string]string{"Users": f.users, "Groups": groups, "ServicePrincipals": f.sps}[kind]
 	if id != "" {
 		f.scimGets[kind+"/"+id]++
 		if name, ok := records[id]; ok {
@@ -288,8 +296,10 @@ func TestMetastoreListFailsWhenAnAssignmentListCannotBeRead(t *testing.T) {
 	}
 }
 
-// A workspace that will not become RUNNING leaves the metastore out of the sync
-// instead of failing it on every run; one that can still change keeps it waiting.
+// A terminal workspace leaves the metastore out of the sync instead of failing it
+// on every run. One that can still change keeps it waiting, and so does
+// CANCELLING: the deletion is still running, and pruning the metastore now would
+// delete grants that are still in force.
 func TestMetastoreListSeparatesTerminalFromPendingWorkspaces(t *testing.T) {
 	tests := []struct {
 		workspaceStatus string
@@ -741,4 +751,50 @@ func TestMetastoreProvisioningRefusesAPartialPrivilegeList(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A cancelling workspace holds its metastore rather than pruning it, because pruning
+// during the deletion would report the metastore to ConductorOne as gone and delete its
+// grants. The wait is bounded: the account stops listing the workspace when the deletion
+// finishes, and the metastore is then left out of the sync with no error. The error that
+// covers the wait names the workspace and its status, so it does not read as a
+// misconfigured sync scope.
+func TestMetastoreCancellingWorkspaceHoldsTheMetastoreUntilItIsGone(t *testing.T) {
+	cancelling := func() *fakeAccount {
+		f := defaultFakeAccount()
+		f.assignments = map[string]any{"ms-a": []int{1}}
+		f.workspaces = []map[string]any{
+			{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": workspaceStatusCancelling},
+		}
+		return f
+	}
+
+	t.Run("while cancelling, the sync waits and says on what", func(t *testing.T) {
+		m := newTestMetastoreBuilder(t, cancelling(), nil, syncEverything)
+		resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+		if err == nil {
+			t.Fatal("List succeeded, want the metastore held back while its workspace is deleted")
+		}
+		if len(resources) != 0 {
+			t.Errorf("listed %d metastores, want none", len(resources))
+		}
+		for _, want := range []string{"wsa", workspaceStatusCancelling} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("once the account stops listing it, the sync recovers", func(t *testing.T) {
+		f := cancelling()
+		f.workspaces = nil
+		m := newTestMetastoreBuilder(t, f, nil, syncEverything)
+		resources, _, err := m.List(context.Background(), testAccountResourceID, rs.SyncOpAttrs{})
+		if err != nil {
+			t.Fatalf("List = %v, want no error once the workspace is gone", err)
+		}
+		if len(resources) != 0 {
+			t.Errorf("listed %d metastores, want none: nothing in scope serves it", len(resources))
+		}
+	})
 }

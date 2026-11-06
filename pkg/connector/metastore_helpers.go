@@ -30,7 +30,11 @@ const (
 
 	// Statuses the account API documents for a workspace. PROVISIONING and
 	// NOT_PROVISIONED can still become RUNNING. CANCELLING is a workspace being
-	// deleted: it will not become RUNNING. FAILED and BANNED cannot either.
+	// deleted, so it will not, but it still holds its metastore in the sync:
+	// pruning the metastore while the deletion runs would report it to
+	// ConductorOne as gone and delete its grants, and the status settles on its
+	// own when the account stops listing the workspace. FAILED and BANNED are the
+	// terminal set.
 	workspaceStatusRunning        = "RUNNING"
 	workspaceStatusProvisioning   = "PROVISIONING"
 	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
@@ -79,6 +83,7 @@ var (
 type syncPrincipals struct {
 	groups            bool
 	servicePrincipals bool
+	workspaceGroups   bool
 }
 
 func emitPrincipal(sync syncPrincipals, resourceType string) bool {
@@ -204,6 +209,13 @@ func unityPrincipalName(ctx context.Context, c *databricks.Client, principal *v2
 	return name, nil
 }
 
+// workspaceIsRunning reports whether a workspace serves its workspace-plane APIs. The
+// account API omits the status unless the workspace is changing state, so empty is
+// RUNNING.
+func workspaceIsRunning(status string) bool {
+	return status == "" || strings.EqualFold(status, workspaceStatusRunning)
+}
+
 // scopedWorkspaces indexes, by numeric id, the workspaces this sync may read
 // through, and marks which of them are RUNNING. ListWorkspaces already drops the
 // excluded ones.
@@ -226,22 +238,26 @@ func (m *metastoreBuilder) scopedWorkspaces(ctx context.Context, annos *annotati
 				continue
 			}
 		}
-		// A workspace that will not become RUNNING is left out of scope entirely,
-		// so a metastore attached only to one is skipped rather than failing every
-		// sync. Only a status that can still change keeps the metastore waiting.
+		// A workspace that will never serve its APIs is left out of scope, which
+		// lets ConductorOne prune the metastores that routed through it. A status
+		// that can still change keeps the metastore waiting instead, and so does
+		// CANCELLING, because pruning a metastore while its workspace is still
+		// being deleted would delete grants that are still in force.
 		if !workspaceIsUsable(workspace.Status) {
 			continue
 		}
 		scoped[id] = workspace
-		running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
+		running[id] = workspaceIsRunning(workspace.Status)
 	}
 
 	return scoped, running, nil
 }
 
-// workspaceIsUsable reports a status that is RUNNING or can still become it.
-// FAILED and BANNED are terminal, and a status Databricks has not documented
-// takes that path too: treating one as pending would fail the sync on every run.
+// workspaceIsUsable reports a status that still holds a metastore in the sync:
+// RUNNING, one that can become it, or CANCELLING, which must not prune while the
+// deletion runs. FAILED and BANNED are terminal, and a status Databricks has not
+// documented takes that path too: treating one as pending would fail the sync on
+// every run with nothing to wait for.
 func workspaceIsUsable(workspaceStatus string) bool {
 	switch strings.ToUpper(workspaceStatus) {
 	case "", workspaceStatusRunning, workspaceStatusProvisioning, workspaceStatusNotProvisioned, workspaceStatusCancelling:
@@ -255,26 +271,29 @@ func workspaceIsUsable(workspaceStatus string) bool {
 var errMetastoreGone = errors.New("metastore is no longer on the account")
 
 // routeMetastore picks a workspace the connector can read every privilege through:
-// it owns the metastore, or it is a direct Admin there. A nil workspace with no
-// error means none is running and in scope; pending says one can still become RUNNING.
+// it owns the metastore, or it is a direct Admin there. A nil workspace with no error
+// means none is running and in scope, and the returned slice names the in-scope
+// workspaces that still hold the metastore, as "<deployment name> (<STATUS>)". It is
+// what the caller reports, so the operator reads the status rather than guessing at a
+// misconfiguration.
 func (m *metastoreBuilder) routeMetastore(
 	ctx context.Context,
 	metastoreID, owner string,
 	scoped map[string]databricks.Workspace,
 	running map[string]bool,
 	annos *annotations.Annotations,
-) (*databricks.Workspace, bool, error) {
+) (*databricks.Workspace, []string, error) {
 	ids, rateLimit, err := m.client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
 		// A 404 here is not an empty assignment list. NotFound on this List makes
 		// the SDK skip the metastore, and ConductorOne deletes it.
-		return nil, false, refuseUnreadable(fmt.Sprintf(
+		return nil, nil, refuseUnreadable(fmt.Sprintf(
 			"databricks-connector: failed to list the workspaces assigned to metastore %s, so the sync cannot tell which serve it",
 			metastoreID), err)
 	}
 
-	pending := false
+	var pending []string
 	var candidates []databricks.Workspace
 	for _, id := range ids {
 		workspace, ok := scoped[id]
@@ -285,27 +304,27 @@ func (m *metastoreBuilder) routeMetastore(
 			candidates = append(candidates, workspace)
 			continue
 		}
-		pending = true
+		pending = append(pending, fmt.Sprintf("%s (%s)", workspace.DeploymentName, workspace.Status))
 	}
 	if len(candidates) == 0 {
 		return nil, pending, nil
 	}
 
 	if ownsPrincipal(m.clientID, owner) {
-		return &candidates[0], false, nil
+		return &candidates[0], nil, nil
 	}
 
 	for i := range candidates {
 		admin, err := isWorkspaceAdmin(ctx, m.client, m.clientID, strconv.Itoa(candidates[i].ID), annos)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, err
 		}
 		if admin {
-			return &candidates[i], false, nil
+			return &candidates[i], nil, nil
 		}
 	}
 
-	return nil, false, untrustedMetastoreError(metastoreID, candidates)
+	return nil, nil, untrustedMetastoreError(metastoreID, candidates)
 }
 
 // resolveMetastoreRoute routes a metastore from its id, reading owner and standing live.
@@ -338,8 +357,8 @@ func (m *metastoreBuilder) resolveMetastoreRoute(
 	}
 	if workspace == nil {
 		reason := "no workspace in sync scope is attached to it"
-		if pending {
-			reason = "every workspace in sync scope attached to it is still on its way to RUNNING"
+		if len(pending) > 0 {
+			reason = fmt.Sprintf("no workspace in sync scope attached to it is RUNNING: %s", strings.Join(pending, ", "))
 		}
 
 		return nil, status.Errorf(codes.FailedPrecondition,

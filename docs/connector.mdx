@@ -46,6 +46,7 @@ The Metastores resource type is turned off by default. Turn it on from the conne
 **Notes on Unity Catalog access in C1:**
 
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
+- Metastore privileges held by a workspace's built-in admins group are shown as read-only grants when that workspace is in the sync scope. Databricks does not allow a revoked privilege to be granted back to this system group, and the group's own membership cannot be changed from the workspace. Manage both in Databricks.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered as entitlements, because Databricks rejects both at the metastore level.
 - Unity Catalog tags are not synced.
 </Note>

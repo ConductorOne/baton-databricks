@@ -102,9 +102,10 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 		if workspace == nil {
-			if pending {
+			if len(pending) > 0 {
 				return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.FailedPrecondition,
-					"databricks-connector: metastore %s has no running workspace in sync scope", metastore.MetastoreID)
+					"databricks-connector: metastore %s has no running workspace in sync scope, waiting on %s",
+					metastore.MetastoreID, strings.Join(pending, ", "))
 			}
 			l.Debug("databricks-connector: metastore has no workspace in sync scope; skipping it",
 				zap.String("metastore", metastore.MetastoreID))
@@ -166,11 +167,28 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	}
 
 	resolver := newPrincipalResolver(m.client, &annos)
+	workspaceAdmins := &workspaceAdminResolver{metastore: m, annos: &annos}
 	var rv []*v2.Grant
 	for _, assignment := range assignments {
-		principalId, err := resolver.resolve(ctx, assignment.PrincipalID.String(), assignment.Principal)
-		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: %w", err)
+		// The alias names its own workspace, so resolving it first answers without the
+		// three account lookups that would always miss. It answers nothing when the
+		// workspace is out of scope, is not RUNNING, has no admins group or carries
+		// another name, and the account resolver still runs for those rows.
+		var principalId *v2.ResourceId
+		var err error
+		workspaceAdmin := false
+		if m.sync.workspaceGroups && strings.HasPrefix(assignment.Principal, workspaceAdminsPrefix) {
+			principalId, err = workspaceAdmins.resolve(ctx, assignment)
+			if err != nil {
+				return nil, &rs.SyncOpResults{Annotations: annos}, err
+			}
+			workspaceAdmin = principalId != nil
+		}
+		if principalId == nil {
+			principalId, err = resolver.resolve(ctx, assignment.PrincipalID.String(), assignment.Principal)
+			if err != nil {
+				return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: %w", err)
+			}
 		}
 		if principalId == nil {
 			l.Debug("databricks-connector: skipping a grant whose principal does not resolve",
@@ -184,6 +202,9 @@ func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 		}
 
 		options := groupSecurableGrantOptions(principalId)
+		if workspaceAdmin {
+			options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
+		}
 		for _, privilege := range assignment.Privileges {
 			if slices.Contains(metastorePrivileges, privilege) {
 				rv = append(rv, grant.NewGrant(resource, privilege, principalId, options...))
@@ -230,6 +251,16 @@ func (m *metastoreBuilder) resolveChange(
 	if !isValidPrincipal(principalID) {
 		return metastoreChange{}, status.Errorf(codes.InvalidArgument,
 			"databricks-connector: only users, groups and service principals can hold a metastore privilege, got %s", principalID.GetResourceType())
+	}
+	if principalID.GetResourceType() == groupResourceType.Id {
+		parent, _, err := parseResourceId(principalID.GetResource())
+		if err != nil {
+			return metastoreChange{}, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
+		}
+		if parent.GetResourceType() == workspaceResourceType.Id {
+			return metastoreChange{}, status.Error(codes.FailedPrecondition,
+				"databricks-connector: metastore privileges held by workspace-local groups are read-only; manage them in Databricks")
+		}
 	}
 
 	resource := entitlement.GetResource()

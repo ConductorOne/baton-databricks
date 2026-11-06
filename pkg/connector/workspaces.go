@@ -31,16 +31,17 @@ func principalID(a databricks.WorkspaceAssignment) int {
 }
 
 type workspaceBuilder struct {
-	client       *databricks.Client
-	resourceType *v2.ResourceType
-	workspaces   map[string]struct{}
+	client              *databricks.Client
+	resourceType        *v2.ResourceType
+	workspaces          map[string]struct{}
+	syncWorkspaceAdmins bool
 }
 
 func (w *workspaceBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return workspaceResourceType
 }
 
-func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId) (*v2.Resource, error) {
+func workspaceResource(_ context.Context, workspace *databricks.Workspace, parent *v2.ResourceId, syncAdmins bool) (*v2.Resource, error) {
 	profile := map[string]any{
 		"workspace_id": workspace.ID,
 	}
@@ -61,8 +62,18 @@ func workspaceResource(_ context.Context, workspace *databricks.Workspace, paren
 	if err != nil {
 		return nil, err
 	}
+	if syncAdmins {
+		resource.Annotations = append(resource.Annotations, annotations.New(&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id})...)
+	}
 
 	return resource, nil
+}
+
+// declaresAdmins reports whether this workspace offers its admins group as a child to
+// sync. Only a RUNNING workspace serves SCIM, and the metastore syncer resolves the
+// privilege alias through the same predicate.
+func (w *workspaceBuilder) declaresAdmins(workspace databricks.Workspace) bool {
+	return w.syncWorkspaceAdmins && workspaceIsRunning(workspace.Status)
 }
 
 // List returns all the workspaces from the database as resource objects.
@@ -73,11 +84,12 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 	var rv []*v2.Resource
 
-	workspaces, _, err := w.client.ListWorkspaces(ctx)
+	annos := annotations.Annotations{}
+	workspaces, rateLimit, err := w.client.ListWorkspaces(ctx)
+	noteRateLimit(&annos, rateLimit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+		return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
-
 	matchedConfigured := make(map[string]struct{}, len(w.workspaces))
 	for _, workspace := range workspaces {
 		// Skip workspaces outside the configured set when one was provided.
@@ -91,7 +103,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 
 		wCopy := workspace
 
-		wr, err := workspaceResource(ctx, &wCopy, parentResourceID)
+		wr, err := workspaceResource(ctx, &wCopy, parentResourceID, w.declaresAdmins(workspace))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -120,7 +132,7 @@ func (w *workspaceBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		)
 	}
 
-	return rv, nil, nil
+	return rv, &rs.SyncOpResults{Annotations: annos}, nil
 }
 
 func configuredWorkspaceNames(configured map[string]struct{}) []string {
@@ -282,7 +294,7 @@ func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, p
 		return nil, annos, fmt.Errorf("databricks-connector: failed to get workspace %s: %w", resourceId.Resource, err)
 	}
 
-	resource, err := workspaceResource(ctx, workspace, parentResourceId)
+	resource, err := workspaceResource(ctx, workspace, parentResourceId, w.declaresAdmins(*workspace))
 	if err != nil {
 		return nil, annos, err
 	}
@@ -397,10 +409,11 @@ func configuredWorkspaceSet(workspaces []string) map[string]struct{} {
 	return wMap
 }
 
-func newWorkspaceBuilder(client *databricks.Client, workspaces []string) *workspaceBuilder {
+func newWorkspaceBuilder(client *databricks.Client, workspaces []string, syncWorkspaceAdmins bool) *workspaceBuilder {
 	return &workspaceBuilder{
-		client:       client,
-		resourceType: workspaceResourceType,
-		workspaces:   configuredWorkspaceSet(workspaces),
+		client:              client,
+		resourceType:        workspaceResourceType,
+		workspaces:          configuredWorkspaceSet(workspaces),
+		syncWorkspaceAdmins: syncWorkspaceAdmins,
 	}
 }
