@@ -175,3 +175,56 @@ func TestGetGroupCaching(t *testing.T) {
 		})
 	}
 }
+
+// TestErrorBodyNotJSON: an HTTP error whose body is HTML, whitespace or zero bytes keeps
+// its HTTP cause: an *APIError with the status code, the gRPC code uhttp derived from the
+// status, and the rate-limit data. A JSON error body keeps its message and detail.
+func TestErrorBodyNotJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		body        string
+		want        codes.Code
+		wantMessage string
+	}{
+		{"403 html", http.StatusForbidden, "<html><body>denied</body></html>", codes.PermissionDenied, ""},
+		{"403 empty", http.StatusForbidden, "", codes.PermissionDenied, ""},
+		{"404 html", http.StatusNotFound, "<html>not here</html>", codes.NotFound, ""},
+		{"429 whitespace", http.StatusTooManyRequests, " \n\t ", codes.Unavailable, ""},
+		{"429 empty", http.StatusTooManyRequests, "", codes.Unavailable, ""},
+		{"503 html", http.StatusServiceUnavailable, "<html>unavailable</html>", codes.Unavailable, ""},
+		{"503 empty", http.StatusServiceUnavailable, "", codes.Unavailable, ""},
+		{"503 truncated json", http.StatusServiceUnavailable, `{"message":"try`, codes.Unavailable, ""},
+		{"503 json", http.StatusServiceUnavailable, `{"message":"try later"}`, codes.Unavailable, "try later"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+
+			rl, err := c.SetUserActive(context.Background(), "42", false)
+			if err == nil {
+				t.Fatalf("SetUserActive succeeded on HTTP %d", tc.status)
+			}
+			if rl == nil {
+				t.Error("rate-limit data must be returned with an HTTP error")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error %v does not reach an *APIError", err)
+			}
+			if apiErr.StatusCode != tc.status {
+				t.Errorf("APIError.StatusCode = %d, want %d", apiErr.StatusCode, tc.status)
+			}
+			if apiErr.Message != tc.wantMessage {
+				t.Errorf("APIError.Message = %q, want %q", apiErr.Message, tc.wantMessage)
+			}
+			if got := status.Code(err); got != tc.want {
+				t.Errorf("grpc code = %v, want %v (err: %v)", got, tc.want, err)
+			}
+		})
+	}
+}
