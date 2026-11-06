@@ -5,7 +5,7 @@
 `baton-databricks` is a connector for Databricks built using the
 [Baton SDK](https://github.com/conductorone/baton-sdk). It communicates with the
 Databricks API, to sync data about Databricks identities (users, groups and
-service principals), roles, workspaces and Unity Catalog metastores.
+service principals), roles, workspaces and Unity Catalog metastores and catalogs.
 
 Check out [Baton](https://github.com/conductorone/baton) to learn more about the project in general.
 
@@ -82,19 +82,22 @@ baton resources
 - Users
 - Roles
 - Metastores
+- Catalogs (under their metastore)
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
 workspaces to the `--workspaces` flag. Each entry can be a workspace name,
 deployment name, or numeric workspace ID, matched case-insensitively.
 
-`--workspaces` also scopes which metastores sync: only a metastore attached to a
-listed workspace is synced, so narrowing the list removes the other metastores
-and their grants from ConductorOne. A list that names no workspace on the
+`--workspaces` also scopes which metastores and catalogs sync: only a metastore
+attached to a listed workspace is synced, so narrowing the list removes the
+other metastores and their grants from ConductorOne. Catalogs must also be
+visible through a listed workspace. A list that names no workspace on the
 account is rejected during credential validation, before any sync runs.
 
-Metastores are Unity Catalog securables and are opt-in: the type stays off until
-it is enabled for the connector in ConductorOne.
+Metastores and catalogs are opt-in: each resource type stays off until enabled
+for the connector in ConductorOne. Catalog sync uses the existing OAuth
+credentials and configuration fields.
 
 ## Authentication
 
@@ -113,24 +116,16 @@ To instead exclude specific workspaces from the sync, pass them to the
 list. Each entry can be a workspace name, deployment name, or numeric workspace
 ID. Excluded workspaces and their roles are skipped entirely. A metastore
 attached only to excluded workspaces is not synced, and its grants are removed
-from ConductorOne.
+from ConductorOne. Catalogs reachable only through excluded workspaces are also
+left out.
 
 ## Incremental sync
 
 By default, `baton-databricks` does a full resync of every resource on every run.
 You can opt into an additional, cheap pathway that polls a Databricks audit log
 between full syncs to pick up access changes early. Full syncs still run as the
-correctness backstop. Incremental sync picks up added and removed group
-memberships, but deleted users, groups and service principals are only caught
-by the next full sync.
-
-Role assignments that Databricks stores in access-control rule sets (group roles
-such as `roles/group.manager`, service principal roles, and the account
-`marketplace.admin` role) are also only caught by the next full sync: the
-connector does not read the audit events Databricks writes for rule-set
-changes. A `roles/group.manager` change, for example, is logged as
-`updateRuleSet` under the `accountsAccessControl` audit service, which the
-connector does not query.
+correctness backstop; incremental sync does not detect deletions, which are
+only caught by the next full sync.
 
 **Incremental sync is enabled by setting `--sql-warehouse-id` (or
 `BATON_SQL_WAREHOUSE_ID`) and disabled by leaving it unset or empty.** There is
@@ -166,8 +161,7 @@ Incremental sync works only when all of the following are true:
   - `USE SCHEMA` and `SELECT` on the `system.access` schema
   - `CAN USE` on the SQL warehouse
 
-  For example, run as a metastore admin, replacing `<application-id>` with the
-  service principal's application (client) ID:
+  For example, run as a metastore admin:
 
   ```sql
   GRANT USE CATALOG ON CATALOG system TO `<application-id>`;
@@ -175,21 +169,16 @@ Incremental sync works only when all of the following are true:
   ```
 
 **We recommend a serverless SQL warehouse.** It starts in seconds, while a pro
-or classic warehouse can take several minutes. Each statement gets up to 30
-seconds on the initial request, including warehouse startup, then up to 5 more
-minutes of polling. A statement still unfinished after that is cancelled, so a
-poll can take close to 6 minutes before it fails with a `DeadlineExceeded`
-error and is retried on the next poll. Serverless SQL warehouses require the
-Premium plan or above.
+or classic warehouse can take several minutes. Each poll waits at most 5 minutes
+for its statement, including warehouse startup; a poll that runs out of time
+fails with a `DeadlineExceeded` error and is retried on the next poll. Serverless
+SQL warehouses require the Premium plan or above.
 
 **Incremental sync covers one cloud region.** `system.access.audit` holds
 workspace-level events only for workspaces in the same cloud region as the
 workspace that queries it; account-level events are global ([system tables
 reference](https://docs.databricks.com/aws/en/admin/system-tables/)). The
-connector finds the warehouse's workspace automatically by checking each
-workspace the service principal can access, except those excluded with
-`--databricks-exclude-workspaces`; the `--workspaces` allowlist does not limit
-this search. It receives
+connector finds the warehouse's workspace automatically, and it receives
 incremental updates only for workspaces in that region. Workspaces in other
 regions are still covered by full syncs.
 
@@ -232,6 +221,7 @@ account
 ├── group
 ├── service principal
 └── metastore
+    └── catalog
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
@@ -248,21 +238,54 @@ running one in scope where it can read every privilege, which it proves by
 owning the metastore or by holding Admin directly on that workspace. Grant and
 Revoke resolve the same route from the metastore id.
 
-A metastore syncs through a running workspace in scope. The sync fails, naming
-the metastore, while an attached workspace in scope is still provisioning, or
-while the metastore's workspace list cannot be read.
+A metastore is synced only while a workspace this sync can use is attached to
+it. The connector never guesses when the answer is unknown:
+
+| Attached workspace | Result |
+|--------------------|--------|
+| `RUNNING` and in scope | the metastore syncs through it |
+| `PROVISIONING`, `NOT_PROVISIONED` | still changing, so the metastore is kept and the sync fails with `FailedPrecondition` until a workspace is `RUNNING` |
+| `CANCELLING` | the workspace is being deleted and will not become `RUNNING`, so the metastore is kept and the sync fails until that workspace is gone or another attached one is `RUNNING` |
+| `FAILED`, `BANNED`, or a status Databricks does not document | will not become `RUNNING`, so it is skipped; a metastore left with no other workspace is not synced |
+| metastore workspace list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming that list |
+| workspace permission list unreadable (401, 403, 404) | treated as not Admin on that workspace; the sync then fails with the usual missing-standing error, which does not name this list |
+
+A metastore is left out of the sync only when the answer is known: every
+attached workspace is out of scope or unusable. Leaving it out is what makes
+ConductorOne remove it and its grants, so an unknown answer must not take that
+path.
+
+Catalog discovery visits every running workspace in scope attached to the
+metastore, so catalogs bound to only some workspaces are included. Each catalog
+appears once under its metastore. The built-in `system` catalog and all catalogs
+Databricks identifies as `SYSTEM_CATALOG` (including `samples` when it has that
+type) are excluded, regardless of ownership.
 
 ## Unity Catalog provisioning
 
-A metastore privilege can be granted to and revoked from a user, group or
-service principal. The `owner` entitlement is read-only: granting or revoking it
-fails with an `InvalidArgument` error.
+A metastore or catalog privilege can be granted to and revoked from a user,
+group or service principal. The `owner` entitlement is read-only: granting or
+revoking it fails with an `InvalidArgument` error.
+
+If a catalog becomes unreachable, provisioning must distinguish deletion from
+a workspace binding or visibility change. Requests can fail with
+`FailedPrecondition` when deletion cannot be proved.
 
 ## Unity Catalog permissions
 
 The service principal must own the metastore, or be assigned **Admin** directly
 on at least one running workspace attached to it. Admin inherited only through a
-group is not enough. Otherwise the sync fails naming the metastore.
+group is not enough. Databricks answers an under-permissioned read with HTTP 200
+and only the rows the caller may see, so the connector reads a metastore only
+through a workspace that passes that check. When no attached workspace does, the
+sync fails and ConductorOne keeps the grants it already has.
+
+For a catalog's full grants list, the service principal must own the metastore
+or catalog, hold `MANAGE` on the catalog, or have Admin assigned directly on the
+workspace whose admins group owns that catalog. Workspace Admin alone does not
+cover other catalogs. A non-owner using `MANAGE` also needs `USE_CATALOG` for
+catalog discovery. An incomplete grants list fails the sync rather than
+removing grants the connector cannot see.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
@@ -321,7 +344,7 @@ Flags:
   -p, --provisioning                                     This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
-      --sql-warehouse-id string                          Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deleted users, groups and service principals are still only caught by full syncs). The warehouse can be in any workspace not excluded by databricks-exclude-workspaces, in the same cloud region as the workspaces to update incrementally; Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically. ($BATON_SQL_WAREHOUSE_ID)
+      --sql-warehouse-id string                          Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deletions are still only caught by full syncs). The warehouse can be in any workspace in the same cloud region as the workspaces to update incrementally; Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically. ($BATON_SQL_WAREHOUSE_ID)
       --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Defaults to pebble when unset. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)

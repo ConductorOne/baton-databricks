@@ -16,6 +16,7 @@ const (
 const (
 	permissionAccountAdmin   = "Account admin"
 	permissionWorkspaceAdmin = "Workspace admin"
+	permissionUseCatalog     = "USE_CATALOG"
 )
 
 var securableScopes = []string{
@@ -84,5 +85,12 @@ var (
 		DisplayName: "Metastore",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
 		Annotations: annotationsForStaticSecurableResourceType(securablePermissions()...),
+	}
+
+	catalogResourceType = &v2.ResourceType{
+		Id:          "catalog",
+		DisplayName: "Catalog",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
+		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog)...),
 	}
 )
