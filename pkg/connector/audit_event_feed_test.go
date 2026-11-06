@@ -501,8 +501,50 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 			want: []wantResource{
 				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "updateGroup in a workspace refreshes the group and every workspace entitlement role",
+			row: auditLogRow{
+				ActionName:    "updateGroup",
+				ServiceName:   "accounts",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "account-level updateUser refreshes only the user",
+			row: auditLogRow{
+				ActionName:    "updateUser",
+				ServiceName:   "accounts",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name: "account-level updateGroup refreshes only the group",
+			row: auditLogRow{
+				ActionName:    "updateGroup",
+				ServiceName:   "accounts",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
 			},
 		},
 		{
@@ -619,6 +661,8 @@ func TestMapAuditRowToResourceResolvesPrincipalType(t *testing.T) {
 			row: auditLogRow{ActionName: "updateUser", ServiceName: "accounts", WorkspaceID: 123, RequestParams: map[string]string{"targetUserId": "sp-1"}},
 			want: []want{
 				{servicePrincipalResourceType.Id, "sp-1"},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent)},
 				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent)},
 				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent)},
 			},
@@ -1560,8 +1604,10 @@ func TestListEventsCachesPrincipalTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
 	}
-	if len(events) != 5 {
-		t.Fatalf("len(events) = %d, want 5", len(events))
+	// Three sp-1 grants, plus one g-1 change: both gone-1 rows fall back to the same group
+	// change, and only the last is kept.
+	if len(events) != 4 {
+		t.Fatalf("len(events) = %d, want 4", len(events))
 	}
 	for _, id := range []string{"sp-1", "gone-1"} {
 		for _, kind := range []string{"Users", "Groups", "ServicePrincipals"} {
@@ -1604,7 +1650,8 @@ func TestResolvePrincipalTypeDoesNotCacheErrors(t *testing.T) {
 }
 
 // TestListEventsEmitsServicePrincipalChange verifies an accounts/add row naming a service
-// principal reaches C1 as a service_principal change, resolved once across rows.
+// principal reaches C1 as a service_principal change, resolved once across rows. The two rows'
+// changes to sp-1 collapse into one.
 func TestListEventsEmitsServicePrincipalChange(t *testing.T) {
 	var mu sync.Mutex
 	hits := map[string]int{}
@@ -1660,10 +1707,98 @@ func TestListEventsEmitsServicePrincipalChange(t *testing.T) {
 			spEvents++
 		}
 	}
-	if spEvents != 2 {
-		t.Errorf("got %d service_principal/sp-1 events, want 2: %+v", spEvents, events)
+	if spEvents != 1 {
+		t.Errorf("got %d service_principal/sp-1 events, want 1: %+v", spEvents, events)
 	}
 	if got := hits["/api/2.0/accounts/acct-1/scim/v2/ServicePrincipals/sp-1"]; got != 1 {
 		t.Errorf("service principal looked up %d times, want 1", got)
+	}
+}
+
+// TestListEventsDropsDuplicateResourceChanges verifies that when a page names the same resource
+// more than once (the same user, or the same workspace role refreshed by several updateUser rows),
+// only the last change is kept, with its own row's ID, and grant events are never collapsed.
+func TestListEventsDropsDuplicateResourceChanges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+		if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") || strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-2")) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"statement_id": "stmt-1",
+			"status":       map[string]any{"state": "SUCCEEDED"},
+			"manifest": map[string]any{
+				"schema": map[string]any{
+					"columns": []map[string]any{
+						{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+						{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+					},
+				},
+			},
+			"result": map[string]any{
+				"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-1"}`},
+					{"evt-2", "2026-01-01T00:01:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-2"}`},
+					{"evt-3", "2026-01-01T00:02:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-1"}`},
+					{"evt-4", "2026-01-01T00:03:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+					{"evt-5", "2026-01-01T00:04:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("failed to encode mock statement response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", &databricks.NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	feed := newAuditEventFeed(client, nil, "wh-1")
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	// evt-1 is fully superseded: evt-3 names u-1 and the same four roles again. evt-2 keeps only
+	// u-2, its roles are superseded by evt-3. evt-4 and evt-5: one grant each.
+	want := []string{"evt-2/0", "evt-3/0", "evt-3/1", "evt-3/2", "evt-3/3", "evt-3/4", "evt-4/0", "evt-5/0"}
+	got := make([]string, 0, len(events))
+	for _, e := range events {
+		got = append(got, e.GetId())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event IDs = %v, want %v", got, want)
+	}
+	for _, e := range events[6:] {
+		if e.GetCreateGrantEvent() == nil {
+			t.Errorf("event %s = %+v, want a CreateGrantEvent", e.GetId(), e)
+		}
 	}
 }
