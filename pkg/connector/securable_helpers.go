@@ -83,6 +83,10 @@ type securableTrust struct {
 	// metastoreOwner is empty on a metastore, whose own owner is in owner.
 	metastoreOwner string
 
+	// parentOwner is the owner of the securable one level up, which only a
+	// schema has: the levels above it hang from the metastore directly.
+	parentOwner string
+
 	fullName    string
 	workspace   string
 	workspaceID string
@@ -104,17 +108,21 @@ func ensureGrantsAreTrustworthy(
 	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
 	metastoreOwner, _ := rs.GetProfileStringValue(profile, profileKeyMetastoreOwner)
 	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
+	// Only a schema hangs from a securable other than the metastore, so at the
+	// other levels this key is absent and the owner above is the metastore's.
+	parentOwner, _ := rs.GetProfileStringValue(profile, profileKeyCatalogOwner)
 
 	trustworthy, err := level.trusts(ctx, client, securableTrust{
 		ownPrincipal:   clientID,
 		owner:          owner,
 		metastoreOwner: metastoreOwner,
+		parentOwner:    parentOwner,
 		fullName:       fullName,
 		workspace:      workspace,
 		workspaceID:    workspaceID,
 	}, annos)
 	if err != nil {
-		return err
+		return trustReadError(level, fullName, workspace, err)
 	}
 	if !trustworthy {
 		return status.Errorf(codes.PermissionDenied,
@@ -123,6 +131,22 @@ func ensureGrantsAreTrustworthy(
 	}
 
 	return nil
+}
+
+// trustReadError classifies the 404 a trust read left for the level. A proven
+// absence reports errSecurableGone; an unproven one is refused, because read as
+// an empty result ConductorOne deletes everything the securable held.
+func trustReadError(level securableLevel, fullName, workspace string, err error) error {
+	if !errors.Is(err, errTrustRead404) {
+		return err
+	}
+	if databricks.IsSecurableGone(err, level.goneErrorCodes...) {
+		return errSecurableGone
+	}
+
+	return refuseUnreadable(fmt.Sprintf(
+		"databricks-connector: cannot read whether every privilege on %s %s is visible through workspace %s",
+		level.noun, fullName, workspace), err)
 }
 
 // syncSecurableGrants emits the privileges held on one securable, plus its owner.
@@ -155,6 +179,15 @@ func (o securableOps) syncGrants(
 	// partial, so Grants does not prove it again.
 	if pageToken == "" && level.securableType != databricks.SecurableMetastore && level.securableType != databricks.SecurableCatalog {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
+			// The trust read is the first call that can prove the securable gone,
+			// and one deleted between List and this read is not a failed sync.
+			// The permissions read below answers the same way, so answering
+			// differently here would fail the sync on the earlier of two reads
+			// that see the same deletion.
+			if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+				return nil, &rs.SyncOpResults{Annotations: annos}, nil
+			}
+
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}
 	}
@@ -331,7 +364,7 @@ func (c change) updateError(verb string, err error) error {
 
 // grantSecurable adds one privilege. Databricks no-ops a PATCH it cannot apply,
 // so the pre-read decides GrantAlreadyExists and the echo is the only proof the
-// change landed.
+// change landed. A securable the trust check proves gone answers NotFound.
 func (o securableOps) grant(
 	ctx context.Context,
 	principal *v2.ResourceId,
@@ -341,6 +374,11 @@ func (o securableOps) grant(
 	annos := annotations.Annotations{}
 	change, err := resolveChange(ctx, client, clientID, level, principal, entitlement, true, &annos)
 	if err != nil {
+		if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+			return annos, status.Errorf(codes.NotFound, "databricks-connector: %s %s no longer exists",
+				level.noun, entitlement.GetResource().GetId().GetResource())
+		}
+
 		return annos, err
 	}
 
@@ -378,7 +416,8 @@ func (o securableOps) grant(
 
 // revokeSecurable removes one privilege. Databricks no-ops a privilege already
 // absent, so the pre-read decides GrantAlreadyRevoked and the echo confirms the
-// removal.
+// removal. A securable the trust check proves gone holds nothing to revoke, so
+// it reports the grant already revoked rather than an unreadable securable.
 func (o securableOps) revoke(
 	ctx context.Context,
 	principal *v2.ResourceId,
@@ -388,6 +427,12 @@ func (o securableOps) revoke(
 	annos := annotations.Annotations{}
 	change, err := resolveChange(ctx, client, clientID, level, principal, entitlement, false, &annos)
 	if err != nil {
+		if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
+
 		return annos, err
 	}
 
@@ -438,4 +483,10 @@ func (o securableOps) revoke(
 	}
 
 	return annos, nil
+}
+
+// isSecurableGoneSentinel reports whether err is one of the per-level sentinels
+// for a securable Databricks named as missing.
+func isSecurableGoneSentinel(err error) bool {
+	return errors.Is(err, errCatalogGone) || errors.Is(err, errMetastoreGone)
 }
