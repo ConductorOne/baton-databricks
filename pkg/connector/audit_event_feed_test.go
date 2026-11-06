@@ -1585,6 +1585,100 @@ func TestListEventsEmitsEventPerGroupMember(t *testing.T) {
 	}
 }
 
+// TestListEventsLiveMultiMemberRows replays the request_params Databricks logged on a live Azure
+// account for batched SCIM PATCHes, where names pair with ids in order.
+func TestListEventsLiveMultiMemberRows(t *testing.T) {
+	const (
+		spId    = "143679241589540"
+		userB   = "143797019507719"
+		userA   = "147934750343750"
+		groupId = "153270043448790"
+	)
+	kinds := map[string]string{spId: "ServicePrincipals", userB: "Users", userA: "Users"}
+
+	type wantEvent struct{ resourceType, resource string }
+	cases := []struct {
+		name        string
+		action      string
+		params      string
+		wantRevoke  bool
+		wantEvents  []wantEvent
+		wantLookups []string
+	}{
+		{
+			name:   "add of a service principal and two users",
+			action: "addPrincipalsToGroup",
+			params: `{"targetGroupId":"153270043448790","targetGroupName":"batch-group",` +
+				`"targetUserName":"8933382e-9e91-4caf-b0ad-b277dd60956d,member-b@example.com,member-a@example.com",` +
+				`"endpoint":"scim","targetUserId":"143679241589540,143797019507719,147934750343750"}`,
+			wantEvents: []wantEvent{
+				{servicePrincipalResourceType.Id, spId}, {userResourceType.Id, userB}, {userResourceType.Id, userA},
+			},
+			wantLookups: []string{"/ServicePrincipals/" + spId, "/Users/" + userB, "/Users/" + userA},
+		},
+		{
+			name:        "remove of two members without names",
+			action:      "removePrincipalsFromGroup",
+			params:      `{"targetGroupId":"153270043448790","targetGroupName":"batch-group","endpoint":"scim","targetUserId":"143679241589540,147934750343750"}`,
+			wantRevoke:  true,
+			wantEvents:  []wantEvent{{servicePrincipalResourceType.Id, spId}, {userResourceType.Id, userA}},
+			wantLookups: []string{"/Users/" + spId, "/Groups/" + spId, "/ServicePrincipals/" + spId, "/Users/" + userA},
+		},
+	}
+
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acct-1"}
+	wantGroupId := groupResourceId(context.Background(), groupId, accountParent)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var lookups []string
+			row := []string{"627da5dc-47b1-38b3-a4c1-fac2ccfdace5", "2026-01-01T00:00:00Z", "0", tc.action, "accounts", tc.params}
+			feed := newSingleRowFeed(t, row, func(w http.ResponseWriter, r *http.Request) {
+				path := r.URL.Path[strings.Index(r.URL.Path, "/scim/v2")+len("/scim/v2"):]
+				mu.Lock()
+				lookups = append(lookups, path)
+				mu.Unlock()
+				parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+				if len(parts) == 2 && kinds[parts[1]] == parts[0] {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{}`)
+					return
+				}
+				writeJSONNotFound(w)
+			})
+
+			events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+			if err != nil {
+				t.Fatalf("ListEvents() error = %v", err)
+			}
+			if len(events) != len(tc.wantEvents) {
+				t.Fatalf("len(events) = %d, want %d: %+v", len(events), len(tc.wantEvents), events)
+			}
+			for i, w := range tc.wantEvents {
+				var entitlement *v2.Entitlement
+				var principal *v2.Resource
+				if tc.wantRevoke {
+					entitlement, principal = events[i].GetCreateRevokeEvent().GetEntitlement(), events[i].GetCreateRevokeEvent().GetPrincipal()
+				} else {
+					entitlement, principal = events[i].GetCreateGrantEvent().GetEntitlement(), events[i].GetCreateGrantEvent().GetPrincipal()
+				}
+				if entitlement.GetResource().GetId().GetResource() != wantGroupId {
+					t.Errorf("[%d] entitlement resource = %q, want %q", i, entitlement.GetResource().GetId().GetResource(), wantGroupId)
+				}
+				if p := principal.GetId(); p.GetResourceType() != w.resourceType || p.GetResource() != w.resource {
+					t.Errorf("[%d] principal = %+v, want type=%s id=%s", i, p, w.resourceType, w.resource)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.Join(lookups, ",") != strings.Join(tc.wantLookups, ",") {
+				t.Errorf("lookups = %v, want %v", lookups, tc.wantLookups)
+			}
+		})
+	}
+}
+
 // TestListEventsFullPageCursorAdvance verifies the HasMore wiring on a full page
 // (auditLogPageLimit raw rows): it pages forward from the last raw row's boundary, but when
 // no boundary can be parsed it reports HasMore=false with the cursor unchanged rather than
