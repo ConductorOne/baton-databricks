@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,15 +102,20 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalParam: "targetUserId", revoke: true},
 	},
 	{auditServiceAccounts, "removeGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
+	// Workspace entitlements change through two paths that log different rows. The admin UI's
+	// access toggles log changeDatabricksWorkspaceAcl / changeDatabricksSqlAcl (mapped below to their
+	// single role). Workspace SCIM writes log only updateUser/updateGroup, with no ACL row and no
+	// detail about which entitlement changed, so those actions refresh every workspace entitlement role.
+	// Keep both mappings: each covers a path the other doesn't.
 	{auditServiceAccounts, "updateGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+		roleNames: entitlements,
 	},
 	// "add"/"delete" are the real user-lifecycle events; deleteUser is a parameterless PII purge.
 	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId"},
 	{auditServiceAccounts, "updateUser"}: {
 		resourceType: userResourceType, idParam: "targetUserId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+		roleNames: entitlements,
 	},
 	{auditServiceAccounts, "delete"}:         {resourceType: userResourceType, idParam: "targetUserId"},
 	{auditServiceAccounts, "activateUser"}:   {resourceType: userResourceType, idParam: "targetUserId"},
@@ -393,8 +399,11 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	var events []*v2.Event
-	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents int
+	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents, duplicateResourceChanges int
 	principalTypes := principalTypeCache{}
+	// Keep only the last resource change per resource in a page: each one triggers a full refetch
+	// (costly for workspace roles). Grant and revoke events are never collapsed.
+	lastResourceChange := map[string]int{}
 	for _, row := range rows {
 		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
 		if rowRateLimit != nil {
@@ -450,7 +459,14 @@ func (f *auditEventFeed) ListEvents(
 					CreateGrantEvent: &v2.CreateGrantEvent{Entitlement: a.grant.entitlement, Principal: a.grant.principal},
 				}
 			default:
-				resourceChangeEvents++
+				key := resourceChangeKey(a.resourceId, a.parentResourceId)
+				if prev, seen := lastResourceChange[key]; seen {
+					events[prev] = nil
+					duplicateResourceChanges++
+				} else {
+					resourceChangeEvents++
+				}
+				lastResourceChange[key] = len(events)
 				event.Event = &v2.Event_ResourceChangeEvent{
 					ResourceChangeEvent: &v2.ResourceChangeEvent{ResourceId: a.resourceId, ParentResourceId: a.parentResourceId},
 				}
@@ -458,6 +474,8 @@ func (f *auditEventFeed) ListEvents(
 			events = append(events, event)
 		}
 	}
+
+	events = slices.DeleteFunc(events, func(e *v2.Event) bool { return e == nil })
 
 	hasMore := rawRowCount >= auditLogPageLimit
 	nextCursor, advanced := advanceEventCursor(cursor, rows, lastRawBoundary, hasMore, lagCutoff)
@@ -477,6 +495,7 @@ func (f *auditEventFeed) ListEvents(
 		zap.Int("audit_rows_skipped_lookup_failure", skippedLookupRows),
 		zap.Int("events_total", len(events)),
 		zap.Int("events_resource_change", resourceChangeEvents),
+		zap.Int("events_resource_change_duplicates_dropped", duplicateResourceChanges),
 		zap.Int("events_create_grant", grantEvents),
 		zap.Int("events_create_revoke", revokeEvents),
 		zap.Bool("has_more", hasMore),
@@ -484,6 +503,14 @@ func (f *auditEventFeed) ListEvents(
 		zap.String("next_window_start_after_event_id", nextCursor.StartAfterEventID),
 	)
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
+}
+
+// resourceChangeKey identifies a resource change by its resource and parent, for dropping
+// duplicates within one ListEvents page.
+func resourceChangeKey(resourceId, parentResourceId *v2.ResourceId) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s",
+		resourceId.GetResourceType(), resourceId.GetResource(),
+		parentResourceId.GetResourceType(), parentResourceId.GetResource())
 }
 
 func isRetryableLookupError(err error) bool {

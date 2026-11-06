@@ -128,7 +128,7 @@ func seedAudit(start time.Time) []auditRow {
 			RequestParams: user("scim", userAlice, "alice@example.com")},
 		{EventID: "e0000001-0000-4000-8000-000000000019", EventTime: at(8, 0), WorkspaceID: wsAlphaID, ServiceName: "accounts", ActionName: "updateUser",
 			RequestParams: user("scim", userAlice, "alice@example.com")},
-		{EventID: "e0000001-0000-4000-8000-000000000020", EventTime: at(7, 0), ServiceName: "accounts", ActionName: "updateGroup",
+		{EventID: "e0000001-0000-4000-8000-000000000020", EventTime: at(7, 0), WorkspaceID: wsBetaID, ServiceName: "accounts", ActionName: "updateGroup",
 			RequestParams: map[string]string{"endpoint": "scim", "targetGroupId": groupAnalysts, "targetGroupName": "analysts"}},
 		// Two rows with the same event_time, to exercise the (event_time, event_id) ordering.
 		{EventID: "e0000001-0000-4000-8000-000000000021", EventTime: tie, ServiceName: "accounts", ActionName: "removeGroup",
