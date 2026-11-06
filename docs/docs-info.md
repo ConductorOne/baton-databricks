@@ -12,6 +12,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
+   > - **Account lifecycle actions**: `enable_user` and `disable_user` set an account user's active status (account level only; permissions and memberships are kept).
 
 ## Connector credentials
 

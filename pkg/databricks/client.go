@@ -237,6 +237,28 @@ func (c *Client) UpdateUser(ctx context.Context, workspaceId string, user *User)
 	return c.Put(ctx, u, user, nil)
 }
 
+// SetUserActive sets the account-level user's active flag with a SCIM PATCH that
+// targets only the active attribute, so roles, entitlements, group memberships and
+// workspace assignments are untouched. The replace is idempotent: setting the state
+// the user already has succeeds. A user ID that is not numeric is rejected before any
+// request, since it would change the URL path.
+//
+// PATCH /api/2.0/accounts/{account_id}/scim/v2/Users/{id} — https://docs.databricks.com/api/scim/v1/patch-account-user
+// Required permission: account admin (the OAuth service principal uses scope all-apis).
+func (c *Client) SetUserActive(ctx context.Context, userID string, active bool) (*v2.RateLimitDescription, error) {
+	if err := validatePrincipalID(userID); err != nil {
+		return nil, err
+	}
+
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId), userID)
+	body := PatchRequest{
+		Schemas:    []string{PatchOpSchema},
+		Operations: []PatchOperation{{Op: "replace", Path: "active", Value: active}},
+	}
+
+	return c.Patch(ctx, u, body, nil)
+}
+
 func (c *Client) FindUserID(
 	ctx context.Context,
 	workspaceId string,
