@@ -21,6 +21,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -62,6 +63,9 @@ type auditActionMapping struct {
 	accountRole      string
 	roleNames        []string
 	grant            *auditGrantMapping
+	// resolvePrincipal means idParam names a user, group or service principal; resourceType
+	// is only the fallback when the id matches none of them.
+	resolvePrincipal bool
 }
 
 // auditGrantMapping names the principal and direction of a grant-mapped action. The
@@ -111,32 +115,25 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		roleNames: entitlements,
 	},
-	// "add"/"delete" are the real user-lifecycle events; deleteUser is a parameterless PII purge.
-	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId"},
+	// "add" is the real principal-lifecycle event; deleteUser is a parameterless PII purge.
+	// "delete" isn't mapped: a deleted principal can't be fetched, so full sync handles it.
+	// Databricks logs service principal lifecycle and admin changes under these user action
+	// names with targetUserId, so the principal type is resolved when the row is mapped.
+	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "updateUser"}: {
-		resourceType: userResourceType, idParam: "targetUserId",
+		resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true,
 		roleNames: entitlements,
 	},
-	{auditServiceAccounts, "delete"}:         {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "activateUser"}:   {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "deactivateUser"}: {resourceType: userResourceType, idParam: "targetUserId"},
-	// createServicePrincipal/updateServicePrincipal/deleteServicePrincipal: commented out, not
-	// real action_name values. Not found anywhere in the official audit log reference (AWS/GCP/
-	// Azure) — the only documented service-principal action is changeServicePrincipalAcls.
-	// {auditServiceAccounts, "createServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
-	// {auditServiceAccounts, "updateServicePrincipal"}: {
-	// 	resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId",
-	// 	roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
-	// },
-	// {auditServiceAccounts, "deleteServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	{auditServiceAccounts, "activateUser"}:                 {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
+	{auditServiceAccounts, "deactivateUser"}:               {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
 	{auditServiceAccounts, "changeDatabricksSqlAcl"}:       {roleNames: []string{SQLAccessRole}},
 	// The reference describes setAdmin as account admin but lists it with the workspace-level
 	// events, so the account-admin role is refreshed too in case it is.
-	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	{auditServiceAccounts, "removeAdmin"}:        {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	{auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true, accountRole: AccountAdminRole},
+	{auditServiceAccounts, "removeAdmin"}:        {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
+	{auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true, accountRole: AccountAdminRole},
+	{auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true, accountRole: AccountAdminRole},
 	// Workspace membership (permission assignments). The GCP reference only lists
 	// updatePermissionAssignment; AWS and Azure list all three.
 	{auditServiceWorkspace, "addPermissionAssignment"}:    {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
@@ -406,7 +403,7 @@ func (f *auditEventFeed) ListEvents(
 	lastResourceChange := map[string]int{}
 	for _, row := range rows {
 		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
-		if rowRateLimit != nil {
+		if hasRateLimitData(rowRateLimit) {
 			annos.WithRateLimiting(rowRateLimit)
 		}
 		// Unmappable rows come back as no error, so this is a real lookup failure. Transient
@@ -505,6 +502,12 @@ func (f *auditEventFeed) ListEvents(
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
 }
 
+// hasRateLimitData reports whether rl was parsed from rate-limit headers, so an empty one
+// doesn't overwrite a real one in the annotations.
+func hasRateLimitData(rl *v2.RateLimitDescription) bool {
+	return rl.GetLimit() > 0 || rl.GetRemaining() > 0 || rl.GetStatus() != v2.RateLimitDescription_STATUS_UNSPECIFIED
+}
+
 // resourceChangeKey identifies a resource change by its resource and parent, for dropping
 // duplicates within one ListEvents page.
 func resourceChangeKey(resourceId, parentResourceId *v2.ResourceId) string {
@@ -592,6 +595,7 @@ func mapAuditRowToResource(
 	}
 
 	var affected []affectedResource
+	var rateLimit *v2.RateLimitDescription
 
 	switch {
 	case mapping.resourceType == workspaceResourceType:
@@ -605,8 +609,21 @@ func mapAuditRowToResource(
 			return nil, nil, nil
 		}
 
-		resourceId := &v2.ResourceId{ResourceType: mapping.resourceType.Id, Resource: nativeId}
-		if mapping.resourceType == groupResourceType {
+		resourceType := mapping.resourceType
+		if mapping.resolvePrincipal {
+			resolved, rl, err := resolvePrincipalType(ctx, client, principalTypes, nativeId, prefersServicePrincipal(row))
+			rateLimit = rl
+			if err != nil {
+				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve principal for event %s: %w", row.EventID, err)
+			}
+			// No match is expected for a deleted principal; keep the fallback so role refreshes still fire.
+			if resolved != nil {
+				resourceType = resolved
+			}
+		}
+
+		resourceId := &v2.ResourceId{ResourceType: resourceType.Id, Resource: nativeId}
+		if resourceType == groupResourceType {
 			resourceId.Resource = groupResourceId(ctx, nativeId, accountParent)
 		}
 
@@ -641,7 +658,7 @@ func mapAuditRowToResource(
 		}
 	}
 
-	return affected, nil, nil
+	return affected, rateLimit, nil
 }
 
 // buildAffectedGrant builds the entitlement (on entitlementResourceId/parent) and principal a
@@ -659,7 +676,7 @@ func buildAffectedGrant(
 		return nil, nil, nil
 	}
 
-	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalTypes, principalNativeId)
+	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalTypes, principalNativeId, prefersServicePrincipal(row))
 	if err != nil {
 		return nil, rateLimit, err
 	}
@@ -688,8 +705,14 @@ type principalTypeCache map[string]*v2.ResourceType
 // service principal in that order via the Account API and stopping at the first match: the audit log's
 // targetUserId doesn't record which kind of principal it actually is. Returns a nil type (no
 // error) if nativeId doesn't match any of the three. Results, including no match, are cached
-// in principalTypes; errors aren't.
-func resolvePrincipalType(ctx context.Context, client *databricks.Client, principalTypes principalTypeCache, nativeId string) (*v2.ResourceType, *v2.RateLimitDescription, error) {
+// in principalTypes; errors aren't. servicePrincipalFirst only reorders the lookups.
+func resolvePrincipalType(
+	ctx context.Context,
+	client *databricks.Client,
+	principalTypes principalTypeCache,
+	nativeId string,
+	servicePrincipalFirst bool,
+) (*v2.ResourceType, *v2.RateLimitDescription, error) {
 	if resourceType, ok := principalTypes[nativeId]; ok {
 		return resourceType, nil, nil
 	}
@@ -707,6 +730,9 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, princi
 		{servicePrincipalResourceType, func() (bool, *v2.RateLimitDescription, error) {
 			return principalExists(client.GetServicePrincipal(ctx, "", nativeId))
 		}},
+	}
+	if servicePrincipalFirst {
+		candidates[0], candidates[2] = candidates[2], candidates[0]
 	}
 
 	var rateLimit *v2.RateLimitDescription
@@ -733,6 +759,14 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, princi
 	)
 	principalTypes[nativeId] = nil
 	return nil, rateLimit, nil
+}
+
+// prefersServicePrincipal reports whether the row's targetUserName looks like a service
+// principal: Databricks logs a service principal's application ID (a UUID) there, and a
+// user's username for users.
+func prefersServicePrincipal(row auditLogRow) bool {
+	_, err := uuid.Parse(row.RequestParams["targetUserName"])
+	return err == nil
 }
 
 // principalExists adapts a client Get* call into a found/not-found result: a 404 means not

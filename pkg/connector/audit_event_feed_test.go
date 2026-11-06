@@ -335,11 +335,7 @@ func TestAdvanceEventCursorDrainedJumpsToLagCutoff(t *testing.T) {
 }
 
 func TestMapAuditRowToResource(t *testing.T) {
-	// None of these cases are grant-mapped, so mapAuditRowToResource should never reach the
-	// principal-type lookup; a client that fails any request proves that.
-	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected request %s %s: no case here is grant-mapped", r.Method, r.URL.Path)
-	})
+	client := principalKindTestClient(t, "u-1", "Users")
 	workspaceLookup := map[int64]string{123: "my-workspace"}
 	accountId := "acct-1"
 
@@ -560,6 +556,10 @@ func TestMapAuditRowToResource(t *testing.T) {
 			row:  auditLogRow{ActionName: "delete", ServiceName: "clusters"},
 		},
 		{
+			name: "principal delete is left to full sync",
+			row:  auditLogRow{ActionName: "delete", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "u-1"}},
+		},
+		{
 			name: "unresolvable workspace is skipped",
 			row: auditLogRow{
 				ActionName:    "add",
@@ -627,6 +627,139 @@ func principalKindTestClient(t *testing.T, nativeId, kind string) *databricks.Cl
 		}
 		writeJSONNotFound(w)
 	})
+}
+
+// TestMapAuditRowToResourceResolvesPrincipalType covers principal-lifecycle rows whose
+// targetUserId names a service principal, a group, or nothing that still exists.
+func TestMapAuditRowToResourceResolvesPrincipalType(t *testing.T) {
+	accountId := "acct-1"
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
+	workspaceParent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "my-workspace"}
+	workspaceLookup := map[int64]string{123: "my-workspace"}
+	accountAdmin := roleResourceId(AccountAdminRole, accountParent)
+
+	type want struct{ resourceType, resource string }
+	cases := []struct {
+		name     string
+		nativeId string
+		kind     string
+		row      auditLogRow
+		want     []want
+	}{
+		{
+			name: "add of a service principal", nativeId: "sp-1", kind: "ServicePrincipals",
+			row:  auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "sp-1"}},
+			want: []want{{servicePrincipalResourceType.Id, "sp-1"}},
+		},
+		{
+			name: "setAdmin on a service principal", nativeId: "sp-1", kind: "ServicePrincipals",
+			row:  auditLogRow{ActionName: "setAdmin", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "sp-1"}},
+			want: []want{{servicePrincipalResourceType.Id, "sp-1"}, {roleResourceType.Id, accountAdmin}},
+		},
+		{
+			name: "updateUser on a service principal in a workspace", nativeId: "sp-1", kind: "ServicePrincipals",
+			row: auditLogRow{ActionName: "updateUser", ServiceName: "accounts", WorkspaceID: 123, RequestParams: map[string]string{"targetUserId": "sp-1"}},
+			want: []want{
+				{servicePrincipalResourceType.Id, "sp-1"},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent)},
+			},
+		},
+		{
+			name: "add naming a group uses the full-sync group id", nativeId: "g-1", kind: "Groups",
+			row:  auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "g-1"}},
+			want: []want{{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent)}},
+		},
+		{
+			name: "setAdmin on an unknown principal still refreshes the role", nativeId: "gone-1", kind: "none",
+			row:  auditLogRow{ActionName: "setAdmin", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "gone-1"}},
+			want: []want{{userResourceType.Id, "gone-1"}, {roleResourceType.Id, accountAdmin}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := principalKindTestClient(t, tc.nativeId, tc.kind)
+			got, _, err := mapAuditRowToResource(context.Background(), client, principalTypeCache{}, tc.row, accountId, workspaceLookup)
+			if err != nil {
+				t.Fatalf("mapAuditRowToResource() error = %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d affected resources, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i, w := range tc.want {
+				if got[i].resourceId.GetResourceType() != w.resourceType || got[i].resourceId.GetResource() != w.resource {
+					t.Errorf("[%d] resourceId = %+v, want type=%s id=%s", i, got[i].resourceId, w.resourceType, w.resource)
+				}
+			}
+			if p := got[0].parentResourceId; p.GetResourceType() != accountResourceType.Id || p.GetResource() != accountId {
+				t.Errorf("parentResourceId = %+v, want the account", p)
+			}
+		})
+	}
+
+	t.Run("a lookup error is returned", func(t *testing.T) {
+		client := principalKindTestClient(t, "sp-1", "error")
+		row := auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "sp-1"}}
+		if _, _, err := mapAuditRowToResource(context.Background(), client, principalTypeCache{}, row, accountId, workspaceLookup); err == nil {
+			t.Fatal("mapAuditRowToResource() error = nil, want the lookup failure")
+		}
+	})
+}
+
+// TestResolvePrincipalTypeServicePrincipalFirst verifies a UUID targetUserName sends the
+// service principal lookup first, and a username keeps the user-first order.
+func TestResolvePrincipalTypeServicePrincipalFirst(t *testing.T) {
+	cases := []struct {
+		name       string
+		targetName string
+		wantPaths  []string
+	}{
+		{
+			name:       "application id tries service principals first",
+			targetName: "8f2e6c1a-3b4d-4e5f-9a0b-1c2d3e4f5a6b",
+			wantPaths:  []string{"/ServicePrincipals/sp-1"},
+		},
+		{
+			name:       "username keeps the user-first order",
+			targetName: "someone@example.com",
+			wantPaths:  []string{"/Users/sp-1", "/Groups/sp-1", "/ServicePrincipals/sp-1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var paths []string
+			client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path[strings.Index(r.URL.Path, "/scim/v2")+len("/scim/v2"):])
+				mu.Unlock()
+				if strings.HasSuffix(r.URL.Path, "/ServicePrincipals/sp-1") {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{}`)
+					return
+				}
+				writeJSONNotFound(w)
+			})
+			row := auditLogRow{
+				ActionName:    "add",
+				ServiceName:   "accounts",
+				RequestParams: map[string]string{"targetUserId": "sp-1", "targetUserName": tc.targetName},
+			}
+			got, _, err := mapAuditRowToResource(context.Background(), client, principalTypeCache{}, row, "acct-1", nil)
+			if err != nil {
+				t.Fatalf("mapAuditRowToResource() error = %v", err)
+			}
+			if len(got) != 1 || got[0].resourceId.GetResourceType() != servicePrincipalResourceType.Id {
+				t.Fatalf("got %+v, want one service principal", got)
+			}
+			if strings.Join(paths, ",") != strings.Join(tc.wantPaths, ",") {
+				t.Errorf("lookups = %v, want %v", paths, tc.wantPaths)
+			}
+		})
+	}
 }
 
 // TestMapAuditRowToResourceGrantMapping covers the group-membership actions that map to an
@@ -880,6 +1013,12 @@ func TestListEventsEndToEnd(t *testing.T) {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
 			return
 		}
 
@@ -1495,10 +1634,10 @@ func TestResolvePrincipalTypeDoesNotCacheErrors(t *testing.T) {
 	})
 
 	principalTypes := principalTypeCache{}
-	if _, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1"); err == nil {
+	if _, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1", false); err == nil {
 		t.Fatal("first resolvePrincipalType() error = nil, want the lookup failure")
 	}
-	got, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1")
+	got, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1", false)
 	if err != nil {
 		t.Fatalf("second resolvePrincipalType() error = %v", err)
 	}
@@ -1507,6 +1646,72 @@ func TestResolvePrincipalTypeDoesNotCacheErrors(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("lookup made %d calls, want 2 (the error must not be cached)", n)
+	}
+}
+
+// TestListEventsEmitsServicePrincipalChange verifies an accounts/add row naming a service
+// principal reaches C1 as a service_principal change, resolved once across rows. The two rows'
+// changes to sp-1 collapse into one.
+func TestListEventsEmitsServicePrincipalChange(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]int{}
+	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1"):
+			fmt.Fprint(w, `{"id":"wh-1"}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/scim/v2/"):
+			mu.Lock()
+			hits[r.URL.Path]++
+			mu.Unlock()
+			if strings.HasSuffix(r.URL.Path, "/ServicePrincipals/sp-1") {
+				fmt.Fprint(w, `{}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"detail":"not found"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statement_id": "stmt-1",
+				"status":       map[string]any{"state": "SUCCEEDED"},
+				"manifest": map[string]any{"schema": map[string]any{"columns": []map[string]any{
+					{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+					{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+				}}},
+				"result": map[string]any{"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "0", "add", "accounts", `{"targetUserId":"sp-1"}`},
+					{"evt-2", "2026-01-01T00:00:01Z", "0", "setAdmin", "accounts", `{"targetUserId":"sp-1"}`},
+				}},
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+
+	feed := newAuditEventFeed(client, nil, "wh-1")
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var spEvents int
+	for _, e := range events {
+		id := e.GetResourceChangeEvent().GetResourceId()
+		if id.GetResourceType() == userResourceType.Id {
+			t.Errorf("event %+v names a user, want the service principal", id)
+		}
+		if id.GetResourceType() == servicePrincipalResourceType.Id && id.GetResource() == "sp-1" {
+			spEvents++
+		}
+	}
+	if spEvents != 1 {
+		t.Errorf("got %d service_principal/sp-1 events, want 1: %+v", spEvents, events)
+	}
+	if got := hits["/api/2.0/accounts/acct-1/scim/v2/ServicePrincipals/sp-1"]; got != 1 {
+		t.Errorf("service principal looked up %d times, want 1", got)
 	}
 }
 
@@ -1525,7 +1730,7 @@ func TestListEventsDropsDuplicateResourceChanges(t *testing.T) {
 			fmt.Fprintf(w, `{"id":"wh-1"}`)
 			return
 		}
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
+		if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") || strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-2")) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{}`)
 			return
