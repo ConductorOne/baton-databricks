@@ -49,8 +49,10 @@ const (
 	auditServiceAccounts  = "accounts"
 	auditServiceWorkspace = "workspace"
 
-	// Each member costs up to three principal lookups, so a larger row refreshes the group instead.
-	maxAuditMembershipLookups = 50
+	// Each member costs up to three Account SCIM GETs, which Databricks rate limits, so rows and
+	// polls past these caps refresh the group instead of looking members up.
+	maxAuditMembershipLookups    = 50
+	maxAuditMemberLookupsPerPoll = 300
 )
 
 // auditActionMapping describes what an audit log action_name affects: an optional primary
@@ -238,7 +240,7 @@ type auditEventFeed struct {
 	queryWorkspaceMu sync.Mutex
 	queryWorkspaceID string
 
-	skippedLookupFailures atomic.Int64
+	lookupFailures atomic.Int64
 }
 
 func newAuditEventFeed(
@@ -399,13 +401,13 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	var events []*v2.Event
-	var unmappedRows, skippedLookupRows, lookupFallbackRows, resourceChangeEvents, grantEvents, revokeEvents, duplicateResourceChanges int
-	principalTypes := principalTypeCache{}
+	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents, duplicateResourceChanges int
+	lookups := newPrincipalLookups(&f.lookupFailures)
 	// Keep only the last resource change per resource in a page: each one triggers a full refetch
 	// (costly for workspace roles). Grant and revoke events are never collapsed.
 	lastResourceChange := map[string]int{}
 	for _, row := range rows {
-		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
+		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, lookups, row, f.client.GetAccountId(), workspaceLookup)
 		if hasRateLimitData(rowRateLimit) {
 			annos.WithRateLimiting(rowRateLimit)
 		}
@@ -416,22 +418,9 @@ func (f *auditEventFeed) ListEvents(
 			if isRetryableLookupError(err) {
 				return nil, nil, annos, fmt.Errorf("databricks-connector: failed to map audit row %s (%s): %w", row.EventID, row.ActionName, err)
 			}
-			// Grant rows come back with a group refresh, so the change still reaches C1.
-			fallback := len(affected) > 0
-			if count := f.skippedLookupFailures.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
-				l.Warn("databricks-connector: principal lookup failed for audit row",
-					zap.String("action_name", row.ActionName),
-					zap.String("event_id", row.EventID),
-					zap.Bool("fallback_to_group_refresh", fallback),
-					zap.Int64("total_occurrences", count),
-					zap.Error(err),
-				)
-			}
-			if !fallback {
-				skippedLookupRows++
-				continue
-			}
-			lookupFallbackRows++
+			lookups.warnLookupFailure(ctx, row, err, false)
+			skippedLookupRows++
+			continue
 		}
 		if len(affected) == 0 {
 			unmappedRows++
@@ -499,7 +488,8 @@ func (f *auditEventFeed) ListEvents(
 		zap.Int("audit_rows_parsed", len(rows)),
 		zap.Int("audit_rows_unmapped", unmappedRows),
 		zap.Int("audit_rows_skipped_lookup_failure", skippedLookupRows),
-		zap.Int("audit_rows_lookup_failure_group_refresh", lookupFallbackRows),
+		zap.Int("audit_members_lookup_failure", lookups.memberFailures),
+		zap.Int("audit_members_over_lookup_budget", lookups.membersOverBudget),
 		zap.Int("events_total", len(events)),
 		zap.Int("events_resource_change", resourceChangeEvents),
 		zap.Int("events_resource_change_duplicates_dropped", duplicateResourceChanges),
@@ -571,12 +561,11 @@ type affectedGrant struct {
 
 // mapAuditRowToResource maps an audit row to every Baton resource its action affects, skipping
 // anything unresolvable. Principals are always account-parented, mirroring full sync, regardless
-// of the workspace the audit row occurred in. On a non-retryable lookup error for a grant-mapped
-// row, the returned resources hold a group refresh to emit alongside the error.
+// of the workspace the audit row occurred in.
 func mapAuditRowToResource(
 	ctx context.Context,
 	client *databricks.Client,
-	principalTypes principalTypeCache,
+	lookups *principalLookups,
 	row auditLogRow,
 	accountId string,
 	workspaceLookup map[int64]string,
@@ -622,7 +611,7 @@ func mapAuditRowToResource(
 
 		resourceType := mapping.resourceType
 		if mapping.resolvePrincipal {
-			resolved, rl, err := resolvePrincipalType(ctx, client, principalTypes, nativeId, prefersServicePrincipal(row))
+			resolved, rl, err := resolvePrincipalType(ctx, client, lookups, nativeId, prefersServicePrincipal(row))
 			rateLimit = rl
 			if err != nil {
 				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve principal for event %s: %w", row.EventID, err)
@@ -639,12 +628,9 @@ func mapAuditRowToResource(
 		}
 
 		if mapping.grant != nil {
-			grants, rateLimit, err := buildAffectedGrants(ctx, client, principalTypes, row, mapping.grant, resourceId, accountParent)
+			grants, rateLimit, err := buildAffectedGrants(ctx, client, lookups, row, mapping.grant, resourceId, accountParent)
 			if err != nil {
-				if isRetryableLookupError(err) {
-					grants = nil
-				}
-				return grants, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
+				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
 			}
 			return grants, rateLimit, nil
 		}
@@ -672,12 +658,12 @@ func mapAuditRowToResource(
 }
 
 // buildAffectedGrants returns a grant or revoke on the entitlement (on entitlementResourceId/parent)
-// for each member the row names, plus one refresh of that resource when any member can't be
-// resolved. On a lookup error it returns only the refresh, alongside the error.
+// for each member the row names, plus one refresh of that resource when any member is unmatched,
+// fails a non-retryable lookup, or is over the poll's lookup budget. Only retryable errors are returned.
 func buildAffectedGrants(
 	ctx context.Context,
 	client *databricks.Client,
-	principalTypes principalTypeCache,
+	lookups *principalLookups,
 	row auditLogRow,
 	gm *auditGrantMapping,
 	entitlementResourceId, parent *v2.ResourceId,
@@ -704,12 +690,27 @@ func buildAffectedGrants(
 	affected := make([]affectedResource, 0, len(members)+1)
 	unresolved := 0
 	for _, m := range members {
-		principalType, rl, err := resolvePrincipalType(ctx, client, principalTypes, m.id, m.servicePrincipalFirst)
+		if _, cached := lookups.types[m.id]; !cached {
+			if lookups.remainingMemberLookups <= 0 {
+				lookups.membersOverBudget++
+				unresolved++
+				continue
+			}
+			lookups.remainingMemberLookups--
+		}
+
+		principalType, rl, err := resolvePrincipalType(ctx, client, lookups, m.id, m.servicePrincipalFirst)
 		if rl != nil {
 			rateLimit = rl
 		}
 		if err != nil {
-			return []affectedResource{refresh}, rateLimit, err
+			if isRetryableLookupError(err) {
+				return nil, rateLimit, err
+			}
+			lookups.warnLookupFailure(ctx, row, err, true)
+			lookups.memberFailures++
+			unresolved++
+			continue
 		}
 		if principalType == nil {
 			unresolved++
@@ -776,23 +777,53 @@ func splitAuditList(v string) []string {
 	return parts
 }
 
-// principalTypeCache memoizes resolvePrincipalType for one ListEvents call, so a principal
-// named on many rows is looked up once. A nil value means the id matched no principal.
-type principalTypeCache map[string]*v2.ResourceType
+// principalLookups is the principal lookup state for one ListEvents call. types memoizes
+// resolvePrincipalType, where a nil value means the id matched no principal.
+type principalLookups struct {
+	types                  map[string]*v2.ResourceType
+	remainingMemberLookups int
+	memberFailures         int
+	membersOverBudget      int
+	// failures is the feed's process-wide count, which samples the lookup-failure warning.
+	failures *atomic.Int64
+}
+
+func newPrincipalLookups(failures *atomic.Int64) *principalLookups {
+	if failures == nil {
+		failures = &atomic.Int64{}
+	}
+	return &principalLookups{
+		types:                  map[string]*v2.ResourceType{},
+		remainingMemberLookups: maxAuditMemberLookupsPerPoll,
+		failures:               failures,
+	}
+}
+
+func (p *principalLookups) warnLookupFailure(ctx context.Context, row auditLogRow, err error, groupRefresh bool) {
+	if count := p.failures.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
+		ctxzap.Extract(ctx).Warn("databricks-connector: principal lookup failed for audit row",
+			zap.String("action_name", row.ActionName),
+			zap.String("event_id", row.EventID),
+			zap.Bool("fallback_to_group_refresh", groupRefresh),
+			zap.Int64("total_occurrences", count),
+			zap.Error(err),
+		)
+	}
+}
 
 // resolvePrincipalType finds which resource type nativeId belongs to, trying user, group, then
 // service principal in that order via the Account API and stopping at the first match: the audit log's
 // targetUserId doesn't record which kind of principal it actually is. Returns a nil type (no
 // error) if nativeId doesn't match any of the three. Results, including no match, are cached
-// in principalTypes; errors aren't. servicePrincipalFirst only reorders the lookups.
+// in lookups; errors aren't. servicePrincipalFirst only reorders the lookups.
 func resolvePrincipalType(
 	ctx context.Context,
 	client *databricks.Client,
-	principalTypes principalTypeCache,
+	lookups *principalLookups,
 	nativeId string,
 	servicePrincipalFirst bool,
 ) (*v2.ResourceType, *v2.RateLimitDescription, error) {
-	if resourceType, ok := principalTypes[nativeId]; ok {
+	if resourceType, ok := lookups.types[nativeId]; ok {
 		return resourceType, nil, nil
 	}
 
@@ -828,7 +859,7 @@ func resolvePrincipalType(
 				zap.String("principal_id", nativeId),
 				zap.String("resource_type", candidate.resourceType.Id),
 			)
-			principalTypes[nativeId] = candidate.resourceType
+			lookups.types[nativeId] = candidate.resourceType
 			return candidate.resourceType, rateLimit, nil
 		}
 	}
@@ -836,7 +867,7 @@ func resolvePrincipalType(
 	ctxzap.Extract(ctx).Debug("databricks-connector: resolvePrincipalType: audit principal matched no user, group or service principal",
 		zap.String("principal_id", nativeId),
 	)
-	principalTypes[nativeId] = nil
+	lookups.types[nativeId] = nil
 	return nil, rateLimit, nil
 }
 
