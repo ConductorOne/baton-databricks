@@ -48,6 +48,9 @@ const (
 
 	auditServiceAccounts  = "accounts"
 	auditServiceWorkspace = "workspace"
+
+	// Each member costs up to three principal lookups, so a larger row refreshes the group instead.
+	maxAuditMembershipLookups = 50
 )
 
 // auditActionMapping describes what an audit log action_name affects: an optional primary
@@ -87,8 +90,8 @@ type auditActionKey struct {
 // https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
 var auditLogActions = map[auditActionKey]auditActionMapping{
 	{auditServiceAccounts, "createGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
-	// Databricks documents targetUserId as the added/removed member's id on all four of these
-	// actions, singular and plural alike: https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
+	// targetUserId holds the added/removed member's id. The plural actions can carry several ids
+	// separated by commas, a format the audit log reference doesn't document but Databricks logs.
 	{auditServiceAccounts, "addPrincipalToGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalParam: "targetUserId"},
@@ -396,7 +399,7 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	var events []*v2.Event
-	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents, duplicateResourceChanges int
+	var unmappedRows, skippedLookupRows, lookupFallbackRows, resourceChangeEvents, grantEvents, revokeEvents, duplicateResourceChanges int
 	principalTypes := principalTypeCache{}
 	// Keep only the last resource change per resource in a page: each one triggers a full refetch
 	// (costly for workspace roles). Grant and revoke events are never collapsed.
@@ -413,16 +416,22 @@ func (f *auditEventFeed) ListEvents(
 			if isRetryableLookupError(err) {
 				return nil, nil, annos, fmt.Errorf("databricks-connector: failed to map audit row %s (%s): %w", row.EventID, row.ActionName, err)
 			}
+			// Grant rows come back with a group refresh, so the change still reaches C1.
+			fallback := len(affected) > 0
 			if count := f.skippedLookupFailures.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
-				l.Warn("databricks-connector: skipping audit row, principal lookup failed",
+				l.Warn("databricks-connector: principal lookup failed for audit row",
 					zap.String("action_name", row.ActionName),
 					zap.String("event_id", row.EventID),
+					zap.Bool("fallback_to_group_refresh", fallback),
 					zap.Int64("total_occurrences", count),
 					zap.Error(err),
 				)
 			}
-			skippedLookupRows++
-			continue
+			if !fallback {
+				skippedLookupRows++
+				continue
+			}
+			lookupFallbackRows++
 		}
 		if len(affected) == 0 {
 			unmappedRows++
@@ -490,6 +499,7 @@ func (f *auditEventFeed) ListEvents(
 		zap.Int("audit_rows_parsed", len(rows)),
 		zap.Int("audit_rows_unmapped", unmappedRows),
 		zap.Int("audit_rows_skipped_lookup_failure", skippedLookupRows),
+		zap.Int("audit_rows_lookup_failure_group_refresh", lookupFallbackRows),
 		zap.Int("events_total", len(events)),
 		zap.Int("events_resource_change", resourceChangeEvents),
 		zap.Int("events_resource_change_duplicates_dropped", duplicateResourceChanges),
@@ -561,7 +571,8 @@ type affectedGrant struct {
 
 // mapAuditRowToResource maps an audit row to every Baton resource its action affects, skipping
 // anything unresolvable. Principals are always account-parented, mirroring full sync, regardless
-// of the workspace the audit row occurred in.
+// of the workspace the audit row occurred in. On a non-retryable lookup error for a grant-mapped
+// row, the returned resources hold a group refresh to emit alongside the error.
 func mapAuditRowToResource(
 	ctx context.Context,
 	client *databricks.Client,
@@ -628,15 +639,14 @@ func mapAuditRowToResource(
 		}
 
 		if mapping.grant != nil {
-			g, rateLimit, err := buildAffectedGrant(ctx, client, principalTypes, row, mapping.grant, resourceId, accountParent)
+			grants, rateLimit, err := buildAffectedGrants(ctx, client, principalTypes, row, mapping.grant, resourceId, accountParent)
 			if err != nil {
-				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
+				if isRetryableLookupError(err) {
+					grants = nil
+				}
+				return grants, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
 			}
-			if g == nil {
-				// No resolvable principal: still refresh the group's grants.
-				return []affectedResource{{resourceId: resourceId, parentResourceId: accountParent}}, rateLimit, nil
-			}
-			return []affectedResource{{grant: g}}, rateLimit, nil
+			return grants, rateLimit, nil
 		}
 
 		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: accountParent})
@@ -661,40 +671,109 @@ func mapAuditRowToResource(
 	return affected, rateLimit, nil
 }
 
-// buildAffectedGrant builds the entitlement (on entitlementResourceId/parent) and principal a
-// grant-mapped row names, skipping rows missing the principal's native id.
-func buildAffectedGrant(
+// buildAffectedGrants returns a grant or revoke on the entitlement (on entitlementResourceId/parent)
+// for each member the row names, plus one refresh of that resource when any member can't be
+// resolved. On a lookup error it returns only the refresh, alongside the error.
+func buildAffectedGrants(
 	ctx context.Context,
 	client *databricks.Client,
 	principalTypes principalTypeCache,
 	row auditLogRow,
 	gm *auditGrantMapping,
 	entitlementResourceId, parent *v2.ResourceId,
-) (*affectedGrant, *v2.RateLimitDescription, error) {
-	principalNativeId, ok := row.RequestParams[gm.principalParam]
-	if !ok || principalNativeId == "" {
-		return nil, nil, nil
+) ([]affectedResource, *v2.RateLimitDescription, error) {
+	refresh := affectedResource{resourceId: entitlementResourceId, parentResourceId: parent}
+	members := auditGrantMembers(row, gm.principalParam)
+
+	l := ctxzap.Extract(ctx)
+	if len(members) > 1 {
+		l.Debug("databricks-connector: buildAffectedGrants: audit row names several members",
+			zap.String("event_id", row.EventID),
+			zap.String("action_name", row.ActionName),
+			zap.Int("member_count", len(members)),
+			zap.Bool("capped", len(members) > maxAuditMembershipLookups),
+		)
+	}
+	if len(members) == 0 || len(members) > maxAuditMembershipLookups {
+		return []affectedResource{refresh}, nil, nil
 	}
 
-	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalTypes, principalNativeId, prefersServicePrincipal(row))
-	if err != nil {
-		return nil, rateLimit, err
-	}
-	if principalType == nil {
-		return nil, rateLimit, nil
+	entitlement := ent.NewAssignmentEntitlement(&v2.Resource{Id: entitlementResourceId, ParentResourceId: parent}, gm.entitlement)
+
+	var rateLimit *v2.RateLimitDescription
+	affected := make([]affectedResource, 0, len(members)+1)
+	unresolved := 0
+	for _, m := range members {
+		principalType, rl, err := resolvePrincipalType(ctx, client, principalTypes, m.id, m.servicePrincipalFirst)
+		if rl != nil {
+			rateLimit = rl
+		}
+		if err != nil {
+			return []affectedResource{refresh}, rateLimit, err
+		}
+		if principalType == nil {
+			unresolved++
+			continue
+		}
+
+		principalResourceId := m.id
+		if principalType == groupResourceType {
+			principalResourceId = groupResourceId(ctx, m.id, parent)
+		}
+		affected = append(affected, affectedResource{grant: &affectedGrant{
+			entitlement: entitlement,
+			principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: principalType.Id, Resource: principalResourceId}},
+			revoke:      gm.revoke,
+		}})
 	}
 
-	principalResourceId := principalNativeId
-	if principalType == groupResourceType {
-		principalResourceId = groupResourceId(ctx, principalNativeId, parent)
+	if unresolved > 0 {
+		l.Debug("databricks-connector: buildAffectedGrants: refreshing group for unresolved members",
+			zap.String("event_id", row.EventID),
+			zap.String("action_name", row.ActionName),
+			zap.Int("unresolved_member_count", unresolved),
+		)
+		affected = append(affected, refresh)
 	}
+	return affected, rateLimit, nil
+}
 
-	entitlementResource := &v2.Resource{Id: entitlementResourceId, ParentResourceId: parent}
-	return &affectedGrant{
-		entitlement: ent.NewAssignmentEntitlement(entitlementResource, gm.entitlement),
-		principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: principalType.Id, Resource: principalResourceId}},
-		revoke:      gm.revoke,
-	}, rateLimit, nil
+type auditGrantMember struct {
+	id                    string
+	servicePrincipalFirst bool
+}
+
+// auditGrantMembers splits the row's comma-separated principal ids, dropping blanks and repeats.
+// targetUserName only steers the lookup order when it lists one name per id.
+func auditGrantMembers(row auditLogRow, principalParam string) []auditGrantMember {
+	rawIDs := splitAuditList(row.RequestParams[principalParam])
+	rawNames := splitAuditList(row.RequestParams["targetUserName"])
+	namesAligned := len(rawNames) == len(rawIDs)
+
+	seen := make(map[string]struct{}, len(rawIDs))
+	members := make([]auditGrantMember, 0, len(rawIDs))
+	for i, id := range rawIDs {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		members = append(members, auditGrantMember{
+			id:                    id,
+			servicePrincipalFirst: namesAligned && isApplicationId(rawNames[i]),
+		})
+	}
+	return members
+}
+
+func splitAuditList(v string) []string {
+	parts := strings.Split(v, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
 }
 
 // principalTypeCache memoizes resolvePrincipalType for one ListEvents call, so a principal
@@ -765,7 +844,11 @@ func resolvePrincipalType(
 // principal: Databricks logs a service principal's application ID (a UUID) there, and a
 // user's username for users.
 func prefersServicePrincipal(row auditLogRow) bool {
-	_, err := uuid.Parse(row.RequestParams["targetUserName"])
+	return isApplicationId(row.RequestParams["targetUserName"])
+}
+
+func isApplicationId(name string) bool {
+	_, err := uuid.Parse(name)
 	return err == nil
 }
 
