@@ -1,0 +1,2300 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "baton-databricks connector API surface",
+    "version": "1.0.0",
+    "description": "The Databricks endpoints called by baton-databricks (`pkg/databricks`), not the whole Databricks API. Scope comes from client code; types, formats and enums come from the vendor reference (see the PR provenance table). Fields are optional unless the vendor documents them as required.\n\nNot expressible here: the connector retries nothing itself and relies on the SDK's uhttp wrapper; HTTP errors map to gRPC codes (404 NotFound, 403 PermissionDenied, 401 Unauthenticated, 429/5xx Unavailable) and are wrapped in `APIError{StatusCode, Detail, Message}`; list pagination is `startIndex`/`count` terminated by a short page; rule-set etags are cached per client.",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://{accountHostname}",
+      "description": "Account console host (`GetAccountHostname`: `accounts.cloud.databricks.com`, `accounts.azuredatabricks.net`, `accounts.gcp.databricks.com`).",
+      "variables": {
+        "accountHostname": {
+          "default": "accounts.cloud.databricks.com"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "auth",
+      "description": "OAuth token endpoint."
+    },
+    {
+      "name": "users",
+      "description": "SCIM users, account and workspace hosts; includes the enable/disable PATCH."
+    },
+    {
+      "name": "groups",
+      "description": "SCIM groups."
+    },
+    {
+      "name": "service-principals",
+      "description": "SCIM service principals (sync and role edits only)."
+    },
+    {
+      "name": "access-control",
+      "description": "Assignable roles and rule sets."
+    },
+    {
+      "name": "workspaces",
+      "description": "Workspace list and permission assignments."
+    }
+  ],
+  "security": [
+    {
+      "oauthM2M": []
+    }
+  ],
+  "paths": {
+    "/oidc/accounts/{account_id}/v1/token": {
+      "post": {
+        "operationId": "getOAuthToken",
+        "summary": "OAuth2 client-credentials token",
+        "description": "Not called by connector code directly: the oauth2 transport requests and refreshes the token. Client ID and secret are sent as HTTP Basic or form credentials by the oauth2 library.\n\nClient: `pkg/databricks/auth.go:35 (clientcredentials.Config.TokenURL)`.",
+        "tags": [
+          "auth"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "grant_type": {
+                    "type": "string",
+                    "enum": [
+                      "client_credentials"
+                    ]
+                  },
+                  "scope": {
+                    "type": "string",
+                    "default": "all-apis",
+                    "description": "Hardcoded by the connector."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Access token, read by golang.org/x/oauth2.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    },
+                    "token_type": {
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "oauthClientBasic": []
+          }
+        ]
+      }
+    },
+    "/api/2.0/accounts/{account_id}/scim/v2/Users": {
+      "get": {
+        "operationId": "listAccountUsers",
+        "summary": "List account users",
+        "description": "Paginated with `startIndex`/`count`; the connector advances `startIndex` and stops on a short or empty page (`ResourcesPageSize`).\n\nClient: `pkg/databricks/client.go:178,196`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/startIndex"
+          },
+          {
+            "$ref": "#/components/parameters/count"
+          },
+          {
+            "$ref": "#/components/parameters/filter"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: users sync (`pkg/connector/users.go:109`) sends `id,emails,userName,displayName,active`; the role sync (`roles.go:181`) sends `roles,entitlements`; lookups (`FindUserID` etc.) pass `count=1` and a `userName eq '<name>'` filter.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "emails",
+                "userName",
+                "displayName",
+                "active"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of users.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAccountUser",
+        "summary": "Create an account user",
+        "description": "Used by CreateAccount. A 409 means the user already exists.\n\nClient: `pkg/databricks/client.go:960,977`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The created user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateUserResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/scim/v2/Users/{id}": {
+      "get": {
+        "operationId": "getAccountUser",
+        "summary": "Get an account user",
+        "description": "Client: `pkg/databricks/client.go:204,221`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateAccountUser",
+        "summary": "Replace an account user",
+        "description": "Client: `pkg/databricks/client.go:229,237`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/User"
+              }
+            }
+          },
+          "description": "Whole-object replace, built by the role Grant/Revoke read-modify-write (`pkg/connector/roles.go:335,419`). `active` is `omitempty` in the Go struct, so `active:false` is not serialized."
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAccountUser",
+        "summary": "Patch an account user (enable/disable)",
+        "description": "Backs the `enable_user` / `disable_user` actions (`pkg/connector/actions.go`). Idempotent; no preflight GET.\n\nClient: `pkg/databricks/client.go:248,259`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRequest"
+              }
+            }
+          },
+          "description": "The connector sends exactly one operation: `{\"op\":\"replace\",\"path\":\"active\",\"value\":<bool>}`. `SetUserActive` rejects a non-numeric `id` before any request."
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAccountUser",
+        "summary": "Delete an account user",
+        "description": "Client: `pkg/databricks/client.go:985,1000`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted (no body)."
+          },
+          "200": {
+            "description": "Deleted; documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/scim/v2/Groups": {
+      "get": {
+        "operationId": "listAccountGroups",
+        "summary": "List account groups",
+        "description": "Client: `pkg/databricks/client.go:344,362`.",
+        "tags": [
+          "groups"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/startIndex"
+          },
+          {
+            "$ref": "#/components/parameters/count"
+          },
+          {
+            "$ref": "#/components/parameters/filter"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: groups sync (`groups.go:97`) sends `id,displayName`; the role sync sends `roles,entitlements,meta`.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "displayName"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/scim/v2/Groups/{id}": {
+      "get": {
+        "operationId": "getAccountGroup",
+        "summary": "Get an account group",
+        "description": "Client: `pkg/databricks/client.go:388,400`.",
+        "tags": [
+          "groups"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: member reads send `id,displayName,members`; the role flows send `roles,entitlements,meta`. Also read uncached (`GetGroupNoCache`) before writes.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "displayName",
+                "members"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAccountGroup",
+        "summary": "Patch an account group",
+        "description": "Client: `pkg/databricks/client.go:416,429`.",
+        "tags": [
+          "groups"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRequest"
+              }
+            }
+          },
+          "description": "Operations built by the group Grant/Revoke: `add` / `remove` on `members` (e.g. path `members[value eq \"<id>\"]`) and role changes."
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/scim/v2/ServicePrincipals": {
+      "get": {
+        "operationId": "listAccountServicePrincipals",
+        "summary": "List account service principals",
+        "description": "Client: `pkg/databricks/client.go:486,504`.",
+        "tags": [
+          "service-principals"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/startIndex"
+          },
+          {
+            "$ref": "#/components/parameters/count"
+          },
+          {
+            "$ref": "#/components/parameters/filter"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: service principal sync (`service-principals.go:87`) sends `id,displayName,active,applicationId`; the role sync sends `roles,entitlements`.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "displayName",
+                "active",
+                "applicationId"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of service principals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServicePrincipalList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/scim/v2/ServicePrincipals/{id}": {
+      "get": {
+        "operationId": "getAccountServicePrincipal",
+        "summary": "Get an account service principal",
+        "description": "Client: `pkg/databricks/client.go:512,529`.",
+        "tags": [
+          "service-principals"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service principal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServicePrincipal"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateAccountServicePrincipal",
+        "summary": "Replace an account service principal",
+        "description": "Client: `pkg/databricks/client.go:533,547`.",
+        "tags": [
+          "service-principals"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServicePrincipal"
+              }
+            }
+          },
+          "description": "Whole-object replace from role Grant/Revoke (`roles.go:369,460`)."
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/preview/accounts/{account_id}/access-control/assignable-roles": {
+      "get": {
+        "operationId": "listAccountAssignableRoles",
+        "summary": "List roles assignable on a resource",
+        "description": "Also the Validate probe (`pkg/connector/connector.go:108`). Public Preview API.\n\nClient: `pkg/databricks/client.go:604,630`.",
+        "tags": [
+          "access-control"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "name": "resource",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`accounts/{account_id}` followed by `/{resource_type}/{resource_id}` (`url.JoinPath`); `ListRoles(ctx, \"\", \"\", \"\")` (the Validate probe) sends `accounts/{account_id}`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignable roles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignableRoles"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/preview/accounts/{account_id}/access-control/rule-sets": {
+      "get": {
+        "operationId": "getAccountRuleSet",
+        "summary": "Get a rule set",
+        "description": "Public Preview API.\n\nClient: `pkg/databricks/client.go:863,889`.",
+        "tags": [
+          "access-control"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`accounts/{account_id}/{resource_type}/{resource_id}/ruleSets/default` (omitted when empty). The connector sends it on both GET and PUT."
+          },
+          {
+            "name": "etag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Always sent (`NameVars.Apply` uses `Set`), empty on the first read; the connector then reuses the etag from the last GET."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rule set; the connector reads `grant_rules` and `etag`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleSetResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateAccountRuleSet",
+        "summary": "Update a rule set",
+        "description": "Read-modify-write: the etag from the previous GET is sent back (a stale etag is rejected by the API). Public Preview API.\n\nClient: `pkg/databricks/client.go:899,939`.",
+        "tags": [
+          "access-control"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`accounts/{account_id}/{resource_type}/{resource_id}/ruleSets/default` (omitted when empty). The connector sends it on both GET and PUT."
+          },
+          {
+            "name": "etag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Always sent (`NameVars.Apply` uses `Set`), empty on the first read; the connector then reuses the etag from the last GET."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRuleSetBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated rule set; the connector ignores the body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleSetResponse"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/workspaces": {
+      "get": {
+        "operationId": "listAccountWorkspaces",
+        "summary": "List account workspaces",
+        "description": "Also called by Validate (`connector.go:115`). The connector drops workspaces matched by `--databricks-exclude-workspaces` after the response.\n\nClient: `pkg/databricks/client.go:640,650`.",
+        "tags": [
+          "workspaces"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Top-level array of workspaces (not wrapped); unpaginated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Workspace"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments": {
+      "get": {
+        "operationId": "listWorkspacePermissionAssignments",
+        "summary": "List a workspace's permission assignments",
+        "description": "Unpaginated. Called cached for sync and uncached (`WithNoCache`) as the read-before-write of Grant/Revoke.\n\nClient: `pkg/databricks/client.go:698,711`.",
+        "tags": [
+          "workspaces"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/workspaceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignments, wrapped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceAssignmentList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments/principals/{principal_id}": {
+      "put": {
+        "operationId": "updateWorkspacePermissionAssignment",
+        "summary": "Set a principal's workspace permissions",
+        "description": "`principal_id` must be numeric (`validatePrincipalID`).\n\nClient: `pkg/databricks/client.go:751,775`.",
+        "tags": [
+          "workspaces"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/workspaceId"
+          },
+          {
+            "$ref": "#/components/parameters/principalId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/WorkspacePermission"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "description": "The connector sends `[\"USER\"]` only when the principal has no assignment. Per the vendor, omitting `permissions` or sending unsupported values removes all permissions."
+        },
+        "responses": {
+          "200": {
+            "description": "Resulting assignment; the connector ignores the body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceAssignment"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteWorkspacePermissionAssignment",
+        "summary": "Remove a principal's workspace assignment",
+        "description": "A 404 here is treated as already revoked. `principal_id` must be numeric.\n\nClient: `pkg/databricks/client.go:789,807`.",
+        "tags": [
+          "workspaces"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/accountId"
+          },
+          {
+            "$ref": "#/components/parameters/workspaceId"
+          },
+          {
+            "$ref": "#/components/parameters/principalId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed; documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Removed (no body)."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/2.0/preview/scim/v2/Users": {
+      "get": {
+        "operationId": "listWorkspaceUsers",
+        "summary": "List workspace users",
+        "description": "Client: `pkg/databricks/client.go:178,196`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/startIndex"
+          },
+          {
+            "$ref": "#/components/parameters/count"
+          },
+          {
+            "$ref": "#/components/parameters/filter"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: same attribute sets as the account variant.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "emails",
+                "userName",
+                "displayName",
+                "active"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of users.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/scim/v2/Users/{id}": {
+      "get": {
+        "operationId": "getWorkspaceUser",
+        "summary": "Get a workspace user",
+        "description": "Client: `pkg/databricks/client.go:204,217`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateWorkspaceUser",
+        "summary": "Replace a workspace user",
+        "description": "Client: `pkg/databricks/client.go:229,234`.",
+        "tags": [
+          "users"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/User"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/scim/v2/Groups": {
+      "get": {
+        "operationId": "listWorkspaceGroups",
+        "summary": "List workspace groups",
+        "description": "Client: `pkg/databricks/client.go:344,358`.",
+        "tags": [
+          "groups"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/startIndex"
+          },
+          {
+            "$ref": "#/components/parameters/count"
+          },
+          {
+            "$ref": "#/components/parameters/filter"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: same as the account variant.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "displayName"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/scim/v2/Groups/{id}": {
+      "get": {
+        "operationId": "getWorkspaceGroup",
+        "summary": "Get a workspace group",
+        "description": "Client: `pkg/databricks/client.go:388,402`.",
+        "tags": [
+          "groups"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/id"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: same as the account variant.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "displayName",
+                "members"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchWorkspaceGroup",
+        "summary": "Patch a workspace group",
+        "description": "Client: `pkg/databricks/client.go:416,421`.",
+        "tags": [
+          "groups"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/scim/v2/ServicePrincipals": {
+      "get": {
+        "operationId": "listWorkspaceServicePrincipals",
+        "summary": "List workspace service principals",
+        "description": "Client: `pkg/databricks/client.go:486,500`.",
+        "tags": [
+          "service-principals"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/startIndex"
+          },
+          {
+            "$ref": "#/components/parameters/count"
+          },
+          {
+            "$ref": "#/components/parameters/filter"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: same as the account variant.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "id",
+                "displayName",
+                "active",
+                "applicationId"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of service principals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServicePrincipalList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/scim/v2/ServicePrincipals/{id}": {
+      "get": {
+        "operationId": "getWorkspaceServicePrincipal",
+        "summary": "Get a workspace service principal",
+        "description": "Client: `pkg/databricks/client.go:512,525`.",
+        "tags": [
+          "service-principals"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service principal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServicePrincipal"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateWorkspaceServicePrincipal",
+        "summary": "Replace a workspace service principal",
+        "description": "Client: `pkg/databricks/client.go:533,545`.",
+        "tags": [
+          "service-principals"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServicePrincipal"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success; the documented body is `{}`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Empty JSON object; the connector ignores the body."
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body (zero bytes). The client does not decode the body of write calls."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/accounts/access-control/assignable-roles": {
+      "get": {
+        "operationId": "listWorkspaceAssignableRoles",
+        "summary": "List roles assignable on a resource (workspace host)",
+        "description": "Path has no account ID; not in the public reference (client code only).\n\nClient: `pkg/databricks/client.go:604,622`.",
+        "tags": [
+          "access-control"
+        ],
+        "parameters": [
+          {
+            "name": "resource",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`accounts/{account_id}` followed by `/{resource_type}/{resource_id}` (`url.JoinPath`); `ListRoles(ctx, \"\", \"\", \"\")` (the Validate probe) sends `accounts/{account_id}`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignable roles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignableRoles"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    },
+    "/api/2.0/preview/accounts/access-control/rule-sets": {
+      "get": {
+        "operationId": "getWorkspaceRuleSet",
+        "summary": "Get a rule set (workspace host)",
+        "description": "Path has no account ID; not in the public reference (client code only).\n\nClient: `pkg/databricks/client.go:863,877`.",
+        "tags": [
+          "access-control"
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`accounts/{account_id}/{resource_type}/{resource_id}/ruleSets/default` (omitted when empty). The connector sends it on both GET and PUT."
+          },
+          {
+            "name": "etag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Always sent (`NameVars.Apply` uses `Set`), empty on the first read; the connector then reuses the etag from the last GET."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rule set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleSetResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateWorkspaceRuleSet",
+        "summary": "Update a rule set (workspace host)",
+        "description": "Path has no account ID; not in the public reference (client code only).\n\nClient: `pkg/databricks/client.go:899,911`.",
+        "tags": [
+          "access-control"
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "`accounts/{account_id}/{resource_type}/{resource_id}/ruleSets/default` (omitted when empty). The connector sends it on both GET and PUT."
+          },
+          {
+            "name": "etag",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Always sent (`NameVars.Apply` uses `Set`), empty on the first read; the connector then reuses the etag from the last GET."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRuleSetBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated rule set; ignored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleSetResponse"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success with no body."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "servers": [
+        {
+          "url": "https://{deploymentName}.{hostname}",
+          "description": "Workspace host (`{workspace_id}.{hostname}` at runtime: `workspaceUrl` joins the workspace ID and base host).",
+          "variables": {
+            "deploymentName": {
+              "default": "workspace-id",
+              "description": "The workspace ID the connector passes as the host's first label."
+            },
+            "hostname": {
+              "default": "cloud.databricks.com",
+              "description": "--databricks-hostname"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "oauthM2M": {
+        "type": "oauth2",
+        "description": "OAuth machine-to-machine; scope `all-apis` (`pkg/databricks/auth.go`). Token URL: `https://{accountHostname}/oidc/accounts/{account_id}/v1/token`.",
+        "flows": {
+          "clientCredentials": {
+            "tokenUrl": "/oidc/accounts/{account_id}/v1/token",
+            "scopes": {
+              "all-apis": "All API access"
+            }
+          }
+        }
+      },
+      "oauthClientBasic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "Client ID and secret presented to the token endpoint."
+      }
+    },
+    "parameters": {
+      "accountId": {
+        "name": "account_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Databricks account ID (`--databricks-account-id`)."
+      },
+      "workspaceId": {
+        "name": "workspace_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "principalId": {
+        "name": "principal_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "description": "Numeric principal ID."
+      },
+      "id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Native resource ID (numeric string)."
+      },
+      "startIndex": {
+        "name": "startIndex",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "description": "1-based; sent only when > 0 (the first page omits it)."
+      },
+      "count": {
+        "name": "count",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "description": "Page size; sent only when > 0."
+      },
+      "filter": {
+        "name": "filter",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "SCIM filter, e.g. `userName eq 'alice@example.com'`; the connector only issues equality lookups."
+      }
+    },
+    "schemas": {
+      "PermissionValue": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "description": "Fields the connector decodes (`pkg/databricks/models.go` `User`). All optional: the vendor marks no response field required.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Native ID (a numeric string). Used as the C1 resource ID and ExternalId of a user."
+          },
+          "userName": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Inactive users sync as Disabled."
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "primary": {
+                  "type": "boolean"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionValue"
+            },
+            "description": "Account/workspace roles held by the user; the role sync reads these."
+          },
+          "entitlements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionValue"
+            },
+            "description": "Entitlements held by the user."
+          }
+        }
+      },
+      "Group": {
+        "type": "object",
+        "description": "Fields the connector decodes (`models.go` `Group`).",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Native ID. Account-group C1 IDs are composite; the native ID is what the API addresses."
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "description": "Member principal ID."
+                },
+                "display": {
+                  "type": "string"
+                },
+                "$ref": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "resourceType": {
+                "type": "string",
+                "description": "`Group` marks an account group (`IsAccountGroup`)."
+              }
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionValue"
+            },
+            "description": "Roles held by the group."
+          },
+          "entitlements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionValue"
+            },
+            "description": "Entitlements held by the group."
+          },
+          "schemas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ServicePrincipal": {
+        "type": "object",
+        "description": "Fields the connector decodes (`models.go` `ServicePrincipal`). Synced only as a principal; out of scope for the enable/disable actions.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "applicationId": {
+            "type": "string",
+            "description": "Application (client) ID; the rule-set principal is `servicePrincipals/{applicationId}`."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionValue"
+            },
+            "description": "Roles."
+          },
+          "entitlements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionValue"
+            },
+            "description": "Entitlements."
+          }
+        }
+      },
+      "UserList": {
+        "type": "object",
+        "properties": {
+          "Resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            }
+          },
+          "totalResults": {
+            "type": "integer"
+          }
+        }
+      },
+      "GroupList": {
+        "type": "object",
+        "properties": {
+          "Resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "totalResults": {
+            "type": "integer"
+          }
+        }
+      },
+      "ServicePrincipalList": {
+        "type": "object",
+        "properties": {
+          "Resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServicePrincipal"
+            }
+          },
+          "totalResults": {
+            "type": "integer"
+          }
+        }
+      },
+      "PatchRequest": {
+        "type": "object",
+        "properties": {
+          "schemas": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+              ]
+            }
+          },
+          "Operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PatchOperation"
+            }
+          }
+        }
+      },
+      "PatchOperation": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "add",
+              "remove",
+              "replace"
+            ],
+            "description": "Values per the vendor reference."
+          },
+          "path": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Operation value: a boolean for the `active` replace, an array of `{value}` members for `members`. `omitempty` in the Go struct, so absent on `remove`."
+          }
+        }
+      },
+      "CreateUserBody": {
+        "type": "object",
+        "description": "`CreateUserBody`. `active` and `userName`/`displayName`/`name` are always serialized; `id` is omitted when empty (reserved by the vendor).",
+        "properties": {
+          "userName": {
+            "type": "string",
+            "description": "The user's email."
+          },
+          "name": {
+            "type": "object",
+            "properties": {
+              "givenName": {
+                "type": "string"
+              },
+              "familyName": {
+                "type": "string"
+              }
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateUserResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CreateUserBody"
+          }
+        ],
+        "description": "Decoded into the same struct as the request."
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspace_name": {
+            "type": "string"
+          },
+          "workspace_status": {
+            "type": "string",
+            "enum": [
+              "NOT_PROVISIONED",
+              "PROVISIONING",
+              "RUNNING",
+              "FAILED",
+              "BANNED",
+              "CANCELLING"
+            ],
+            "description": "Enum per the vendor reference; the connector reads it as a string."
+          },
+          "deployment_name": {
+            "type": "string",
+            "description": "Vendor lowercases it; used for `--databricks-exclude-workspaces` matching."
+          }
+        }
+      },
+      "WorkspacePermission": {
+        "type": "string",
+        "enum": [
+          "UNKNOWN",
+          "USER",
+          "ADMIN"
+        ]
+      },
+      "WorkspaceAssignment": {
+        "type": "object",
+        "properties": {
+          "principal": {
+            "type": "object",
+            "properties": {
+              "principal_id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Numeric ID; matched against the C1 principal's native ID."
+              },
+              "user_name": {
+                "type": "string"
+              },
+              "group_name": {
+                "type": "string"
+              },
+              "service_principal_name": {
+                "type": "string"
+              }
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "UNKNOWN",
+                "USER",
+                "ADMIN"
+              ]
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "A non-empty value makes the connector refuse to write over the assignment."
+          }
+        }
+      },
+      "WorkspaceAssignmentList": {
+        "type": "object",
+        "properties": {
+          "permission_assignments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceAssignment"
+            }
+          }
+        }
+      },
+      "AssignableRoles": {
+        "type": "object",
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GrantRule": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "`users/{userName}`, `groups/{displayName}` or `servicePrincipals/{applicationId}`."
+            }
+          }
+        }
+      },
+      "RuleSetResponse": {
+        "type": "object",
+        "properties": {
+          "grant_rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantRule"
+            }
+          },
+          "etag": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateRuleSetBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "rule_set"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "rule_set": {
+            "type": "object",
+            "required": [
+              "name",
+              "etag"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "etag": {
+                "type": "string"
+              },
+              "grant_rules": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GrantRule"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "Best-effort error body: the connector reads `detail` and `message`. The body may be HTML, whitespace or empty (gateways, rate limiters); the client then keeps the HTTP status as the cause.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "HTTP error. The vendor documents no status codes for these endpoints; the connector handles any non-2xx.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          },
+          "text/html": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

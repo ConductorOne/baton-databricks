@@ -25,12 +25,14 @@ type recordedAction struct {
 }
 
 // patchTransport answers account user PATCHes with a fixed status and records
-// every request, so tests assert on what went over the wire.
+// every request, so tests assert on what went over the wire. An empty respBody is
+// answered with `{}`, except on 204 (and when emptyBody is set), which carry zero bytes.
 type patchTransport struct {
-	mu       sync.Mutex
-	status   int
-	respBody string
-	requests []recordedAction
+	mu        sync.Mutex
+	status    int
+	respBody  string
+	emptyBody bool
+	requests  []recordedAction
 }
 
 func (p *patchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -46,7 +48,7 @@ func (p *patchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	p.mu.Unlock()
 
 	respBody := p.respBody
-	if respBody == "" {
+	if respBody == "" && !p.emptyBody && p.status != http.StatusNoContent {
 		respBody = `{}`
 	}
 	return &http.Response{
@@ -130,11 +132,46 @@ func TestActionsAreIdempotent(t *testing.T) {
 	require.Equal(t, tr.requests[2].body, tr.requests[3].body)
 }
 
+// The API answers a successful PATCH with 204 and no bytes at all; the transport sends
+// exactly that by default for 204. An explicit `{}` 200 is covered too.
 func TestSetUserActiveAcceptsEmptyBody(t *testing.T) {
-	tr := &patchTransport{status: http.StatusNoContent}
-	d := newActionsConnector(t, tr)
-	_, _, err := d.enableUserHandler(context.Background(), userArgs(t, "42"))
-	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		tr   *patchTransport
+	}{
+		{"204 zero bytes", &patchTransport{status: http.StatusNoContent}},
+		{"200 zero bytes", &patchTransport{status: http.StatusOK, emptyBody: true}},
+		{"200 explicit {}", &patchTransport{status: http.StatusOK, respBody: `{}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newActionsConnector(t, tc.tr)
+			for name, h := range map[string]func(context.Context, *structpb.Struct) (*structpb.Struct, annotations.Annotations, error){
+				"disable": d.disableUserHandler, "enable": d.enableUserHandler,
+			} {
+				res, _, err := h(context.Background(), userArgs(t, "42"))
+				require.NoError(t, err, name)
+				require.True(t, res.GetFields()["success"].GetBoolValue(), name)
+			}
+			require.Len(t, tc.tr.requests, 2)
+		})
+	}
+}
+
+// A 204 mock must really carry zero bytes, or the tests above would not exercise the empty-body read.
+func TestPatchTransportEmptyBodyIsZeroBytes(t *testing.T) {
+	for _, tr := range []*patchTransport{
+		{status: http.StatusNoContent},
+		{status: http.StatusOK, emptyBody: true},
+	} {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPatch, "https://example.invalid/", nil)
+		require.NoError(t, err)
+		resp, err := tr.RoundTrip(req)
+		require.NoError(t, err)
+		raw, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Empty(t, raw)
+	}
 }
 
 func TestActionInputValidation(t *testing.T) {
@@ -218,5 +255,52 @@ func TestGlobalActionSchemas(t *testing.T) {
 		arg := tc.schema.GetArguments()[0]
 		require.Equal(t, "user_id", arg.GetName())
 		require.True(t, arg.GetIsRequired())
+	}
+}
+
+// Gateways answer errors with HTML, whitespace or nothing. The HTTP cause must survive:
+// gRPC code, *APIError with the status, and the rate-limit annotation.
+func TestActionErrorsWithNonJSONBody(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		respBody string
+		want     codes.Code
+		contains string
+	}{
+		{"403 html", http.StatusForbidden, "<html>denied</html>", codes.PermissionDenied, ""},
+		{"403 empty", http.StatusForbidden, "", codes.PermissionDenied, ""},
+		{"404 html", http.StatusNotFound, "<html>nope</html>", codes.NotFound, "user not found"},
+		{"429 whitespace", http.StatusTooManyRequests, " ", codes.Unavailable, ""},
+		{"429 empty", http.StatusTooManyRequests, "", codes.Unavailable, ""},
+		{"503 html", http.StatusServiceUnavailable, "<html>unavailable</html>", codes.Unavailable, ""},
+		{"503 empty", http.StatusServiceUnavailable, "", codes.Unavailable, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &patchTransport{status: tc.status, respBody: tc.respBody, emptyBody: tc.respBody == ""}
+			d := newActionsConnector(t, tr)
+
+			for name, h := range map[string]func(context.Context, *structpb.Struct) (*structpb.Struct, annotations.Annotations, error){
+				"disable": d.disableUserHandler, "enable": d.enableUserHandler,
+			} {
+				res, annos, err := h(context.Background(), userArgs(t, "42"))
+				require.Error(t, err, name)
+				require.Nil(t, res, name)
+				require.Equal(t, tc.want, status.Code(err), "%s: %v", name, err)
+				require.Contains(t, err.Error(), "42")
+				if tc.contains != "" {
+					require.Contains(t, err.Error(), tc.contains)
+				}
+				var apiErr *databricks.APIError
+				require.ErrorAs(t, err, &apiErr, name)
+				require.Equal(t, tc.status, apiErr.StatusCode, name)
+				require.NotContains(t, err.Error(), "failed to decode response body", name)
+
+				rl := &v2.RateLimitDescription{}
+				ok, aerr := annos.Pick(rl)
+				require.NoError(t, aerr)
+				require.True(t, ok, "%s: rate-limit annotation must be kept", name)
+			}
+		})
 	}
 }
