@@ -394,7 +394,7 @@ func (f *auditEventFeed) ListEvents(
 	principalTypes := principalTypeCache{}
 	for _, row := range rows {
 		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
-		if rowRateLimit != nil {
+		if hasRateLimitData(rowRateLimit) {
 			annos.WithRateLimiting(rowRateLimit)
 		}
 		// Unmappable rows come back as no error, so this is a real lookup failure. Transient
@@ -483,6 +483,12 @@ func (f *auditEventFeed) ListEvents(
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
 }
 
+// hasRateLimitData reports whether rl was parsed from rate-limit headers, so an empty one
+// doesn't overwrite a real one in the annotations.
+func hasRateLimitData(rl *v2.RateLimitDescription) bool {
+	return rl.GetLimit() > 0 || rl.GetRemaining() > 0 || rl.GetStatus() != v2.RateLimitDescription_STATUS_UNSPECIFIED
+}
+
 func isRetryableLookupError(err error) bool {
 	switch status.Code(err) {
 	case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded, codes.Internal, codes.Unknown, codes.Canceled:
@@ -562,6 +568,7 @@ func mapAuditRowToResource(
 	}
 
 	var affected []affectedResource
+	var rateLimit *v2.RateLimitDescription
 
 	switch {
 	case mapping.resourceType == workspaceResourceType:
@@ -576,8 +583,9 @@ func mapAuditRowToResource(
 		}
 
 		resourceType := mapping.resourceType
-		if mapping.resolvePrincipal && mapping.grant == nil {
-			resolved, rateLimit, err := resolvePrincipalType(ctx, client, principalTypes, nativeId, prefersServicePrincipal(row))
+		if mapping.resolvePrincipal {
+			resolved, rl, err := resolvePrincipalType(ctx, client, principalTypes, nativeId, prefersServicePrincipal(row))
+			rateLimit = rl
 			if err != nil {
 				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve principal for event %s: %w", row.EventID, err)
 			}
@@ -623,7 +631,7 @@ func mapAuditRowToResource(
 		}
 	}
 
-	return affected, nil, nil
+	return affected, rateLimit, nil
 }
 
 // buildAffectedGrant builds the entitlement (on entitlementResourceId/parent) and principal a
