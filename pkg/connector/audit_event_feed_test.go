@@ -514,6 +514,10 @@ func TestMapAuditRowToResource(t *testing.T) {
 			row:  auditLogRow{ActionName: "delete", ServiceName: "clusters"},
 		},
 		{
+			name: "principal delete is left to full sync",
+			row:  auditLogRow{ActionName: "delete", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "u-1"}},
+		},
+		{
 			name: "unresolvable workspace is skipped",
 			row: auditLogRow{
 				ActionName:    "add",
@@ -623,11 +627,6 @@ func TestMapAuditRowToResourceResolvesPrincipalType(t *testing.T) {
 			name: "add naming a group uses the full-sync group id", nativeId: "g-1", kind: "Groups",
 			row:  auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "g-1"}},
 			want: []want{{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent)}},
-		},
-		{
-			name: "delete of a principal that no longer exists falls back to user", nativeId: "gone-1", kind: "none",
-			row:  auditLogRow{ActionName: "delete", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "gone-1"}},
-			want: []want{{userResourceType.Id, "gone-1"}},
 		},
 		{
 			name: "setAdmin on an unknown principal still refreshes the role", nativeId: "gone-1", kind: "none",

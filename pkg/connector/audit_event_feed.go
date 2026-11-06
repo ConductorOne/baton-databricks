@@ -109,7 +109,8 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	// "add"/"delete" are the real principal-lifecycle events; deleteUser is a parameterless PII purge.
+	// "add" is the real principal-lifecycle event; deleteUser is a parameterless PII purge.
+	// "delete" isn't mapped: a deleted principal can't be fetched, so full sync handles it.
 	// Databricks logs service principal lifecycle and admin changes under these user action
 	// names with targetUserId, so the principal type is resolved when the row is mapped.
 	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
@@ -117,7 +118,6 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true,
 		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
 	},
-	{auditServiceAccounts, "delete"}:                       {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "activateUser"}:                 {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "deactivateUser"}:               {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
