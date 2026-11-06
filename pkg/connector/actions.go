@@ -9,6 +9,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/actions"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -108,7 +109,7 @@ func (d *Databricks) setUserActive(ctx context.Context, args *structpb.Struct, a
 // actionError keeps the gRPC code of err so a missing user (NotFound), missing permissions
 // (PermissionDenied/Unauthenticated), bad input (InvalidArgument) and transient failures
 // (Unavailable, retryable) stay distinguishable to the caller. Errors without a code are
-// returned wrapped and unchanged.
+// returned wrapped and unchanged. The cause stays in the chain so errors.As still reaches it.
 func actionError(verb, userID string, err error) error {
 	st, ok := status.FromError(err)
 	if !ok || st.Code() == codes.OK || st.Code() == codes.Unknown {
@@ -117,8 +118,8 @@ func actionError(verb, userID string, err error) error {
 
 	switch st.Code() {
 	case codes.NotFound:
-		return status.Errorf(codes.NotFound, "databricks-connector: %s user %s: user not found in the account: %v", verb, userID, err)
+		return uhttp.WrapErrors(codes.NotFound, fmt.Sprintf("databricks-connector: %s user %s: user not found in the account", verb, userID), err)
 	default:
-		return status.Errorf(st.Code(), "databricks-connector: %s user %s: %v", verb, userID, err)
+		return uhttp.WrapErrors(st.Code(), fmt.Sprintf("databricks-connector: %s user %s", verb, userID), err)
 	}
 }

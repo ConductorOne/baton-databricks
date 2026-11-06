@@ -194,6 +194,9 @@ func TestActionErrorsKeepTheirMeaning(t *testing.T) {
 				require.Equal(t, tc.want, status.Code(err), "%s: %v", name, err)
 				require.Contains(t, err.Error(), "databricks-connector:")
 				require.Contains(t, err.Error(), "42")
+				var apiErr *databricks.APIError
+				require.ErrorAs(t, err, &apiErr, "%s: the API error must stay reachable", name)
+				require.Equal(t, tc.status, apiErr.StatusCode, name)
 				if tc.contains != "" {
 					require.Contains(t, err.Error(), tc.contains)
 				}
