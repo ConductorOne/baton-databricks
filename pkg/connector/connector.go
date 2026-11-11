@@ -11,6 +11,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/field"
 )
 
 type Databricks struct {
@@ -147,9 +148,19 @@ func New(
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+	// The auth method decides which fields are required. Validating without it
+	// would check the default group against a configuration built for another.
+	authMethod := ""
+	if opts != nil {
+		authMethod = opts.SelectedAuthMethod
+	}
+	if err := field.Validate(config.Config, cfg, field.WithAuthMethod(authMethod)); err != nil {
+		return nil, nil, err
+	}
+
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(cfg)
+	auth := prepareClientAuth(cfg, authMethod)
 
 	cb, err := New(
 		ctx,
@@ -168,16 +179,27 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 	return cb, nil, nil
 }
 
-func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
+// prepareClientAuth follows the selected auth method, not whichever field
+// happens to be set: a token file left over from another deployment must not
+// silently replace the credential the operator chose.
+func prepareClientAuth(cfg *config.Databricks, authMethod string) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
-	databricksClientSecret := cfg.DatabricksClientSecret
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+
+	if authMethod == config.WorkloadIdentityFileAuthMethod {
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			accountHostname,
+			databricks.FileSubjectTokenSource{Path: cfg.DatabricksOidcTokenFile},
+		)
+	}
 
 	return databricks.NewOAuth2(
 		accountID,
 		databricksClientId,
-		databricksClientSecret,
+		cfg.DatabricksClientSecret,
 		accountHostname,
 	)
 }
