@@ -114,6 +114,7 @@ var catalogLevel = securableLevel{
 	trustRemedy:     catalogTrustRemedy,
 	permissionsName: catalogPermissionsName,
 	trusts:          catalogGrantsAreTrustworthy,
+	listProvesTrust: true,
 	goneErrorCodes:  []string{errorCodeCatalogGone},
 }
 
