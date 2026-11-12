@@ -69,6 +69,11 @@ type securableLevel struct {
 	// the securable. What proves that differs per level, so the rule travels
 	// with the level rather than being decided by the shared path.
 	trusts func(ctx context.Context, client *databricks.Client, trust securableTrust, annos *annotations.Annotations) (bool, error)
+
+	// listProvesTrust is true when List already refused every securable whose
+	// privilege list is partial, so Grants does not prove it again. False is
+	// the safe default: the check runs on the first page of Grants.
+	listProvesTrust bool
 }
 
 // securableTrust is what the per-level rules read to settle a privilege list:
@@ -151,9 +156,7 @@ func (o securableOps) syncGrants(
 
 	annos := annotations.Annotations{}
 	pageToken := attr.PageToken.Token
-	// List already refused a catalog or a metastore whose privilege list is
-	// partial, so Grants does not prove it again.
-	if pageToken == "" && level.securableType != databricks.SecurableMetastore && level.securableType != databricks.SecurableCatalog {
+	if pageToken == "" && !level.listProvesTrust {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, err
 		}

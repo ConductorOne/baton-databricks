@@ -90,6 +90,7 @@ var metastoreLevel = securableLevel{
 	trustRemedy:     "the connector's service principal must own the metastore or be assigned Admin directly on the workspace",
 	permissionsName: metastorePermissionsName,
 	trusts:          metastoreGrantsAreTrustworthy,
+	listProvesTrust: true,
 }
 
 // List emits each metastore with the workspace its permissions are read through.
