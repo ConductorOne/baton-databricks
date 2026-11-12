@@ -277,38 +277,6 @@ func TestAccountGroupMembershipGrantAlreadyMemberSkipsWrite(t *testing.T) {
 	}
 }
 
-// TestWorkspaceGroupMembershipGrantAlreadyMemberSkipsWrite is the workspace-scoped twin of the
-// account test above: an existing member is reported as GrantAlreadyExists without any write.
-func TestWorkspaceGroupMembershipGrantAlreadyMemberSkipsWrite(t *testing.T) {
-	srv := newFakeSCIMGroup(t, "/api/2.0/preview/scim/v2/Groups/g-target")
-	g := newGroupBuilderWithHandler(t, srv.handler)
-
-	annos, err := g.Grant(context.Background(), testUserPrincipal(t, "u-new"),
-		ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement))
-	if err != nil {
-		t.Fatalf("Grant returned error: %v", err)
-	}
-	if !annos.Contains(&v2.GrantAlreadyExists{}) {
-		t.Errorf("Grant annotations = %v, want GrantAlreadyExists", annos)
-	}
-	if len(srv.writes) != 0 || srv.puts != 0 {
-		t.Errorf("Grant wrote to the group (%d PATCH, %d PUT), want no write", len(srv.writes), srv.puts)
-	}
-}
-
-func testWorkspaceGroup(t *testing.T) *v2.Resource {
-	t.Helper()
-	parent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: testWorkspaceId}
-	r, err := groupResource(context.Background(), &databricks.Group{
-		BaseResponse: databricks.BaseResponse{ID: "g-target"},
-		DisplayName:  "Target Group",
-	}, parent, "")
-	if err != nil {
-		t.Fatalf("groupResource: %v", err)
-	}
-	return r
-}
-
 // TestWorkspaceGroupWritesArePatches covers the workspace-scoped paths: membership and workspace
 // entitlement writes send a single SCIM PATCH operation to the workspace API, never a PUT, and
 // leave the rest of the group as is.
@@ -322,32 +290,6 @@ func TestWorkspaceGroupWritesArePatches(t *testing.T) {
 		attribute string
 		want      []string
 	}{
-		{
-			name: "workspace group membership grant",
-			run: func(t *testing.T, srv *fakeSCIMGroup) error {
-				g := newGroupBuilderWithHandler(t, srv.handler)
-				_, err := g.Grant(context.Background(), testUserPrincipal(t, "u-added"),
-					ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement))
-				return err
-			},
-			wantOp:    databricks.PatchOperation{Op: "add", Path: "members", Value: []any{map[string]any{"value": "u-added"}}},
-			attribute: "members",
-			want:      []string{"existing-member-1", "u-new", "u-added"},
-		},
-		{
-			name: "workspace group membership revoke",
-			run: func(t *testing.T, srv *fakeSCIMGroup) error {
-				g := newGroupBuilderWithHandler(t, srv.handler)
-				_, err := g.Revoke(context.Background(), &v2.Grant{
-					Principal:   testUserPrincipal(t, "u-new"),
-					Entitlement: ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement),
-				})
-				return err
-			},
-			wantOp:    databricks.PatchOperation{Op: "remove", Path: `members[value eq "u-new"]`},
-			attribute: "members",
-			want:      []string{"existing-member-1"},
-		},
 		{
 			name: "workspace entitlement grant",
 			run: func(t *testing.T, srv *fakeSCIMGroup) error {
@@ -433,14 +375,16 @@ func TestGroupRevokeAbsentValueSkipsWrite(t *testing.T) {
 		run  func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error)
 	}{
 		{
-			name: "membership",
-			path: workspacePath,
+			// Workspace groups are refused before this path, so the account group is what
+			// still reaches the members check in Revoke.
+			name: "account membership",
+			path: accountPath,
 			run: func(t *testing.T, srv *fakeSCIMGroup) (annotations.Annotations, error) {
 				srv.state["members"] = []any{}
 				g := newGroupBuilderWithHandler(t, srv.handler)
 				return g.Revoke(context.Background(), &v2.Grant{
 					Principal:   testUserPrincipal(t, "u-absent"),
-					Entitlement: ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement),
+					Entitlement: testGroupMembershipEntitlement(t),
 				})
 			},
 		},
@@ -491,13 +435,6 @@ func TestGroupRevokeGroupNotFound(t *testing.T) {
 		wantErr     bool
 	}{
 		{name: "account level 404", entitlement: testGroupMembershipEntitlement, statusCode: http.StatusNotFound},
-		{
-			name: "workspace level 404",
-			entitlement: func(t *testing.T) *v2.Entitlement {
-				return ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement)
-			},
-			statusCode: http.StatusNotFound,
-		},
 		{name: "account level 500", entitlement: testGroupMembershipEntitlement, statusCode: http.StatusInternalServerError, wantErr: true},
 	}
 
@@ -639,10 +576,10 @@ func TestRoleGrantToGroup(t *testing.T) {
 // the cache after an earlier write would skip a needed write. A revoke followed by a grant of the
 // same member on one builder must send both PATCHes.
 func TestGroupWriteReadsSkipHTTPCache(t *testing.T) {
-	srv := newFakeSCIMGroup(t, "/api/2.0/preview/scim/v2/Groups/g-target")
+	srv := newFakeSCIMGroup(t, "/api/2.0/accounts/acc-1/scim/v2/Groups/g-target")
 	srv.echo = true
 	g := newGroupBuilderWithHandler(t, srv.handler)
-	entitlement := ent.NewAssignmentEntitlement(testWorkspaceGroup(t), groupMemberEntitlement)
+	entitlement := testGroupMembershipEntitlement(t)
 
 	if _, err := g.Revoke(context.Background(), &v2.Grant{Principal: testUserPrincipal(t, "u-new"), Entitlement: entitlement}); err != nil {
 		t.Fatalf("Revoke returned error: %v", err)

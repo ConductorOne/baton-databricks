@@ -11,7 +11,11 @@ import (
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/annotations"
+	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // workspaceScimServer serves one workspace's SCIM plane and the account plane beside it,
@@ -123,7 +127,10 @@ func (s *workspaceScimServer) handler(t *testing.T) http.HandlerFunc {
 				}
 			}
 		}
-		// A real workspace reports every group it has in totalResults, not the filtered count.
+		// The mock inflates the total so the test proves List never reads it as a page
+		// count. A real workspace reports the filtered count here: measured on the tenant,
+		// a 2-term "id eq" filter answers totalResults=2 and one that matches nothing
+		// answers 0, against 9 groups unfiltered.
 		encode(map[string]any{"totalResults": 40, "Resources": matched})
 	}
 }
@@ -156,7 +163,7 @@ func TestWorkspaceGroupListStopsAfterTheAdminsGroup(t *testing.T) {
 		t.Fatalf("resources = %v, want the one workspace-scoped admins group", resources)
 	}
 	if token := results.NextPageToken; token != "" {
-		t.Errorf("next page token = %q, want empty: totalResults counts every group, not the filtered one", token)
+		t.Errorf("next page token = %q, want empty: the admins group is the whole listing", token)
 	}
 }
 
@@ -342,6 +349,68 @@ func TestWorkspaceGroupGrantsResolveMembersInBatches(t *testing.T) {
 			}
 			if srv.accountReads != tt.wantReads {
 				t.Errorf("account reads = %d, want %d for %d members", srv.accountReads, tt.wantReads, len(tt.members))
+			}
+		})
+	}
+}
+
+// The account owns the membership of a workspace admins group, so the connector never writes
+// it: the grants say they are immutable, and both provisioning paths refuse before reaching
+// the API. A federated workspace answers the PATCH with 400, and a workspace without
+// federation would really remove the admin.
+func TestWorkspaceGroupMembershipIsReadOnly(t *testing.T) {
+	resource := testWorkspaceGroupResource(t)
+	entitlement := &v2.Entitlement{
+		Id:       ent.NewEntitlementID(resource, groupMemberEntitlement),
+		Resource: resource,
+		Slug:     groupMemberEntitlement,
+	}
+	principal := &v2.Resource{Id: &v2.ResourceId{ResourceType: userResourceType.Id, Resource: "100"}}
+
+	t.Run("the synced grants are immutable", func(t *testing.T) {
+		srv := &workspaceScimServer{
+			adminsMembers: []string{"Users/100", "ServicePrincipals/300"},
+			accountHolds:  map[string][]string{"Users": {"100"}, "ServicePrincipals": {"300"}},
+		}
+		client, _ := newWorkspaceRoutedClient(t, srv.handler(t))
+
+		grants, _, err := newGroupBuilder(client).Grants(context.Background(), resource, rs.SyncOpAttrs{})
+		if err != nil {
+			t.Fatalf("Grants: %v", err)
+		}
+		if len(grants) == 0 {
+			t.Fatal("Grants returned none, want the admins group members")
+		}
+		for _, g := range grants {
+			annos := annotations.Annotations(g.GetAnnotations())
+			if !annos.Contains(&v2.GrantImmutable{}) {
+				t.Errorf("grant on %s is not immutable", g.GetPrincipal().GetId().GetResource())
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		call func(*groupBuilder) error
+	}{
+		{"Grant", func(g *groupBuilder) error {
+			_, err := g.Grant(context.Background(), principal, entitlement)
+			return err
+		}},
+		{"Revoke", func(g *groupBuilder) error {
+			_, err := g.Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
+			return err
+		}},
+	} {
+		t.Run(tc.name+" refuses before any request", func(t *testing.T) {
+			client, _ := newWorkspaceRoutedClient(t, func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("%s reached the API: %s %s", tc.name, r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+
+			err := tc.call(newGroupBuilder(client))
+			if code := status.Code(err); code != codes.FailedPrecondition {
+				t.Fatalf("%s returned %v (code %s), want FailedPrecondition", tc.name, err, code)
 			}
 		})
 	}

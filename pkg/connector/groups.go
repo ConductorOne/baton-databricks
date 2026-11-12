@@ -17,6 +17,8 @@ import (
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -44,6 +46,11 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 // group in every workspace. The group is addressed by this name, not by an id,
 // so the listing filter and the alias check must agree on it.
 const workspaceAdminsGroupName = "admins"
+
+// workspaceMembershipReadOnly is what Grant and Revoke answer for a workspace group.
+// The account owns the membership, and the workspace SCIM API accepts the PATCH on its
+// admins group: it answers 200 and removes the admin for real, federated or not.
+const workspaceMembershipReadOnly = "databricks-connector: membership of a workspace admins group is read-only; manage it in Databricks"
 
 // groupResource builds a group resource. workspaceName qualifies the display name of a
 // workspace-scoped group: Databricks names the built-in group "admins" in every
@@ -157,7 +164,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	// The workspace listing is filtered to one group, so the total is not a page count.
+	// Under a workspace the listing is filtered to the one admins group, so there is no second page.
 	token := ""
 	if workspaceId == "" {
 		token = prepareNextToken(page, len(groups), total)
@@ -187,8 +194,9 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 		ent.WithDisplayName(fmt.Sprintf("%s %s", resource.DisplayName, groupMemberEntitlement)),
 		ent.WithDescription(fmt.Sprintf("%s %s in Databricks", resource.DisplayName, groupMemberEntitlement)),
 	}
-	// An identity-federated workspace rejects a membership PATCH with 400, so offering
-	// the entitlement as grantable would only produce failing requests.
+	// The workspace SCIM API accepts a membership PATCH on its admins group and removes
+	// the admin for real, so the entitlement is not offered as grantable. The account
+	// owns this membership.
 	if workspaceId == "" {
 		memberAssignmentOptions = append(memberAssignmentOptions,
 			ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType))
@@ -351,6 +359,9 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 					zap.String("member", member.Ref))
 				continue
 			}
+			// The entitlement is not offered as grantable, so the grant says so too and a
+			// reviewer is refused in ConductorOne instead of by a workspace PATCH.
+			anns = append(anns, &v2.GrantImmutable{})
 		}
 
 		switch memberType {
@@ -499,6 +510,10 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
+		if parentGroupId.GetResourceType() == workspaceResourceType.Id {
+			return nil, status.Error(codes.FailedPrecondition, workspaceMembershipReadOnly)
+		}
+
 		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
@@ -637,6 +652,10 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
+		if parentType == workspaceResourceType.Id {
+			return nil, status.Error(codes.FailedPrecondition, workspaceMembershipReadOnly)
+		}
+
 		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if isNotFoundError(err) {
 			// group not found (deleted, or not assigned to this workspace)
@@ -646,8 +665,8 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
-		// The workspace SCIM API answers 400 to a remove on an empty members attribute, so a
-		// principal that is not a member is left as is instead of being patched.
+		// Only account groups reach this far. A principal that is not a member is left as
+		// is instead of being patched, so a repeated revoke stays idempotent.
 		if !slices.ContainsFunc(group.Members, func(m databricks.Member) bool { return m.ID == principalId }) {
 			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 		}
