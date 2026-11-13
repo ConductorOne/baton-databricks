@@ -227,7 +227,8 @@ tree the connector syncs is:
 ```
 account
 ├── workspace
-│   └── role
+│   ├── role
+│   └── group (the built-in `admins` group only)
 ├── user
 ├── group
 ├── service principal
@@ -239,8 +240,13 @@ A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
 privilege held by a group is expandable, so ConductorOne resolves the group's
 members as holders.
 
-Metastore privileges held by the built-in workspace admins group are synced as
-read-only grants. Databricks does not allow granting them back after revocation.
+The built-in workspace admins group is synced under its workspace as
+`admins (<workspace name>)`, when metastores, groups and workspaces are all in the
+sync. Only the members the account holds are synced: a workspace-local identity has
+no account resource to point a grant at. Both the metastore privileges this group
+holds and its own membership are read-only, and a grant or revoke on either fails
+with a `FailedPrecondition` error. Databricks does not allow granting a metastore
+privilege back to this group after revocation.
 
 `MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
 metastore level.
@@ -252,13 +258,15 @@ owning the metastore or by holding Admin directly on that workspace. Grant and
 Revoke resolve the same route from the metastore id.
 
 A metastore syncs through a running workspace in scope. The sync fails, naming
-the metastore, while an attached workspace in scope is still provisioning, or
-while the metastore's workspace list cannot be read.
+the metastore and the workspace status, while an attached workspace in scope is
+not running — whether it is still provisioning or is being deleted — or while the
+metastore's workspace list cannot be read.
 
 ## Unity Catalog provisioning
 
 A metastore privilege can be granted to and revoked from a user, group or
-service principal. The `owner` entitlement is read-only: granting or revoking it
+service principal, except the built-in workspace admins group, whose privileges
+are read-only. The `owner` entitlement is read-only too: granting or revoking it
 fails with an `InvalidArgument` error.
 
 ## Unity Catalog permissions

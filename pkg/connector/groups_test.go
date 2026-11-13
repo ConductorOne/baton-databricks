@@ -40,7 +40,7 @@ func newGroupBuilderWithHandler(t *testing.T, handler http.HandlerFunc) *groupBu
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	return newGroupBuilder(c)
+	return newGroupBuilder(c, syncEverything)
 }
 
 func testTargetGroupResource(t *testing.T, nativeGroupID string) *v2.Resource {
@@ -433,7 +433,7 @@ func newTestGroupBuilder(t *testing.T, members *[]databricks.Member, ruleSetCall
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	return newGroupBuilder(c)
+	return newGroupBuilder(c, syncEverything)
 }
 
 func testAccountGroup(t *testing.T) *v2.Resource {

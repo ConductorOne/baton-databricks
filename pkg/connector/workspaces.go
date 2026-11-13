@@ -46,27 +46,23 @@ func workspaceResource(_ context.Context, workspace *databricks.Workspace, paren
 		"workspace_id": workspace.ID,
 	}
 
-	resource, err := rs.NewGroupResource(
+	annos := []protoreflect.ProtoMessage{
+		&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
+		&v2.RawId{Id: workspace.DeploymentName},
+	}
+	if syncAdmins {
+		annos = append(annos, &v2.ChildResourceType{ResourceTypeId: groupResourceType.Id})
+	}
+
+	return rs.NewGroupResource(
 		workspace.Name,
 		workspaceResourceType,
 		workspace.DeploymentName,
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(
-			&v2.ChildResourceType{ResourceTypeId: roleResourceType.Id},
-			&v2.RawId{Id: workspace.DeploymentName},
-		),
+		rs.WithAnnotation(annos...),
 	)
-
-	if err != nil {
-		return nil, err
-	}
-	if syncAdmins {
-		resource.Annotations = append(resource.Annotations, annotations.New(&v2.ChildResourceType{ResourceTypeId: groupResourceType.Id})...)
-	}
-
-	return resource, nil
 }
 
 // declaresAdmins reports whether this workspace offers its admins group as a child to

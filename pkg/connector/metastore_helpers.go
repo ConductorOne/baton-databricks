@@ -29,12 +29,9 @@ const (
 	workspacePermissionAdmin = "ADMIN"
 
 	// Statuses the account API documents for a workspace. PROVISIONING and
-	// NOT_PROVISIONED can still become RUNNING. CANCELLING is a workspace being
-	// deleted, so it will not, but it still holds its metastore in the sync:
-	// pruning the metastore while the deletion runs would report it to
-	// ConductorOne as gone and delete its grants, and the status settles on its
-	// own when the account stops listing the workspace. FAILED and BANNED are the
-	// terminal set.
+	// NOT_PROVISIONED can still become RUNNING; CANCELLING is a workspace being
+	// deleted, so it will not, but it still holds its metastore until the account
+	// stops listing it. FAILED and BANNED are the terminal set.
 	workspaceStatusRunning        = "RUNNING"
 	workspaceStatusProvisioning   = "PROVISIONING"
 	workspaceStatusNotProvisioned = "NOT_PROVISIONED"
@@ -273,9 +270,7 @@ var errMetastoreGone = errors.New("metastore is no longer on the account")
 // routeMetastore picks a workspace the connector can read every privilege through:
 // it owns the metastore, or it is a direct Admin there. A nil workspace with no error
 // means none is running and in scope, and the returned slice names the in-scope
-// workspaces that still hold the metastore, as "<deployment name> (<STATUS>)". It is
-// what the caller reports, so the operator reads the status rather than guessing at a
-// misconfiguration.
+// workspaces that still hold it, as "<deployment name> (<STATUS>)", for the caller to report.
 func (m *metastoreBuilder) routeMetastore(
 	ctx context.Context,
 	metastoreID, owner string,

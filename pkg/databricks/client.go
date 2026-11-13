@@ -629,6 +629,7 @@ func (c *Client) FindAccountHeldIDs(
 		vars := []Vars{
 			&PaginationVars{Count: uint(len(batch))},
 			NewFilterVars(scimIDFilter(batch)),
+			&AttrVars{Attrs: []string{"id"}},
 		}
 
 		var (

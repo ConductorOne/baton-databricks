@@ -28,6 +28,7 @@ const groupManagerEntitlement = "roles/group.manager"
 type groupBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	sync         syncPrincipals
 }
 
 func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -48,15 +49,13 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 const workspaceAdminsGroupName = "admins"
 
 // workspaceMembershipReadOnly is what Grant and Revoke answer for a workspace group.
-// The account owns the membership, and the workspace SCIM API accepts the PATCH on its
-// admins group: it answers 200 and removes the admin for real, federated or not.
+// The workspace SCIM API would accept the PATCH and remove the admin, so the refusal
+// has to come from here.
 const workspaceMembershipReadOnly = "databricks-connector: membership of a workspace admins group is read-only; manage it in Databricks"
 
-// groupResource builds a group resource. workspaceName qualifies the display name of a
-// workspace-scoped group: Databricks names the built-in group "admins" in every
-// workspace, so a metastore shared by several of them would otherwise list each holder
-// of the same privileges under one indistinguishable name. It is empty for an account
-// group. The unqualified name stays in the profile.
+// groupResource builds a group resource. workspaceName qualifies the display name as
+// "<group> (<workspace>)", because Databricks names the built-in group "admins" in every
+// workspace. It is empty for an account group, and the unqualified name stays in the profile.
 func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId, workspaceName string) (*v2.Resource, error) {
 	profile := map[string]any{
 		"display_name": group.DisplayName,
@@ -117,9 +116,7 @@ func (g *groupBuilder) workspaceDisplayName(ctx context.Context, deploymentName 
 
 // List returns groups as resource objects, with a GroupTrait because they are the
 // 'shape' of a standard group. Under the account it returns every group. Under a
-// workspace parent it returns only the built-in admins group, on a single page:
-// the other workspace-local groups are not synced, and the privileges this one
-// holds on a metastore are what the workspace parent exists for.
+// workspace parent it returns only the built-in admins group, on a single page.
 func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil {
 		return nil, nil, nil
@@ -194,9 +191,7 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 		ent.WithDisplayName(fmt.Sprintf("%s %s", resource.DisplayName, groupMemberEntitlement)),
 		ent.WithDescription(fmt.Sprintf("%s %s in Databricks", resource.DisplayName, groupMemberEntitlement)),
 	}
-	// The workspace SCIM API accepts a membership PATCH on its admins group and removes
-	// the admin for real, so the entitlement is not offered as grantable. The account
-	// owns this membership.
+	// Membership of a workspace admins group is read-only, so it is not grantable.
 	if workspaceId == "" {
 		memberAssignmentOptions = append(memberAssignmentOptions,
 			ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType))
@@ -242,9 +237,26 @@ func splitMemberRef(ref string) (string, string, error) {
 	return memberType, memberID, nil
 }
 
+// memberResourceType maps a SCIM member type to the resource type the connector emits for
+// it, or an empty string for a type the connector does not model.
+func memberResourceType(memberType string) string {
+	switch memberType {
+	case "Users":
+		return userResourceType.Id
+	case "Groups":
+		return groupResourceType.Id
+	case "ServicePrincipals":
+		return servicePrincipalResourceType.Id
+	default:
+		return ""
+	}
+}
+
 // accountHeld reports, per member type, which member ids the account holds. It resolves the
-// whole page in one request per type, and a member the account does not hold is absent.
+// whole page in one request per type, and a member the account does not hold is absent. A
+// member this sync cannot emit is left out without a request, so the caller skips it.
 func (g *groupBuilder) accountHeld(ctx context.Context, members []databricks.Member) (map[string]map[string]struct{}, *v2.RateLimitDescription, error) {
+	l := ctxzap.Extract(ctx)
 	idsByType := make(map[string][]string)
 	for _, member := range members {
 		memberType, memberID, err := splitMemberRef(member.Ref)
@@ -252,12 +264,16 @@ func (g *groupBuilder) accountHeld(ctx context.Context, members []databricks.Mem
 			return nil, nil, err
 		}
 
-		switch memberType {
-		case "Users", "Groups", "ServicePrincipals":
-			idsByType[memberType] = append(idsByType[memberType], memberID)
-		default:
-			return nil, nil, fmt.Errorf("databricks-connector: invalid member type: %s", memberType)
+		resourceType := memberResourceType(memberType)
+		if resourceType == "" || !emitPrincipal(g.sync, resourceType) {
+			l.Debug("databricks-connector: skipping a member this sync does not emit",
+				zap.String("member_type", memberType),
+				zap.String("member_id", memberID))
+
+			continue
 		}
+
+		idsByType[memberType] = append(idsByType[memberType], memberID)
 	}
 
 	held := make(map[string]map[string]struct{}, len(idsByType))
@@ -354,13 +370,12 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 
 		if isWorkspaceGroup {
 			if _, ok := held[memberType][memberID]; !ok {
-				l.Debug("databricks-connector: skipping a workspace-local member the account does not hold",
+				l.Debug("databricks-connector: skipping a workspace group member with no synced principal",
 					zap.String("group", resource.Id.Resource),
 					zap.String("member", member.Ref))
 				continue
 			}
-			// The entitlement is not offered as grantable, so the grant says so too and a
-			// reviewer is refused in ConductorOne instead of by a workspace PATCH.
+			// The entitlement is not grantable, so the grant says so too.
 			anns = append(anns, &v2.GrantImmutable{})
 		}
 
@@ -755,9 +770,10 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	return nil, nil
 }
 
-func newGroupBuilder(client *databricks.Client) *groupBuilder {
+func newGroupBuilder(client *databricks.Client, sync syncPrincipals) *groupBuilder {
 	return &groupBuilder{
 		client:       client,
 		resourceType: groupResourceType,
+		sync:         sync,
 	}
 }

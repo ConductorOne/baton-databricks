@@ -20,6 +20,9 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
+// syncEverything is the scope a deployment with metastores turned on runs with.
+var syncEverything = syncPrincipals{groups: true, servicePrincipals: true, workspaceGroups: true}
+
 // workspaceRouter dispatches on the deployment-name label of the request host,
 // the way Databricks routes an account whose workspaces sit on separate hosts.
 type workspaceRouter struct {

@@ -34,18 +34,20 @@ func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.Resou
 		d.willSyncResourceType(groupResourceType.Id) &&
 		d.willSyncResourceType(workspaceResourceType.Id)
 
+	principals := syncPrincipals{
+		groups:            d.willSyncResourceType(groupResourceType.Id),
+		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
+		workspaceGroups:   syncWorkspaceAdmins,
+	}
+
 	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
-		newGroupBuilder(d.client),
+		newGroupBuilder(d.client, principals),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
 		newWorkspaceBuilder(d.client, d.workspaces, syncWorkspaceAdmins),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.clientID, configuredWorkspaceSet(d.workspaces), syncPrincipals{
-			groups:            d.willSyncResourceType(groupResourceType.Id),
-			servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
-			workspaceGroups:   syncWorkspaceAdmins,
-		}),
+		newMetastoreBuilder(d.client, d.clientID, configuredWorkspaceSet(d.workspaces), principals),
 	}
 }
 
