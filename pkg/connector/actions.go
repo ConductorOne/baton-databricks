@@ -65,14 +65,6 @@ func (d *Databricks) GlobalActions(ctx context.Context, registry actions.ActionR
 	return nil
 }
 
-func successStruct() *structpb.Struct {
-	return &structpb.Struct{
-		Fields: map[string]*structpb.Value{
-			retSuccessKey: {Kind: &structpb.Value_BoolValue{BoolValue: true}},
-		},
-	}
-}
-
 func (d *Databricks) disableUserHandler(ctx context.Context, args *structpb.Struct) (*structpb.Struct, annotations.Annotations, error) {
 	return d.setUserActive(ctx, args, false)
 }
@@ -91,7 +83,7 @@ func (d *Databricks) setUserActive(ctx context.Context, args *structpb.Struct, a
 
 	userID, err := actions.RequireStringArg(args, argUserIDKey)
 	if err != nil {
-		return nil, nil, status.Errorf(codes.InvalidArgument, "databricks-connector: %s user: %s: %v", verb, argUserIDKey, err)
+		return nil, nil, uhttp.WrapErrors(codes.InvalidArgument, fmt.Sprintf("databricks-connector: %s user: invalid %s", verb, argUserIDKey), err)
 	}
 
 	rl, err := d.client.SetUserActive(ctx, userID, active)
@@ -103,10 +95,10 @@ func (d *Databricks) setUserActive(ctx context.Context, args *structpb.Struct, a
 		return nil, annos, actionError(verb, userID, err)
 	}
 
-	return successStruct(), annos, nil
+	return actions.NewReturnValues(true), annos, nil
 }
 
-// actionError keeps the gRPC code of err so a missing user (NotFound), missing permissions
+// actionError keeps the gRPC code of err so not-found (NotFound), missing permissions
 // (PermissionDenied/Unauthenticated), bad input (InvalidArgument) and transient failures
 // (Unavailable, retryable) stay distinguishable to the caller. Errors without a code are
 // returned wrapped and unchanged. The cause stays in the chain so errors.As still reaches it.
@@ -118,7 +110,9 @@ func actionError(verb, userID string, err error) error {
 
 	switch st.Code() {
 	case codes.NotFound:
-		return uhttp.WrapErrors(codes.NotFound, fmt.Sprintf("databricks-connector: %s user %s: user not found in the account", verb, userID), err)
+		// A 404 can mean a missing user, a wrong account ID or a missing route
+		// (ENDPOINT_NOT_FOUND), so the message doesn't pick one.
+		return uhttp.WrapErrors(codes.NotFound, fmt.Sprintf("databricks-connector: %s user %s: not found: the user, the account, or the API endpoint", verb, userID), err)
 	default:
 		return uhttp.WrapErrors(st.Code(), fmt.Sprintf("databricks-connector: %s user %s", verb, userID), err)
 	}

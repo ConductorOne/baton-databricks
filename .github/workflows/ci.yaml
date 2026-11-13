@@ -34,16 +34,41 @@ jobs:
           baton-entitlement: 'group:account/8c6f99ec-78ce-4654-8f92-e716b3dd67a7/group/66271399072731:member'
           baton-principal: '5346803201281760'
           baton-principal-type: 'user'
-      # Runs only when repo variable TEST_ACTION_USER_ID names a dedicated, active QA account user
-      # (numeric SCIM user ID). Disable then enable, twice each, so the user ends active and
-      # the second call of each action exercises idempotency.
-      - name: Test enable_user/disable_user actions
+      # Account status lifecycle steps run only when repo variable TEST_ACTION_USER_ID names a
+      # dedicated, active QA account user (numeric SCIM user ID, the user resource ID).
+      # The shared action re-syncs and asserts the user's status after each action. It runs
+      # after a plain disable_user call, so its own disable hits an already-disabled user, and
+      # a final enable_user call hits an already-active user: both idempotent paths must succeed.
+      # Databricks reads can return the previous active value for a few minutes after a write,
+      # so the shared action waits before each verifying sync.
+      - name: Disable QA user
         if: ${{ vars.TEST_ACTION_USER_ID != '' }}
         env:
           TEST_ACTION_USER_ID: ${{ vars.TEST_ACTION_USER_ID }}
         run: |
-          set -euo pipefail
-          trap './baton-databricks --invoke-action=enable_user --invoke-action-args="{\"user_id\":\"${TEST_ACTION_USER_ID}\"}"' EXIT
-          for action in disable_user disable_user enable_user enable_user; do
-            ./baton-databricks --invoke-action="${action}" --invoke-action-args="{\"user_id\":\"${TEST_ACTION_USER_ID}\"}"
-          done
+          ./baton-databricks --invoke-action=disable_user \
+            --invoke-action-args="$(jq -nc --arg id "${TEST_ACTION_USER_ID}" '{user_id: $id}')"
+      - name: Account status lifecycle test
+        if: ${{ vars.TEST_ACTION_USER_ID != '' }}
+        uses: ConductorOne/github-workflows/actions/account-status-lifecycle-test@v4
+        with:
+          connector: ./baton-databricks
+          account-id: ${{ vars.TEST_ACTION_USER_ID }}
+          test-flow: disable-enable
+          sleep: 180
+      - name: Enable QA user again
+        if: ${{ vars.TEST_ACTION_USER_ID != '' }}
+        env:
+          TEST_ACTION_USER_ID: ${{ vars.TEST_ACTION_USER_ID }}
+        run: |
+          ./baton-databricks --invoke-action=enable_user \
+            --invoke-action-args="$(jq -nc --arg id "${TEST_ACTION_USER_ID}" '{user_id: $id}')"
+      # If any earlier step fails or the run is cancelled, re-enable the QA user so it never
+      # stays disabled. enable_user is idempotent, so this is safe when the user is already active.
+      - name: Restore QA user to active
+        if: ${{ (failure() || cancelled()) && vars.TEST_ACTION_USER_ID != '' }}
+        env:
+          TEST_ACTION_USER_ID: ${{ vars.TEST_ACTION_USER_ID }}
+        run: |
+          ./baton-databricks --invoke-action=enable_user \
+            --invoke-action-args="$(jq -nc --arg id "${TEST_ACTION_USER_ID}" '{user_id: $id}')"

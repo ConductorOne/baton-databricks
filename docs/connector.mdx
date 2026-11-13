@@ -25,6 +25,8 @@ Workspace roles (such as **workspace-access** or **databricks-sql-access**) can 
 Revoking the workspace **member** entitlement removes the principal's entire workspace assignment. If the principal is also a workspace admin, their admin access to that workspace is removed too. This also applies to groups: revoking the workspace **member** entitlement from a group removes the group's entire workspace assignment, including admin access if the group is a workspace admin (its members lose it).
 </Note>
 
+[This connector syncs non-human identities](/product/admin/nhi) and displays them on the **Identities overview** dashboard.
+
 ### Connector actions
 
 Connector actions are custom capabilities that extend C1 automations with app-specific operations.
@@ -39,10 +41,8 @@ Connector actions are custom capabilities that extend C1 automations with app-sp
 | `disable_user` | `user_id` (string, required) | Deactivates a Databricks account user. |
 
 <Note>
-These actions act on the account-level user, so disabling a user blocks them in the Databricks account and in every workspace. Only the user's active status changes; their permissions and memberships are kept, and an enabled user regains the same access. Running an action on a user who is already in the target state succeeds. Service principals and workspace-level users are not supported, and C1 provisioning never re-enables an inactive account on its own.
+These actions act on the account-level user, so disabling a user blocks them in the Databricks account and in every workspace. Only the user's active status changes: their permissions and memberships are kept, so enabling the user restores the same access. Running an action on a user who is already in the target state succeeds. Account provisioning doesn't reactivate an inactive user; run `enable_user` instead.
 </Note>
-
-[This connector syncs non-human identities](/product/admin/nhi) and displays them on the **Identities overview** dashboard.
 
 ## Authentication methods
 

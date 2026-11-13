@@ -11,6 +11,7 @@ import (
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"github.com/conductorone/baton-sdk/pkg/actions"
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -96,7 +97,11 @@ func TestSetUserActivePatchesOnlyActive(t *testing.T) {
 
 			res, _, err := tc.handler(d)(context.Background(), userArgs(t, "76832170785741"))
 			require.NoError(t, err)
-			require.True(t, res.GetFields()["success"].GetBoolValue())
+			// The return value matches the declared ReturnTypes: exactly one bool field, success=true.
+			require.Len(t, res.GetFields(), 1)
+			require.True(t, res.GetFields()[retSuccessKey].GetBoolValue())
+			_, isBool := res.GetFields()[retSuccessKey].GetKind().(*structpb.Value_BoolValue)
+			require.True(t, isBool)
 
 			// Exactly one request: a PATCH, never a PUT/GET that could rewrite other attributes.
 			require.Len(t, tr.requests, 1)
@@ -189,6 +194,11 @@ func TestActionInputValidation(t *testing.T) {
 		{"compound id", userArgs(t, "account/acct-1/user/42")},
 		{"path traversal", userArgs(t, "42/../../Groups/7")},
 		{"encoded slash", userArgs(t, "42%2F..")},
+		{"plus sign", userArgs(t, "+42")},
+		{"negative", userArgs(t, "-1")},
+		{"leading space", userArgs(t, " 42")},
+		{"trailing space", userArgs(t, "42 ")},
+		{"unicode digits", userArgs(t, "٤٢")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := &patchTransport{status: http.StatusOK}
@@ -204,6 +214,62 @@ func TestActionInputValidation(t *testing.T) {
 	}
 }
 
+// A malformed user ID gets a user-oriented message, not the group-oriented one used
+// for other principals.
+func TestActionRejectsNonDigitUserIDWithUserMessage(t *testing.T) {
+	for _, id := range []string{"+42", "-1", "abc"} {
+		tr := &patchTransport{status: http.StatusOK}
+		d := newActionsConnector(t, tr)
+
+		_, _, err := d.disableUserHandler(context.Background(), userArgs(t, id))
+		require.Error(t, err, id)
+		require.Equal(t, codes.InvalidArgument, status.Code(err), id)
+		require.Contains(t, err.Error(), "user ID must contain only digits", id)
+		require.NotContains(t, err.Error(), "compound group", id)
+		require.Empty(t, tr.requests, id)
+	}
+}
+
+// hasCause reports whether an error with message msg appears below the top of err's unwrap tree.
+func hasCause(err error, msg string) bool {
+	var children []error
+	// The SDK's cause is a plain fmt.Errorf with no type or sentinel for errors.Is/As to
+	// match, so the tree is walked by hand.
+	switch u := err.(type) { //nolint:errorlint // deliberate manual unwrap walk, see above
+	case interface{ Unwrap() []error }:
+		children = u.Unwrap()
+	case interface{ Unwrap() error }:
+		children = []error{u.Unwrap()}
+	}
+	for _, c := range children {
+		if c != nil && (c.Error() == msg || hasCause(c, msg)) {
+			return true
+		}
+	}
+	return false
+}
+
+// A missing or invalid argument keeps the SDK's error in the chain, not just its text.
+func TestActionArgErrorKeepsCause(t *testing.T) {
+	args := &structpb.Struct{Fields: map[string]*structpb.Value{}}
+	_, cause := actions.RequireStringArg(args, "user_id")
+	require.Error(t, cause)
+
+	tr := &patchTransport{status: http.StatusOK}
+	d := newActionsConnector(t, tr)
+	for _, h := range []func(context.Context, *structpb.Struct) (*structpb.Struct, annotations.Annotations, error){d.disableUserHandler, d.enableUserHandler} {
+		_, _, err := h(context.Background(), args)
+		require.Error(t, err)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+		require.Contains(t, err.Error(), "databricks-connector:")
+		require.True(t, hasCause(err, cause.Error()), "cause must stay in the chain: %v", err)
+	}
+	require.Empty(t, tr.requests)
+}
+
+// notFoundMsg is the neutral context added to any 404 from the PATCH.
+const notFoundMsg = "not found: the user, the account, or the API endpoint"
+
 func TestActionErrorsKeepTheirMeaning(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -212,7 +278,8 @@ func TestActionErrorsKeepTheirMeaning(t *testing.T) {
 		want     codes.Code
 		contains string
 	}{
-		{"missing user", http.StatusNotFound, `{"detail":"User with id 42 does not exist.","status":"404"}`, codes.NotFound, "user not found"},
+		{"missing user", http.StatusNotFound, `{"detail":"User with id 42 does not exist.","status":"404"}`, codes.NotFound, notFoundMsg},
+		{"route-level 404", http.StatusNotFound, `{"error_code":"ENDPOINT_NOT_FOUND","message":"No API found for 'PATCH /accounts/acct-1/scim/v2/Users/42'"}`, codes.NotFound, notFoundMsg},
 		{"forbidden", http.StatusForbidden, `{"message":"not an account admin"}`, codes.PermissionDenied, ""},
 		{"unauthorized", http.StatusUnauthorized, `{"message":"invalid token"}`, codes.Unauthenticated, ""},
 		{"rate limited", http.StatusTooManyRequests, `{"message":"slow down"}`, codes.Unavailable, ""},
@@ -237,6 +304,8 @@ func TestActionErrorsKeepTheirMeaning(t *testing.T) {
 				if tc.contains != "" {
 					require.Contains(t, err.Error(), tc.contains)
 				}
+				// A 404 may come from a wrong account ID or a missing route, not only a missing user.
+				require.NotContains(t, err.Error(), "user not found", name)
 			}
 		})
 	}
@@ -270,7 +339,7 @@ func TestActionErrorsWithNonJSONBody(t *testing.T) {
 	}{
 		{"403 html", http.StatusForbidden, "<html>denied</html>", codes.PermissionDenied, ""},
 		{"403 empty", http.StatusForbidden, "", codes.PermissionDenied, ""},
-		{"404 html", http.StatusNotFound, "<html>nope</html>", codes.NotFound, "user not found"},
+		{"404 html", http.StatusNotFound, "<html>nope</html>", codes.NotFound, notFoundMsg},
 		{"429 whitespace", http.StatusTooManyRequests, " ", codes.Unavailable, ""},
 		{"429 empty", http.StatusTooManyRequests, "", codes.Unavailable, ""},
 		{"503 html", http.StatusServiceUnavailable, "<html>unavailable</html>", codes.Unavailable, ""},
@@ -291,6 +360,8 @@ func TestActionErrorsWithNonJSONBody(t *testing.T) {
 				if tc.contains != "" {
 					require.Contains(t, err.Error(), tc.contains)
 				}
+				// A 404 may come from a wrong account ID or a missing route, not only a missing user.
+				require.NotContains(t, err.Error(), "user not found", name)
 				var apiErr *databricks.APIError
 				require.ErrorAs(t, err, &apiErr, name)
 				require.Equal(t, tc.status, apiErr.StatusCode, name)

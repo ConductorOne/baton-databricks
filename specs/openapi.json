@@ -3,7 +3,7 @@
   "info": {
     "title": "baton-databricks connector API surface",
     "version": "1.0.0",
-    "description": "The Databricks endpoints called by baton-databricks (`pkg/databricks`), not the whole Databricks API. Scope comes from client code; types, formats and enums come from the vendor reference (see the PR provenance table). Fields are optional unless the vendor documents them as required.\n\nNot expressible here: the connector retries nothing itself and relies on the SDK's uhttp wrapper; HTTP errors map to gRPC codes (404 NotFound, 403 PermissionDenied, 401 Unauthenticated, 429/5xx Unavailable) and are wrapped in `APIError{StatusCode, Detail, Message}`; list pagination is `startIndex`/`count` terminated by a short page; rule-set etags are cached per client.",
+    "description": "The Databricks endpoints called by baton-databricks (`pkg/databricks`), not the whole Databricks API. Scope comes from client code; types, formats and enums come from the vendor reference (each operation's `externalDocs` links the Databricks reference page; `x-source.client` names the `pkg/databricks` functions that call it). Fields are optional unless the vendor documents them as required.\n\nNot expressible here: the connector retries nothing itself and relies on the SDK's uhttp wrapper; HTTP errors map to gRPC codes (404 NotFound, 403 PermissionDenied, 401 Unauthenticated, 429/5xx Unavailable) and are wrapped in `APIError{StatusCode, Detail, Message}`; list pagination is `startIndex`/`count` terminated by a short page; rule-set etags are cached per client.",
     "license": {
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
@@ -56,7 +56,16 @@
       "post": {
         "operationId": "getOAuthToken",
         "summary": "OAuth2 client-credentials token",
-        "description": "Not called by connector code directly: the oauth2 transport requests and refreshes the token. Client ID and secret are sent as HTTP Basic or form credentials by the oauth2 library.\n\nClient: `pkg/databricks/auth.go:35 (clientcredentials.Config.TokenURL)`.",
+        "description": "Not called by connector code directly: the oauth2 transport requests and refreshes the token. Client ID and secret are sent as HTTP Basic or form credentials by the oauth2 library.",
+        "externalDocs": {
+          "description": "Databricks OAuth M2M guide (account-level token endpoint)",
+          "url": "https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m"
+        },
+        "x-source": {
+          "client": [
+            "NewOAuth2 (clientcredentials.Config.TokenURL)"
+          ]
+        },
         "tags": [
           "auth"
         ],
@@ -128,7 +137,16 @@
       "get": {
         "operationId": "listAccountUsers",
         "summary": "List account users",
-        "description": "Paginated with `startIndex`/`count`; the connector advances `startIndex` and stops on a short or empty page (`ResourcesPageSize`).\n\nClient: `pkg/databricks/client.go:178,196`.",
+        "description": "Paginated with `startIndex`/`count`; the connector advances `startIndex` and stops on a short or empty page (`ResourcesPageSize`).",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/list-account-users"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListUsers"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -151,7 +169,7 @@
             "required": false,
             "style": "form",
             "explode": true,
-            "description": "Attributes to return, sent once per value. Hardcoded by the connector: users sync (`pkg/connector/users.go:109`) sends `id,emails,userName,displayName,active`; the role sync (`roles.go:181`) sends `roles,entitlements`; lookups (`FindUserID` etc.) pass `count=1` and a `userName eq '<name>'` filter.",
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: users sync (`userBuilder.List`) sends `id,emails,userName,displayName,active`; the role sync (`roleBuilder.Grants`) sends `roles,entitlements`; lookups (`FindUserID` etc.) pass `count=1` and a `userName eq '<name>'` filter.",
             "schema": {
               "type": "array",
               "items": {
@@ -189,7 +207,16 @@
       "post": {
         "operationId": "createAccountUser",
         "summary": "Create an account user",
-        "description": "Used by CreateAccount. A 409 means the user already exists.\n\nClient: `pkg/databricks/client.go:960,977`.",
+        "description": "Used by CreateAccount. A 409 means the user already exists.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/create-account-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.CreateUser"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -232,7 +259,15 @@
       "get": {
         "operationId": "getAccountUser",
         "summary": "Get an account user",
-        "description": "Client: `pkg/databricks/client.go:204,221`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/get-account-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.GetUser"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -266,7 +301,15 @@
       "put": {
         "operationId": "updateAccountUser",
         "summary": "Replace an account user",
-        "description": "Client: `pkg/databricks/client.go:229,237`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/update-account-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.UpdateUser"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -287,7 +330,7 @@
               }
             }
           },
-          "description": "Whole-object replace, built by the role Grant/Revoke read-modify-write (`pkg/connector/roles.go:335,419`). `active` is `omitempty` in the Go struct, so `active:false` is not serialized."
+          "description": "Whole-object replace, built by the role Grant/Revoke read-modify-write (`roleBuilder.Grant` / `roleBuilder.Revoke`). `active` is `omitempty` in the Go struct, so `active:false` is not serialized."
         },
         "responses": {
           "200": {
@@ -315,7 +358,16 @@
       "patch": {
         "operationId": "patchAccountUser",
         "summary": "Patch an account user (enable/disable)",
-        "description": "Backs the `enable_user` / `disable_user` actions (`pkg/connector/actions.go`). Idempotent; no preflight GET.\n\nClient: `pkg/databricks/client.go:248,259`.",
+        "description": "Backs the `enable_user` / `disable_user` actions (`Databricks.setUserActive` in `pkg/connector`). Idempotent; no preflight GET.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/patch-account-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.SetUserActive"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -364,7 +416,15 @@
       "delete": {
         "operationId": "deleteAccountUser",
         "summary": "Delete an account user",
-        "description": "Client: `pkg/databricks/client.go:985,1000`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/delete-account-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.DeleteUser"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -404,7 +464,15 @@
       "get": {
         "operationId": "listAccountGroups",
         "summary": "List account groups",
-        "description": "Client: `pkg/databricks/client.go:344,362`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/list-account-groups"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListGroups"
+          ]
+        },
         "tags": [
           "groups"
         ],
@@ -427,7 +495,7 @@
             "required": false,
             "style": "form",
             "explode": true,
-            "description": "Attributes to return, sent once per value. Hardcoded by the connector: groups sync (`groups.go:97`) sends `id,displayName`; the role sync sends `roles,entitlements,meta`.",
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: groups sync (`groupBuilder.List`) sends `id,displayName`; the role sync sends `roles,entitlements,meta`.",
             "schema": {
               "type": "array",
               "items": {
@@ -464,7 +532,16 @@
       "get": {
         "operationId": "getAccountGroup",
         "summary": "Get an account group",
-        "description": "Client: `pkg/databricks/client.go:388,400`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/get-account-group"
+        },
+        "x-source": {
+          "client": [
+            "Client.GetGroup",
+            "Client.GetGroupNoCache"
+          ]
+        },
         "tags": [
           "groups"
         ],
@@ -517,7 +594,15 @@
       "patch": {
         "operationId": "patchAccountGroup",
         "summary": "Patch an account group",
-        "description": "Client: `pkg/databricks/client.go:416,429`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/patch-account-group"
+        },
+        "x-source": {
+          "client": [
+            "Client.PatchGroup"
+          ]
+        },
         "tags": [
           "groups"
         ],
@@ -568,7 +653,15 @@
       "get": {
         "operationId": "listAccountServicePrincipals",
         "summary": "List account service principals",
-        "description": "Client: `pkg/databricks/client.go:486,504`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/list-account-service-principals"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListServicePrincipals"
+          ]
+        },
         "tags": [
           "service-principals"
         ],
@@ -591,7 +684,7 @@
             "required": false,
             "style": "form",
             "explode": true,
-            "description": "Attributes to return, sent once per value. Hardcoded by the connector: service principal sync (`service-principals.go:87`) sends `id,displayName,active,applicationId`; the role sync sends `roles,entitlements`.",
+            "description": "Attributes to return, sent once per value. Hardcoded by the connector: service principal sync (`servicePrincipalBuilder.List`) sends `id,displayName,active,applicationId`; the role sync sends `roles,entitlements`.",
             "schema": {
               "type": "array",
               "items": {
@@ -630,7 +723,15 @@
       "get": {
         "operationId": "getAccountServicePrincipal",
         "summary": "Get an account service principal",
-        "description": "Client: `pkg/databricks/client.go:512,529`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/get-account-service-principal"
+        },
+        "x-source": {
+          "client": [
+            "Client.GetServicePrincipal"
+          ]
+        },
         "tags": [
           "service-principals"
         ],
@@ -664,7 +765,15 @@
       "put": {
         "operationId": "updateAccountServicePrincipal",
         "summary": "Replace an account service principal",
-        "description": "Client: `pkg/databricks/client.go:533,547`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/update-account-service-principal"
+        },
+        "x-source": {
+          "client": [
+            "Client.UpdateServicePrincipal"
+          ]
+        },
         "tags": [
           "service-principals"
         ],
@@ -685,7 +794,7 @@
               }
             }
           },
-          "description": "Whole-object replace from role Grant/Revoke (`roles.go:369,460`)."
+          "description": "Whole-object replace from role Grant/Revoke (`roleBuilder.Grant` / `roleBuilder.Revoke`)."
         },
         "responses": {
           "200": {
@@ -715,7 +824,16 @@
       "get": {
         "operationId": "listAccountAssignableRoles",
         "summary": "List roles assignable on a resource",
-        "description": "Also the Validate probe (`pkg/connector/connector.go:108`). Public Preview API.\n\nClient: `pkg/databricks/client.go:604,630`.",
+        "description": "Also the Validate probe (`Databricks.Validate`). Public Preview API.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/list-assignable-roles-for-resource"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListRoles"
+          ]
+        },
         "tags": [
           "access-control"
         ],
@@ -757,7 +875,16 @@
       "get": {
         "operationId": "getAccountRuleSet",
         "summary": "Get a rule set",
-        "description": "Public Preview API.\n\nClient: `pkg/databricks/client.go:863,889`.",
+        "description": "Public Preview API.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/get-rule-set"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListRuleSets"
+          ]
+        },
         "tags": [
           "access-control"
         ],
@@ -806,7 +933,16 @@
       "put": {
         "operationId": "updateAccountRuleSet",
         "summary": "Update a rule set",
-        "description": "Read-modify-write: the etag from the previous GET is sent back (a stale etag is rejected by the API). Public Preview API.\n\nClient: `pkg/databricks/client.go:899,939`.",
+        "description": "Read-modify-write: the etag from the previous GET is sent back (a stale etag is rejected by the API). Public Preview API.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/update-rule-set"
+        },
+        "x-source": {
+          "client": [
+            "Client.UpdateRuleSets"
+          ]
+        },
         "tags": [
           "access-control"
         ],
@@ -870,7 +1006,16 @@
       "get": {
         "operationId": "listAccountWorkspaces",
         "summary": "List account workspaces",
-        "description": "Also called by Validate (`connector.go:115`). The connector drops workspaces matched by `--databricks-exclude-workspaces` after the response.\n\nClient: `pkg/databricks/client.go:640,650`.",
+        "description": "Also called by Validate (`Databricks.Validate`). The connector drops workspaces matched by `--databricks-exclude-workspaces` after the response.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/workspaces/v1/list-workspaces-public"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListWorkspaces"
+          ]
+        },
         "tags": [
           "workspaces"
         ],
@@ -906,7 +1051,17 @@
       "get": {
         "operationId": "listWorkspacePermissionAssignments",
         "summary": "List a workspace's permission assignments",
-        "description": "Unpaginated. Called cached for sync and uncached (`WithNoCache`) as the read-before-write of Grant/Revoke.\n\nClient: `pkg/databricks/client.go:698,711`.",
+        "description": "Unpaginated. Called cached for sync and uncached (`WithNoCache`) as the read-before-write of Grant/Revoke.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/list-workspace-permission-assignments"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListWorkspaceMembers",
+            "Client.currentWorkspacePermissions"
+          ]
+        },
         "tags": [
           "workspaces"
         ],
@@ -942,7 +1097,16 @@
       "put": {
         "operationId": "updateWorkspacePermissionAssignment",
         "summary": "Set a principal's workspace permissions",
-        "description": "`principal_id` must be numeric (`validatePrincipalID`).\n\nClient: `pkg/databricks/client.go:751,775`.",
+        "description": "`principal_id` must be numeric (`validatePrincipalID`).",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/update-workspace-permission-assignment"
+        },
+        "x-source": {
+          "client": [
+            "Client.AddWorkspaceMember"
+          ]
+        },
         "tags": [
           "workspaces"
         ],
@@ -1001,7 +1165,16 @@
       "delete": {
         "operationId": "deleteWorkspacePermissionAssignment",
         "summary": "Remove a principal's workspace assignment",
-        "description": "A 404 here is treated as already revoked. `principal_id` must be numeric.\n\nClient: `pkg/databricks/client.go:789,807`.",
+        "description": "A 404 here is treated as already revoked. `principal_id` must be numeric.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/delete-workspace-permission-assignment"
+        },
+        "x-source": {
+          "client": [
+            "Client.RemoveWorkspaceMember"
+          ]
+        },
         "tags": [
           "workspaces"
         ],
@@ -1044,7 +1217,15 @@
       "get": {
         "operationId": "listWorkspaceUsers",
         "summary": "List workspace users",
-        "description": "Client: `pkg/databricks/client.go:178,196`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/list-users"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListUsers"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -1120,7 +1301,15 @@
       "get": {
         "operationId": "getWorkspaceUser",
         "summary": "Get a workspace user",
-        "description": "Client: `pkg/databricks/client.go:204,217`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/get-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.GetUser"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -1151,7 +1340,15 @@
       "put": {
         "operationId": "updateWorkspaceUser",
         "summary": "Replace a workspace user",
-        "description": "Client: `pkg/databricks/client.go:229,234`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/update-user"
+        },
+        "x-source": {
+          "client": [
+            "Client.UpdateUser"
+          ]
+        },
         "tags": [
           "users"
         ],
@@ -1214,7 +1411,15 @@
       "get": {
         "operationId": "listWorkspaceGroups",
         "summary": "List workspace groups",
-        "description": "Client: `pkg/databricks/client.go:344,358`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/list-groups"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListGroups"
+          ]
+        },
         "tags": [
           "groups"
         ],
@@ -1287,7 +1492,16 @@
       "get": {
         "operationId": "getWorkspaceGroup",
         "summary": "Get a workspace group",
-        "description": "Client: `pkg/databricks/client.go:388,402`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/get-group"
+        },
+        "x-source": {
+          "client": [
+            "Client.GetGroup",
+            "Client.GetGroupNoCache"
+          ]
+        },
         "tags": [
           "groups"
         ],
@@ -1337,7 +1551,15 @@
       "patch": {
         "operationId": "patchWorkspaceGroup",
         "summary": "Patch a workspace group",
-        "description": "Client: `pkg/databricks/client.go:416,421`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/patch-group"
+        },
+        "x-source": {
+          "client": [
+            "Client.PatchGroup"
+          ]
+        },
         "tags": [
           "groups"
         ],
@@ -1400,7 +1622,15 @@
       "get": {
         "operationId": "listWorkspaceServicePrincipals",
         "summary": "List workspace service principals",
-        "description": "Client: `pkg/databricks/client.go:486,500`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/list-service-principals"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListServicePrincipals"
+          ]
+        },
         "tags": [
           "service-principals"
         ],
@@ -1475,7 +1705,15 @@
       "get": {
         "operationId": "getWorkspaceServicePrincipal",
         "summary": "Get a workspace service principal",
-        "description": "Client: `pkg/databricks/client.go:512,525`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/get-service-principal"
+        },
+        "x-source": {
+          "client": [
+            "Client.GetServicePrincipal"
+          ]
+        },
         "tags": [
           "service-principals"
         ],
@@ -1506,7 +1744,15 @@
       "put": {
         "operationId": "updateWorkspaceServicePrincipal",
         "summary": "Replace a workspace service principal",
-        "description": "Client: `pkg/databricks/client.go:533,545`.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/scim/v1/update-service-principal"
+        },
+        "x-source": {
+          "client": [
+            "Client.UpdateServicePrincipal"
+          ]
+        },
         "tags": [
           "service-principals"
         ],
@@ -1569,7 +1815,16 @@
       "get": {
         "operationId": "listWorkspaceAssignableRoles",
         "summary": "List roles assignable on a resource (workspace host)",
-        "description": "Path has no account ID; not in the public reference (client code only).\n\nClient: `pkg/databricks/client.go:604,622`.",
+        "description": "Workspace-host proxy of the account API; path has no account ID.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/assignable-role-proxy"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListRoles"
+          ]
+        },
         "tags": [
           "access-control"
         ],
@@ -1624,7 +1879,16 @@
       "get": {
         "operationId": "getWorkspaceRuleSet",
         "summary": "Get a rule set (workspace host)",
-        "description": "Path has no account ID; not in the public reference (client code only).\n\nClient: `pkg/databricks/client.go:863,877`.",
+        "description": "Workspace-host proxy of the account API; path has no account ID.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/rule-set-proxy"
+        },
+        "x-source": {
+          "client": [
+            "Client.ListRuleSets"
+          ]
+        },
         "tags": [
           "access-control"
         ],
@@ -1670,7 +1934,16 @@
       "put": {
         "operationId": "updateWorkspaceRuleSet",
         "summary": "Update a rule set (workspace host)",
-        "description": "Path has no account ID; not in the public reference (client code only).\n\nClient: `pkg/databricks/client.go:899,911`.",
+        "description": "Workspace-host proxy of the account API; path has no account ID.",
+        "externalDocs": {
+          "description": "Databricks API reference",
+          "url": "https://docs.databricks.com/api/access-management/v1/rule-set-proxy"
+        },
+        "x-source": {
+          "client": [
+            "Client.UpdateRuleSets"
+          ]
+        },
         "tags": [
           "access-control"
         ],
