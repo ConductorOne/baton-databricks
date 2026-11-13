@@ -45,7 +45,7 @@ func TestRevokeMissingPrincipal(t *testing.T) {
 			name: "group",
 			revoke: func(t *testing.T, c *databricks.Client, principal *v2.Resource) (annotations.Annotations, error) {
 				entitlement := ent.NewAssignmentEntitlement(testTargetGroupResource(t, "g-target"), groupManagerEntitlement)
-				return newGroupBuilder(c).Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
+				return newGroupBuilder(c, syncEverything).Revoke(context.Background(), &v2.Grant{Principal: principal, Entitlement: entitlement})
 			},
 		},
 		{

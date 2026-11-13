@@ -29,17 +29,25 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.ResourceSyncerV2 {
+	// Both sides read one condition so they agree on which workspaces carry the group.
+	syncWorkspaceAdmins := d.willSyncResourceType(metastoreResourceType.Id) &&
+		d.willSyncResourceType(groupResourceType.Id) &&
+		d.willSyncResourceType(workspaceResourceType.Id)
+
+	principals := syncPrincipals{
+		groups:            d.willSyncResourceType(groupResourceType.Id),
+		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
+		workspaceGroups:   syncWorkspaceAdmins,
+	}
+
 	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
-		newGroupBuilder(d.client),
+		newGroupBuilder(d.client, principals),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client, d.workspaces),
+		newWorkspaceBuilder(d.client, d.workspaces, syncWorkspaceAdmins),
 		newRoleBuilder(d.client),
-		newMetastoreBuilder(d.client, d.clientID, configuredWorkspaceSet(d.workspaces), syncPrincipals{
-			groups:            d.willSyncResourceType(groupResourceType.Id),
-			servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
-		}),
+		newMetastoreBuilder(d.client, d.clientID, configuredWorkspaceSet(d.workspaces), principals),
 	}
 }
 

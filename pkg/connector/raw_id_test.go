@@ -32,17 +32,17 @@ func TestResourcesHaveRawId(t *testing.T) {
 	}{
 		{
 			"account group",
-			build(groupResource(ctx, &databricks.Group{BaseResponse: databricks.BaseResponse{ID: "g1"}}, account)),
+			build(groupResource(ctx, &databricks.Group{BaseResponse: databricks.BaseResponse{ID: "g1"}}, account, "")),
 			"account/acc-1/group/g1",
 		},
 		{
 			"workspace group",
-			build(groupResource(ctx, &databricks.Group{BaseResponse: databricks.BaseResponse{ID: "g1"}}, workspace)),
+			build(groupResource(ctx, &databricks.Group{BaseResponse: databricks.BaseResponse{ID: "g1"}}, workspace, "")),
 			"workspace/ws-1/group/g1",
 		},
 		{
 			"workspace",
-			build(workspaceResource(ctx, &databricks.Workspace{Name: "ws", DeploymentName: "ws-1"}, account)),
+			build(workspaceResource(ctx, &databricks.Workspace{Name: "ws", DeploymentName: "ws-1"}, account, false)),
 			"ws-1",
 		},
 		{

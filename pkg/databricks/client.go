@@ -587,6 +587,100 @@ func (c *Client) FindServicePrincipalAppID(
 	return servicePrincipals[0].ApplicationID, ratelimitData, nil
 }
 
+// scimFilterMaxTerms is the widest "id eq" or-chain the account accepts: Databricks refuses a
+// SCIM filter above 200 nodes and an n-term chain is 2n-1 of them.
+const scimFilterMaxTerms = 100
+
+// scimIDFilter builds the "id eq ... or id eq ..." filter that reads ids in one request.
+func scimIDFilter(ids []string) string {
+	terms := make([]string, 0, len(ids))
+	for _, id := range ids {
+		terms = append(terms, "id eq "+strconv.Quote(id))
+	}
+
+	return strings.Join(terms, " or ")
+}
+
+// FindAccountHeldIDs reports which of ids the account holds as memberType, one request per
+// batch of scimFilterMaxTerms rather than one per id. An id the account does not hold is
+// absent from the set, so a page shorter than the filter matched is an error, not an answer.
+func (c *Client) FindAccountHeldIDs(
+	ctx context.Context,
+	memberType string,
+	ids []string,
+) (
+	map[string]struct{},
+	*v2.RateLimitDescription,
+	error,
+) {
+	switch memberType {
+	case "Users", "Groups", "ServicePrincipals":
+	default:
+		return nil, nil, fmt.Errorf("invalid member type: %s", memberType)
+	}
+
+	held := make(map[string]struct{}, len(ids))
+	var rateLimitData *v2.RateLimitDescription
+
+	for start := 0; start < len(ids); start += scimFilterMaxTerms {
+		end := min(start+scimFilterMaxTerms, len(ids))
+		batch := ids[start:end]
+
+		vars := []Vars{
+			&PaginationVars{Count: uint(len(batch))},
+			NewFilterVars(scimIDFilter(batch)),
+			&AttrVars{Attrs: []string{"id"}},
+		}
+
+		var (
+			found              []string
+			matched            uint
+			batchRateLimitData *v2.RateLimitDescription
+			err                error
+		)
+
+		switch memberType {
+		case "Users":
+			var users []User
+			users, matched, batchRateLimitData, err = c.ListUsers(ctx, "", vars...)
+			for _, u := range users {
+				found = append(found, u.ID)
+			}
+		case "Groups":
+			var groups []Group
+			groups, matched, batchRateLimitData, err = c.ListGroups(ctx, "", vars...)
+			for _, g := range groups {
+				found = append(found, g.ID)
+			}
+		case "ServicePrincipals":
+			var servicePrincipals []ServicePrincipal
+			servicePrincipals, matched, batchRateLimitData, err = c.ListServicePrincipals(ctx, "", vars...)
+			for _, sp := range servicePrincipals {
+				found = append(found, sp.ID)
+			}
+		}
+
+		if batchRateLimitData != nil {
+			rateLimitData = batchRateLimitData
+		}
+
+		if err != nil {
+			return nil, rateLimitData, err
+		}
+
+		if matched > uint(len(found)) {
+			return nil, rateLimitData, fmt.Errorf(
+				"account returned %d of %d matched %s for a filtered read of %d ids", len(found), matched, memberType, len(batch))
+		}
+
+		for _, id := range found {
+			held[id] = struct{}{}
+		}
+	}
+
+	return held, rateLimitData, nil
+}
+
 func (c *Client) ListRoles(
 	ctx context.Context,
 	workspaceId string,

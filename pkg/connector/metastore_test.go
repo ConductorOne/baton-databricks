@@ -20,6 +20,9 @@ import (
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
 
+// syncEverything is the scope a deployment with metastores turned on runs with.
+var syncEverything = syncPrincipals{groups: true, servicePrincipals: true, workspaceGroups: true}
+
 // workspaceRouter dispatches on the deployment-name label of the request host,
 // the way Databricks routes an account whose workspaces sit on separate hosts.
 type workspaceRouter struct {
@@ -70,6 +73,10 @@ type fakeAccount struct {
 	// workspaceMembers maps a workspace id to its permission assignments, or to
 	// the HTTP status the account API answers the list with.
 	workspaceMembers map[string]any
+
+	// workspaceGroups maps a deployment name to the SCIM groups that workspace serves.
+	// A workspace-local group is only there: the account answers its id with a 404.
+	workspaceGroups map[string]map[string]string
 
 	permHosts   []string
 	patches     []map[string]any
@@ -167,8 +174,12 @@ func (f *fakeAccount) handler(t *testing.T) http.HandlerFunc {
 func (f *fakeAccount) scim(w http.ResponseWriter, r *http.Request) {
 	_, rest, _ := strings.Cut(r.URL.Path, "/scim/v2/")
 	kind, id, _ := strings.Cut(rest, "/")
+	groups := f.groups
+	if local, ok := f.workspaceGroups[r.Header.Get("X-Test-Workspace")]; ok {
+		groups = local
+	}
 	field, records := map[string]string{"Users": "userName", "Groups": "displayName", "ServicePrincipals": "applicationId"}[kind],
-		map[string]map[string]string{"Users": f.users, "Groups": f.groups, "ServicePrincipals": f.sps}[kind]
+		map[string]map[string]string{"Users": f.users, "Groups": groups, "ServicePrincipals": f.sps}[kind]
 	if id != "" {
 		f.scimGets[kind+"/"+id]++
 		if name, ok := records[id]; ok {
@@ -288,8 +299,10 @@ func TestMetastoreListFailsWhenAnAssignmentListCannotBeRead(t *testing.T) {
 	}
 }
 
-// A workspace that will not become RUNNING leaves the metastore out of the sync
-// instead of failing it on every run; one that can still change keeps it waiting.
+// A terminal workspace leaves the metastore out of the sync instead of failing it
+// on every run. One that can still change keeps it waiting, and so does
+// CANCELLING: the deletion is still running, and pruning the metastore now would
+// delete grants that are still in force.
 func TestMetastoreListSeparatesTerminalFromPendingWorkspaces(t *testing.T) {
 	tests := []struct {
 		workspaceStatus string

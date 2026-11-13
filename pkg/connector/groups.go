@@ -17,6 +17,8 @@ import (
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -26,6 +28,7 @@ const groupManagerEntitlement = "roles/group.manager"
 type groupBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	sync         syncPrincipals
 }
 
 func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -40,7 +43,20 @@ func groupResourceId(_ context.Context, groupId string, parentResourceId *v2.Res
 	return strings.Join([]string{parentResourceId.ResourceType, parentResourceId.Resource, groupResourceType.Id, groupId}, "/")
 }
 
-func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId) (*v2.Resource, error) {
+// workspaceAdminsGroupName is the name Databricks gives the built-in admins
+// group in every workspace. The group is addressed by this name, not by an id,
+// so the listing filter and the alias check must agree on it.
+const workspaceAdminsGroupName = "admins"
+
+// workspaceMembershipReadOnly is what Grant and Revoke answer for a workspace group.
+// The workspace SCIM API would accept the PATCH and remove the admin, so the refusal
+// has to come from here.
+const workspaceMembershipReadOnly = "databricks-connector: membership of a workspace admins group is read-only; manage it in Databricks"
+
+// groupResource builds a group resource. workspaceName qualifies the display name as
+// "<group> (<workspace>)", because Databricks names the built-in group "admins" in every
+// workspace. It is empty for an account group, and the unqualified name stays in the profile.
+func groupResource(ctx context.Context, group *databricks.Group, parent *v2.ResourceId, workspaceName string) (*v2.Resource, error) {
 	profile := map[string]any{
 		"display_name": group.DisplayName,
 		"group_id":     group.ID,
@@ -59,8 +75,13 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 	// under workspaces stays unique for match_baton_id.
 	options = append(options, rs.WithAnnotation(&v2.RawId{Id: groupId}))
 
+	displayName := group.DisplayName
+	if workspaceName != "" {
+		displayName = fmt.Sprintf("%s (%s)", group.DisplayName, workspaceName)
+	}
+
 	resource, err := rs.NewGroupResource(
-		group.DisplayName,
+		displayName,
 		groupResourceType,
 		groupId,
 		nil,
@@ -74,16 +95,38 @@ func groupResource(ctx context.Context, group *databricks.Group, parent *v2.Reso
 	return resource, nil
 }
 
-// List returns all the groups from the database as resource objects.
-// Groups include a GroupTrait because they are the 'shape' of a standard group.
+// workspaceDisplayName returns the name of the workspace a group hangs off, or an empty
+// string for an account group. GetWorkspace reuses the account workspace listing, which
+// the workspace syncer has already made in this sync, so it answers from the cache.
+func (g *groupBuilder) workspaceDisplayName(ctx context.Context, deploymentName string, annos *annotations.Annotations) (string, error) {
+	if deploymentName == "" {
+		return "", nil
+	}
+
+	workspace, rateLimitData, err := g.client.GetWorkspace(ctx, deploymentName)
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return "", fmt.Errorf("databricks-connector: failed to read the workspace %s a group hangs off: %w", deploymentName, err)
+	}
+
+	return workspace.Name, nil
+}
+
+// List returns groups as resource objects, with a GroupTrait because they are the
+// 'shape' of a standard group. Under the account it returns every group. Under a
+// workspace parent it returns only the built-in admins group, on a single page.
 func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	if parentResourceID == nil {
 		return nil, nil, nil
 	}
 
 	workspaceId := ""
+	vars := []databricks.Vars{databricks.NewGroupAttrVars()}
 	if parentResourceID.ResourceType == workspaceResourceType.Id {
 		workspaceId = parentResourceID.Resource
+		vars = append(vars, databricks.NewFilterVars(`displayName eq "`+workspaceAdminsGroupName+`"`))
 	}
 
 	bag, page, err := parsePageToken(attr.PageToken.Token, &v2.ResourceId{ResourceType: groupResourceType.Id})
@@ -94,18 +137,23 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 	groups, total, _, err := g.client.ListGroups(
 		ctx,
 		workspaceId,
-		databricks.NewPaginationVars(page, ResourcesPageSize),
-		databricks.NewGroupAttrVars(),
+		append(vars, databricks.NewPaginationVars(page, ResourcesPageSize))...,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to list groups: %w", err)
+	}
+
+	annos := annotations.Annotations{}
+	workspaceName, err := g.workspaceDisplayName(ctx, workspaceId, &annos)
+	if err != nil {
+		return nil, &rs.SyncOpResults{Annotations: annos}, err
 	}
 
 	var rv []*v2.Resource
 	for _, group := range groups {
 		gCopy := group
 
-		gr, err := groupResource(ctx, &gCopy, parentResourceID)
+		gr, err := groupResource(ctx, &gCopy, parentResourceID, workspaceName)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -113,13 +161,17 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	token := prepareNextToken(page, len(groups), total)
+	// Under a workspace the listing is filtered to the one admins group, so there is no second page.
+	token := ""
+	if workspaceId == "" {
+		token = prepareNextToken(page, len(groups), total)
+	}
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
 	}
 
-	return rv, &rs.SyncOpResults{NextPageToken: nextPage}, nil
+	return rv, &rs.SyncOpResults{NextPageToken: nextPage, Annotations: annos}, nil
 }
 
 // Entitlements return all entitlements relevant to the group.
@@ -136,12 +188,19 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 
 	// membership entitlement - for group members
 	memberAssignmentOptions := []ent.EntitlementOption{
-		ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType),
 		ent.WithDisplayName(fmt.Sprintf("%s %s", resource.DisplayName, groupMemberEntitlement)),
 		ent.WithDescription(fmt.Sprintf("%s %s in Databricks", resource.DisplayName, groupMemberEntitlement)),
 	}
+	// Membership of a workspace admins group is read-only, so it is not grantable.
+	if workspaceId == "" {
+		memberAssignmentOptions = append(memberAssignmentOptions,
+			ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType))
+	}
 
 	rv = append(rv, ent.NewAssignmentEntitlement(resource, groupMemberEntitlement, memberAssignmentOptions...))
+	if workspaceId != "" {
+		return rv, nil, nil
+	}
 
 	_, groupId, err := parseResourceId(resource.Id.Resource)
 	if err != nil {
@@ -166,6 +225,74 @@ func (g *groupBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 	}
 
 	return rv, nil, nil
+}
+
+// splitMemberRef splits a SCIM member ref such as "Users/123" into its type and id.
+func splitMemberRef(ref string) (string, string, error) {
+	memberType, memberID, found := strings.Cut(ref, "/")
+	if !found || memberType == "" || memberID == "" || strings.Contains(memberID, "/") {
+		return "", "", fmt.Errorf("databricks-connector: invalid member format of %s", ref)
+	}
+
+	return memberType, memberID, nil
+}
+
+// memberResourceType maps a SCIM member type to the resource type the connector emits for
+// it, or an empty string for a type the connector does not model.
+func memberResourceType(memberType string) string {
+	switch memberType {
+	case "Users":
+		return userResourceType.Id
+	case "Groups":
+		return groupResourceType.Id
+	case "ServicePrincipals":
+		return servicePrincipalResourceType.Id
+	default:
+		return ""
+	}
+}
+
+// accountHeld reports, per member type, which member ids the account holds. It resolves the
+// whole page in one request per type, and a member the account does not hold is absent. A
+// member this sync cannot emit is left out without a request, so the caller skips it.
+func (g *groupBuilder) accountHeld(ctx context.Context, members []databricks.Member) (map[string]map[string]struct{}, *v2.RateLimitDescription, error) {
+	l := ctxzap.Extract(ctx)
+	idsByType := make(map[string][]string)
+	for _, member := range members {
+		memberType, memberID, err := splitMemberRef(member.Ref)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		resourceType := memberResourceType(memberType)
+		if resourceType == "" || !emitPrincipal(g.sync, resourceType) {
+			l.Debug("databricks-connector: skipping a member this sync does not emit",
+				zap.String("member_type", memberType),
+				zap.String("member_id", memberID))
+
+			continue
+		}
+
+		idsByType[memberType] = append(idsByType[memberType], memberID)
+	}
+
+	held := make(map[string]map[string]struct{}, len(idsByType))
+	var rateLimitData *v2.RateLimitDescription
+
+	for memberType, ids := range idsByType {
+		heldIDs, typeRateLimitData, err := g.client.FindAccountHeldIDs(ctx, memberType, ids)
+		if typeRateLimitData != nil {
+			rateLimitData = typeRateLimitData
+		}
+
+		if err != nil {
+			return nil, rateLimitData, fmt.Errorf("databricks-connector: failed to look up %s on the account: %w", memberType, err)
+		}
+
+		held[memberType] = heldIDs
+	}
+
+	return held, rateLimitData, nil
 }
 
 // Grants return all grants relevant to the group.
@@ -216,22 +343,51 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 		zap.String("cursor", cursor),
 	)
 
-	for _, member := range members {
-		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
-		pp := strings.Split(member.Ref, "/")
-		if len(pp) != 2 {
-			return nil, nil, fmt.Errorf("databricks-connector: invalid member format of %s", member.Ref)
+	// Only the account syncs members, so one it does not hold is workspace-local and has no
+	// resource to point a grant at.
+	var held map[string]map[string]struct{}
+	if isWorkspaceGroup {
+		heldByType, rateLimitData, err := g.accountHeld(ctx, members)
+		if rateLimitData != nil {
+			annos.WithRateLimiting(rateLimitData)
+		}
+		if err != nil {
+			return nil, nil, err
 		}
 
-		memberType, memberID := pp[0], pp[1]
+		held = heldByType
+	}
+
+	for _, member := range members {
+		// member.Ref contains the type and ID separated by "/", e.g., "Users/123" or "Groups/456"
+		memberType, memberID, err := splitMemberRef(member.Ref)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		var resourceId *v2.ResourceId
 		var anns []protoreflect.ProtoMessage
+
+		if isWorkspaceGroup {
+			if _, ok := held[memberType][memberID]; !ok {
+				l.Debug("databricks-connector: skipping a workspace group member with no synced principal",
+					zap.String("group", resource.Id.Resource),
+					zap.String("member", member.Ref))
+				continue
+			}
+			// The entitlement is not grantable, so the grant says so too.
+			anns = append(anns, &v2.GrantImmutable{})
+		}
 
 		switch memberType {
 		case "Users":
 			resourceId = &v2.ResourceId{ResourceType: userResourceType.Id, Resource: memberID}
 		case "Groups":
-			rid, expandAnnotation, err := groupGrantExpansion(ctx, memberID, parentId)
+			memberParent := parentId
+			if isWorkspaceGroup {
+				memberParent = &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: g.client.GetAccountId()}
+			}
+			rid, expandAnnotation, err := groupGrantExpansion(ctx, memberID, memberParent)
 			if err != nil {
 				return rv, nil, err
 			}
@@ -252,7 +408,7 @@ func (g *groupBuilder) Grants(ctx context.Context, resource *v2.Resource, attr r
 	}
 
 	// role permissions grants are only emitted with the first page of members
-	if cursor != "" {
+	if cursor != "" || isWorkspaceGroup {
 		return rv, &rs.SyncOpResults{NextPageToken: nextPage, Annotations: annos}, nil
 	}
 
@@ -310,9 +466,14 @@ func (g *groupBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, paren
 		return nil, annos, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 	}
 
-	resource, err := groupResource(ctx, group, parentResourceId)
+	workspaceName, err := g.workspaceDisplayName(ctx, workspaceId, &annos)
 	if err != nil {
-		return nil, nil, err
+		return nil, annos, err
+	}
+
+	resource, err := groupResource(ctx, group, parentResourceId, workspaceName)
+	if err != nil {
+		return nil, annos, err
 	}
 
 	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed group",
@@ -364,6 +525,10 @@ func (g *groupBuilder) Grant(ctx context.Context, principal *v2.Resource, entitl
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
+		if parentGroupId.GetResourceType() == workspaceResourceType.Id {
+			return nil, status.Error(codes.FailedPrecondition, workspaceMembershipReadOnly)
+		}
+
 		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if err != nil {
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
@@ -488,7 +653,6 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	if err != nil {
 		return nil, fmt.Errorf("databricks-connector: failed to parse entitlement resource id: %w", err)
 	}
-
 	if parentResourceId == nil {
 		return nil, fmt.Errorf("databricks-connector: parent resource id not found")
 	}
@@ -503,6 +667,10 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	membershipEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupMemberEntitlement)
 	managerEntitlementID := ent.NewEntitlementID(entitlement.Resource, groupManagerEntitlement)
 	if entitlement.Id == membershipEntitlementID {
+		if parentType == workspaceResourceType.Id {
+			return nil, status.Error(codes.FailedPrecondition, workspaceMembershipReadOnly)
+		}
+
 		group, _, err := g.client.GetGroupNoCache(ctx, workspaceId, groupId.Resource, databricks.NewGroupMembersAttrVars())
 		if isNotFoundError(err) {
 			// group not found (deleted, or not assigned to this workspace)
@@ -512,8 +680,8 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 			return nil, fmt.Errorf("databricks-connector: failed to get group %s: %w", groupId.Resource, err)
 		}
 
-		// The workspace SCIM API answers 400 to a remove on an empty members attribute, so a
-		// principal that is not a member is left as is instead of being patched.
+		// Only account groups reach this far. A principal that is not a member is left as
+		// is instead of being patched, so a repeated revoke stays idempotent.
 		if !slices.ContainsFunc(group.Members, func(m databricks.Member) bool { return m.ID == principalId }) {
 			return annotations.New(&v2.GrantAlreadyRevoked{}), nil
 		}
@@ -602,9 +770,10 @@ func (g *groupBuilder) Revoke(ctx context.Context, grant *v2.Grant) (annotations
 	return nil, nil
 }
 
-func newGroupBuilder(client *databricks.Client) *groupBuilder {
+func newGroupBuilder(client *databricks.Client, sync syncPrincipals) *groupBuilder {
 	return &groupBuilder{
 		client:       client,
 		resourceType: groupResourceType,
+		sync:         sync,
 	}
 }
