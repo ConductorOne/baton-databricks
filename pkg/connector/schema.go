@@ -46,21 +46,14 @@ const (
 	// only the schema, so List writes it down.
 	profileKeyCatalogOwner = "catalog_owner"
 
-	// schemaWriteRemedy is what a 403 on the PATCH tells the operator.
 	schemaWriteRemedy = "the connector must own the metastore, the parent catalog or the schema, or hold MANAGE on the schema or the parent catalog"
 
-	// schemaTrustRemedy is what a refusal to report a partial privilege list
-	// tells the operator.
 	schemaTrustRemedy = "the connector's service principal must own the metastore, the parent catalog or the schema, hold MANAGE on the schema or " +
 		"on the parent catalog, or be assigned Admin directly on the workspace whose admins group owns the parent catalog"
 
-	// schemaListRemedy is what a refusal to sync a catalog whose schema listing
-	// would be partial tells the operator.
 	schemaListRemedy = "the connector's service principal must own the metastore or the catalog, hold MANAGE, USE_SCHEMA or ALL_PRIVILEGES on the catalog, " +
 		"or be assigned Admin directly on the workspace whose admins group owns the catalog"
 
-	// errorCodeSchemaGone is what Databricks names in error_code when the schema
-	// a request addresses does not exist.
 	errorCodeSchemaGone = "SCHEMA_DOES_NOT_EXIST"
 )
 
@@ -89,7 +82,6 @@ var schemaLevel = securableLevel{
 
 type schemaBuilder struct {
 	securableOps
-	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 }
 
@@ -104,13 +96,10 @@ func (b *schemaBuilder) ResourceType(_ context.Context) *v2.ResourceType {
 	return schemaResourceType
 }
 
-// schemaResourceID keys a schema by its metastore and its dotted full name, which
-// extends the catalog's "{metastore_id}::{catalog_name}".
 func schemaResourceID(metastoreID, catalogName, name string) string {
 	return metastoreID + securableKeySeparator + catalogName + schemaNameSeparator + name
 }
 
-// parseSchemaID reads a schema resource id, "{metastore_id}::{catalog}.{schema}".
 func parseSchemaID(resourceID string) (string, string, string, error) {
 	metastoreID, fullName, ok := strings.Cut(resourceID, securableKeySeparator)
 	if !ok {
@@ -176,10 +165,9 @@ func schemaResource(
 // in the page token so later pages neither re-resolve it nor prove the listing
 // complete again.
 type schemaRoute struct {
-	Workspace     string `json:"w"`
-	WorkspaceID   string `json:"i"`
-	WorkspaceName string `json:"n"`
-	// Both owners ride along so each schema's profile can carry them.
+	Workspace      string `json:"w"`
+	WorkspaceID    string `json:"i"`
+	WorkspaceName  string `json:"n"`
 	MetastoreOwner string `json:"o"`
 	CatalogOwner   string `json:"c"`
 }
