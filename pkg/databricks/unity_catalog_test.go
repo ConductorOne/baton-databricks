@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Databricks ignores a page token it cannot deserialize and silently restarts at
@@ -90,6 +92,91 @@ func TestUpdatePermissionsDrainsFromPatchToken(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Principal != "alice" || got[1].Principal != "bob" {
 		t.Fatalf("assignments = %+v, want alice then bob", got)
+	}
+}
+
+func TestListCatalogsCanIncludeUnboundCatalogs(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+	var includeUnbound string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		includeUnbound = r.URL.Query().Get("include_unbound")
+		_ = json.NewEncoder(w).Encode(catalogsResponse{})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, _, _, err := c.ListCatalogs(context.Background(), "ws", "", 100, true); err != nil {
+		t.Fatalf("ListCatalogs: %v", err)
+	}
+	if includeUnbound != "true" {
+		t.Fatalf("include_unbound = %q, want true", includeUnbound)
+	}
+}
+
+// A catalog name holding "?", "#" or "%" does not survive URL assembly: the
+// request layer unescapes the path again, so "sales?x" would read "sales". The
+// caller writes privileges to whatever comes back, so the read is refused
+// instead of answering with a different catalog.
+func TestGetCatalogRefusesANameThatChangesTheURL(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	var requested []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(Catalog{Name: "sales", MetastoreID: "ms-1"})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for _, name := range []string{"sales?x", "sales#x", "sales%x", ""} {
+		got, _, err := c.GetCatalog(context.Background(), "ws", name)
+		if err == nil {
+			t.Fatalf("GetCatalog(%q) returned catalog %+v, want an error", name, got)
+		}
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("GetCatalog(%q) returned %v, want InvalidArgument", name, status.Code(err))
+		}
+	}
+	if len(requested) != 0 {
+		t.Fatalf("GetCatalog sent %v, want no request at all", requested)
+	}
+}
+
+// Databricks answering with a catalog other than the one asked for is not an
+// answer about the requested catalog, and Grant/Revoke rebuild the resource from
+// what comes back.
+func TestGetCatalogRefusesAMismatchedAnswer(t *testing.T) {
+	t.Setenv("BATON_HTTP_CACHE_TTL", "0")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(Catalog{Name: "other", MetastoreID: "ms-1"})
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	client.Transport = rewriteHost(srv.Listener.Addr().String(), client.Transport)
+	c, err := NewClient(context.Background(), client, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acc-1", srv.URL, &NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	got, _, err := c.GetCatalog(context.Background(), "ws", "sales")
+	if err == nil {
+		t.Fatalf("GetCatalog returned catalog %+v, want an error", got)
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("GetCatalog returned %v, want InvalidArgument", status.Code(err))
 	}
 }
 

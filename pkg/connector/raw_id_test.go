@@ -70,6 +70,13 @@ func TestResourcesHaveRawId(t *testing.T) {
 			build(metastoreResource(ctx, &databricks.Metastore{MetastoreID: "ms1", Name: "ms"}, account, "", "", "")),
 			"ms1",
 		},
+		{
+			// Keyed by metastore: catalog names repeat across metastores.
+			"catalog",
+			build(catalogResource(&databricks.Catalog{Name: "cat"}, "ms1",
+				&v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms1"}, catalogRoute{})),
+			"ms1::cat",
+		},
 	}
 
 	for _, tc := range cases {

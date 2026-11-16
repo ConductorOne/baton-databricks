@@ -174,6 +174,14 @@ type Metastore struct {
 	Owner       string `json:"owner"`
 }
 
+type Catalog struct {
+	Name          string `json:"name"`
+	MetastoreID   string `json:"metastore_id"`
+	Owner         string `json:"owner"`
+	CatalogType   string `json:"catalog_type"`
+	IsolationMode string `json:"isolation_mode"`
+}
+
 type PrivilegeAssignment struct {
 	Principal   string      `json:"principal"`
 	PrincipalID json.Number `json:"principal_id"`
@@ -208,6 +216,11 @@ type metastoresResponse struct {
 
 type metastoreWorkspacesResponse struct {
 	WorkspaceIDs []json.Number `json:"workspace_ids"`
+}
+
+type catalogsResponse struct {
+	Catalogs      []Catalog `json:"catalogs"`
+	NextPageToken string    `json:"next_page_token"`
 }
 
 type permissionsResponse struct {
