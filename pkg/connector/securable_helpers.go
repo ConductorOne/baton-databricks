@@ -24,9 +24,6 @@ import (
 // securable's full name is already dot-separated.
 const securableKeySeparator = "::"
 
-// securableLevel is the only thing the permissions endpoint needs to tell one
-// Unity Catalog level from another: how a resource id addresses the securable,
-// what it can be granted, and what a refusal tells the operator.
 // securableOps is what the shared securable path needs: the client, the
 // connector's own principal, which principal types the sync emits, and the
 // level that decides the rules. Each builder embeds one, so the three shared
@@ -39,6 +36,9 @@ type securableOps struct {
 	level    securableLevel
 }
 
+// securableLevel is the only thing the permissions endpoint needs to tell one
+// Unity Catalog level from another: how a resource id addresses the securable,
+// what it can be granted, and what a refusal tells the operator.
 type securableLevel struct {
 	// securableType is the endpoint path segment, lowercase. It is not the
 	// uppercase securable_type a listed securable carries.
@@ -130,7 +130,7 @@ func ensureGrantsAreTrustworthy(
 	return nil
 }
 
-// syncSecurableGrants emits the privileges held on one securable, plus its owner.
+// syncGrants emits the privileges held on one securable, plus its owner.
 // The workspace comes off the profile the last List wrote: every Unity Catalog
 // read is addressed to a workspace host, and resolving one here would be an
 // account-plane round trip per securable.
@@ -332,7 +332,7 @@ func (c change) updateError(verb string, err error) error {
 	return fmt.Errorf("databricks-connector: failed to %s %s on %s %s: %w", verb, c.privilege, c.level.noun, c.fullName, err)
 }
 
-// grantSecurable adds one privilege. Databricks no-ops a PATCH it cannot apply,
+// grant adds one privilege. Databricks no-ops a PATCH it cannot apply,
 // so the pre-read decides GrantAlreadyExists and the echo is the only proof the
 // change landed.
 func (o securableOps) grant(
@@ -379,7 +379,7 @@ func (o securableOps) grant(
 	return annos, nil
 }
 
-// revokeSecurable removes one privilege. Databricks no-ops a privilege already
+// revoke removes one privilege. Databricks no-ops a privilege already
 // absent, so the pre-read decides GrantAlreadyRevoked and the echo confirms the
 // removal.
 func (o securableOps) revoke(

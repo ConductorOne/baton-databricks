@@ -54,9 +54,9 @@ const (
 	profileKeyIsolationMode = "isolation_mode"
 
 	// profileKeyMetastoreOwner carries the owner of the metastore the catalog
-	// belongs to. Owning the metastore is what makes a privilege read complete,
-	// and the catalog syncer is only handed the metastore's id, so List writes
-	// the owner down instead of resolving it again on every Grants call.
+	// belongs to, because owning the metastore is what makes a privilege read
+	// complete. Only the provisioning trust check reads it, off the resource it
+	// rebuilds from the route it just resolved.
 	profileKeyMetastoreOwner = "metastore_owner"
 
 	// catalogWriteRemedy is what a 403 on the PATCH tells the operator.
@@ -378,11 +378,9 @@ func metastoreOwner(
 }
 
 // catalogThrough reads one catalog through workspace, nil when that workspace
-// does not serve it. A single GET replaces draining the listing, which cost one
-// page walk per catalog per workspace, and it separates the two answers the
-// listing ran together: a refusal naming the catalog as nonexistent is an
-// absence, and anything else is this workspace not seeing a catalog that may
-// well exist.
+// does not serve it. It separates the two answers a listing runs together: a
+// refusal naming the catalog as nonexistent is an absence, and anything else is
+// this workspace not seeing a catalog that may well exist.
 func catalogThrough(
 	ctx context.Context,
 	client *databricks.Client,
