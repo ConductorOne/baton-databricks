@@ -188,6 +188,9 @@ type Catalog struct {
 type Schema struct {
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
+	// FullName is the dotted "catalog.schema" Databricks addresses the schema
+	// by. The listing fills it in; it is empty when the field is absent.
+	FullName string `json:"full_name"`
 }
 
 type PrivilegeAssignment struct {

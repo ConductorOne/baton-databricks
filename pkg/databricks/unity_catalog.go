@@ -192,6 +192,41 @@ func (c *Client) ListSchemas(
 	return res.Schemas, res.NextPageToken, ratelimitData, nil
 }
 
+// GetSchema (GET /api/2.1/unity-catalog/schemas/{full_name}) reads one schema
+// through workspaceId, which is a deployment name. The full name is dotted
+// ("catalog.schema"), and a workspace the catalog is not bound to answers 403,
+// while a deleted schema or catalog is named in error_code.
+func (c *Client) GetSchema(
+	ctx context.Context,
+	workspaceId, fullName string,
+) (
+	*Schema,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res Schema
+
+	if fullName == "" {
+		return nil, nil, invalidArgument("schema full name is required")
+	}
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogSchemasEndpoint, fullName)
+	if !addressesSecurable(u, "/"+fullName) {
+		return nil, nil, invalidArgument("cannot address schema %q: the name does not survive URL assembly", fullName)
+	}
+
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read schema %s: %w", fullName, err))
+	}
+
+	if res.FullName != "" && res.FullName != fullName {
+		return nil, ratelimitData, invalidArgument("asked Databricks for schema %q and it answered with %q", fullName, res.FullName)
+	}
+
+	return &res, ratelimitData, nil
+}
+
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).
 // The principal query filters effectively, not literally: an inherited assignment
 // comes back naming the group it is inherited through, so a caller must read every

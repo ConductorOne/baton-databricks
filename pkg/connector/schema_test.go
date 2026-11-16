@@ -33,6 +33,10 @@ type fakeSchemaAccount struct {
 	schemas []map[string]any
 	// schemaStatus fails the schemas listing with that status.
 	schemaStatus int
+	// schemaGetStatus fails GET /schemas/{full_name} on that deployment name, and
+	// schemaGetErrorCode is the vendor error_code that rides along with it.
+	schemaGetStatus    map[string]int
+	schemaGetErrorCode string
 	// assignments maps a securable's full name to the privilege assignments on it.
 	assignments map[string][]map[string]any
 	// ownPrivileges answers a read filtered by principal, keyed by
@@ -112,6 +116,8 @@ func (f *fakeSchemaAccount) handler(t *testing.T) http.HandlerFunc {
 			}})
 		case strings.Contains(path, "/unity-catalog/catalogs/"):
 			f.serveCatalog(w, r)
+		case strings.Contains(path, "/unity-catalog/schemas/"):
+			f.serveSchema(w, r)
 		case strings.HasSuffix(path, "/unity-catalog/schemas"):
 			f.serveSchemas(w, r)
 		case strings.Contains(path, "/unity-catalog/effective-permissions/"):
@@ -144,6 +150,33 @@ func (f *fakeSchemaAccount) serveCatalog(w http.ResponseWriter, r *http.Request)
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]any{"name": "main", "metastore_id": "ms-1", "owner": f.catalogOwner})
+}
+
+// serveSchema answers GET /schemas/{full_name}, which provisioning reads to pick
+// up the schema's live owner before it decides a write.
+func (f *fakeSchemaAccount) serveSchema(w http.ResponseWriter, r *http.Request) {
+	workspace := r.Header.Get("X-Test-Workspace")
+	if code, ok := f.schemaGetStatus[workspace]; ok {
+		body := `{"message":"refused"}`
+		if f.schemaGetErrorCode != "" {
+			body = fmt.Sprintf(`{"error_code":%q,"message":"refused"}`, f.schemaGetErrorCode)
+		}
+		http.Error(w, body, code)
+
+		return
+	}
+
+	_, fullName, _ := strings.Cut(r.URL.Path, "/unity-catalog/schemas/")
+	_, name, _ := strings.Cut(fullName, ".")
+	owner := "someone"
+	for _, schema := range f.schemas {
+		if schema["name"] == name {
+			if got, ok := schema["owner"].(string); ok {
+				owner = got
+			}
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "full_name": fullName, "owner": owner})
 }
 
 func (f *fakeSchemaAccount) serveSchemas(w http.ResponseWriter, r *http.Request) {
@@ -850,6 +883,33 @@ func TestSchemaGrantsOnADroppedSecurableDoesNotFailTheSync(t *testing.T) {
 // Revoke on a schema whose parent catalog was dropped reports the grant already
 // revoked for a principal that owns neither the metastore nor the catalog, so
 // the trust probe is what answers rather than the ownership short-circuit.
+// The live read that opens Grant and Revoke is the first call that can see a
+// deletion, because it runs before the permissions read. A code naming the
+// schema or its catalog there is the same proof, so Revoke reports the grant
+// already revoked instead of failing on a securable it cannot read.
+func TestSchemaRevokeProvesTheDeletionOnTheLiveRead(t *testing.T) {
+	for _, errorCode := range []string{errorCodeSchemaGone, errorCodeCatalogGone} {
+		t.Run(errorCode, func(t *testing.T) {
+			f := &fakeSchemaAccount{
+				catalogOwner:       "someone",
+				users:              map[string]string{"1": "alice@example.com"},
+				schemaGetStatus:    map[string]int{"wsa": http.StatusNotFound},
+				schemaGetErrorCode: errorCode,
+			}
+			b := newTestSchemaBuilder(t, f)
+			g := grant.NewGrant(testSchema(t, "sales", "someone", "someone", testOwnPrincipal, "wsa"), "SELECT", alice.GetId())
+
+			annos, err := b.Revoke(context.Background(), g)
+			if err != nil || !annos.Contains(&v2.GrantAlreadyRevoked{}) {
+				t.Fatalf("Revoke = %v, %v; want GrantAlreadyRevoked", annos, err)
+			}
+			if len(f.patches) != 0 {
+				t.Errorf("patches = %v, want none", f.patches)
+			}
+		})
+	}
+}
+
 func TestSchemaRevokeOnADroppedParentIsAlreadyRevokedForANonOwner(t *testing.T) {
 	f := &fakeSchemaAccount{
 		metastoreOwner: "other-team",
