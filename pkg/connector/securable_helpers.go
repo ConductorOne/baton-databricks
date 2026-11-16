@@ -98,8 +98,6 @@ type securableTrust struct {
 	// metastoreOwner is empty on a metastore, whose own owner is in owner.
 	metastoreOwner string
 
-	// parentOwner is the owner of the securable one level up, which only a
-	// schema has: the levels above it hang from the metastore directly.
 	parentOwner string
 
 	fullName    string
@@ -123,8 +121,6 @@ func ensureGrantsAreTrustworthy(
 	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
 	metastoreOwner, _ := rs.GetProfileStringValue(profile, profileKeyMetastoreOwner)
 	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
-	// Only a schema hangs from something other than the metastore, so elsewhere
-	// this key is absent.
 	parentOwner, _ := rs.GetProfileStringValue(profile, profileKeyCatalogOwner)
 
 	trustworthy, err := level.trusts(ctx, client, securableTrust{
