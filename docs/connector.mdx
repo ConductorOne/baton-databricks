@@ -52,7 +52,7 @@ The Metastores, Catalogs and Schemas resource types are turned off by default. T
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
 - A catalog is synced when any running workspace in scope attached to its metastore lists it, and the same catalog name is kept once per metastore. A catalog that only excluded workspaces can reach is not synced.
 - The built-in `system` catalog is never synced, and neither is any other catalog Databricks marks as a system catalog, whoever owns it.
-- `information_schema` is skipped in every catalog. Its views are owned by Databricks system principals that do not exist in your account.
+- `information_schema` is skipped in every catalog. Databricks creates it read-only and its privileges cannot be granted.
 - If a catalog becomes unreachable, access requests can fail until the connector can distinguish deletion from a binding or visibility change. Catalog ownership or **MANAGE** alone cannot prove deletion; that check requires the **Metastore Admin**.
 - Unity Catalog tags are not synced.
 </Note>
@@ -212,14 +212,16 @@ The connector asks every running workspace in scope attached to the metastore, s
 If the service principal cannot list catalogs at all through one of those workspaces, the connector cannot tell which catalogs are there, so the sync fails naming the metastore and that workspace instead of removing the catalogs it could not list. Give the service principal **Admin** on that workspace, or leave that workspace out with **Workspaces** or **Exclude Workspaces**.
 </Warning>
 
-### Let the service principal list every schema
+### Let the service principal list schemas and read their privileges
 
 Skip this section if you are not syncing schemas, or if the service principal owns the metastore or the catalog.
 
 Workspace **Admin** does not list every schema, except when the catalog is owned by the workspace admins group (`_workspace_admins_<workspace>_<id>`) and the service principal is a direct Admin of that workspace. On any other catalog the service principal does not own, Databricks returns only the schemas it owns or can use, with HTTP 200. To list every schema, the service principal must own the metastore, own the catalog, be that direct Admin, or hold **MANAGE**, **USE SCHEMA**, or **ALL PRIVILEGES** on the catalog.
 
+Listing the schemas is not the same as reading who holds what on them. For a schema's full privilege list, and to grant or revoke a schema privilege, the service principal must own the metastore, the catalog or the schema, hold **MANAGE** on the schema or on the catalog above it, or be that direct Admin. **USE SCHEMA** and **ALL PRIVILEGES** list every schema and do not read their privileges, because Databricks leaves **MANAGE** out of **ALL PRIVILEGES**. A service principal given only **USE SCHEMA** gets its schemas synced and then a permission error on their grants, so grant **MANAGE** on the catalog to cover both.
+
 <Warning>
-A catalog whose schemas cannot all be listed fails the sync. `system` and `samples` are not a special case of that listing: the catalog sync leaves them out, when their privilege list cannot be proven complete, before their schemas are read.
+A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error. `system` and `samples` are not a special case of that listing: the catalog sync leaves them out, when their privilege list cannot be proven complete, before their schemas are read.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
