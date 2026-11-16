@@ -41,10 +41,9 @@ const (
 
 	profileKeySchemaName = "schema_name"
 
-	// profileKeyCatalogOwner carries the owner of the parent catalog. Owning the
-	// catalog is one of the things that makes a schema's privilege read complete,
-	// and Grants is handed only the schema, so List writes the owner down instead
-	// of listing the catalogs again on every call.
+	// profileKeyCatalogOwner carries the parent catalog's owner, which is one of
+	// the things that makes a schema's privilege read complete. Grants is handed
+	// only the schema, so List writes it down.
 	profileKeyCatalogOwner = "catalog_owner"
 
 	// schemaWriteRemedy is what a 403 on the PATCH tells the operator.
@@ -84,9 +83,7 @@ var schemaLevel = securableLevel{
 	trustRemedy:     schemaTrustRemedy,
 	permissionsName: schemaPermissionsName,
 	trusts:          schemaGrantsAreTrustworthy,
-	// A permissions read names the leaf, so a dropped schema and a dropped catalog
-	// both answer SCHEMA_DOES_NOT_EXIST there. The GET and the listings name the
-	// parent instead, which is where CATALOG_DOES_NOT_EXIST reaches this level.
+	// A permissions read names the leaf; the GET and the listings name the parent.
 	goneErrorCodes: []string{errorCodeSchemaGone, errorCodeCatalogGone},
 }
 
@@ -162,8 +159,8 @@ func schemaResource(
 
 	resourceID := schemaResourceID(metastoreID, catalogName, schema.Name)
 
-	// The display name is the full name rather than the leaf: main.sales and
-	// finance.sales would otherwise be two rows both reading "sales" in C1.
+	// The full name is the display name: main.sales and finance.sales would
+	// otherwise be two rows both reading "sales" in C1.
 	return rs.NewAppResource(
 		fullName,
 		schemaResourceType,
@@ -175,23 +172,21 @@ func schemaResource(
 	)
 }
 
-// schemaRoute is the workspace a catalog's schemas are listed through, carried in
-// the page token so later pages neither re-resolve the route nor prove again that
-// the listing is complete.
+// schemaRoute is the workspace a catalog's schemas are listed through, carried
+// in the page token so later pages neither re-resolve it nor prove the listing
+// complete again.
 type schemaRoute struct {
 	Workspace     string `json:"w"`
 	WorkspaceID   string `json:"i"`
 	WorkspaceName string `json:"n"`
-	// MetastoreOwner and CatalogOwner ride along so each schema's profile can
-	// carry them. See profileKeyCatalogOwner.
+	// Both owners ride along so each schema's profile can carry them.
 	MetastoreOwner string `json:"o"`
 	CatalogOwner   string `json:"c"`
 }
 
 // List pages a catalog's schemas through a workspace that can see every schema.
-// Databricks answers a caller without catalog-wide visibility with only the
-// schemas it owns or can use, at 200, so a listing that cannot be proved complete
-// stops the sync and C1 keeps the schemas it already has.
+// Databricks answers a caller without catalog-wide visibility with a short list
+// at 200, so a listing that cannot be proved complete stops the sync.
 func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId, attr rs.SyncOpAttrs) ([]*v2.Resource, *rs.SyncOpResults, error) {
 	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
 	if parentResourceID.GetResourceType() != catalogResourceType.Id {
@@ -260,18 +255,10 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 	return rv, &rs.SyncOpResults{Annotations: annos, NextPageToken: nextToken}, nil
 }
 
-// pushRoute records a workspace that can list every schema of the catalog. It
-// walks the running in-scope workspaces until one both lists the catalog and can
-// read every schema. An empty stack means no workspace this sync can use serves
-// the metastore. A catalog none of them can list completely fails the sync:
-// returning no schemas would make C1 delete them. system and samples are not
-// special here, because the catalog sync leaves them out, when it leaves them
-// out, before this List runs.
-//
-// A gone answer is treated as unproven on its own. An unbound catalog was
-// measured to refuse with 403, which lands in lastDeny, but what a bound caller
-// without USE_CATALOG is told was not measured, so the listing is emptied only
-// when every workspace said gone and none refused.
+// pushRoute records the first running in-scope workspace that both lists the
+// catalog and can read every schema, and refuses when none can: returning no
+// schemas would make C1 delete them. A gone answer is not proof on its own, so
+// the listing is emptied only when every workspace said gone and none refused.
 func (b *schemaBuilder) pushRoute(
 	ctx context.Context,
 	metastoreID, catalogName string,
@@ -297,9 +284,7 @@ func (b *schemaBuilder) pushRoute(
 	}
 
 	owner, err := metastoreOwner(ctx, b.client, metastoreID, annos)
-	// The metastore syncer removes the parent in the same sync, so a metastore
-	// gone empties what C1 is already removing instead of failing with the bare
-	// sentinel, which reaches C1 as Unknown and is retried.
+	// The metastore syncer removes the parent in the same sync.
 	if errors.Is(err, errMetastoreGone) {
 		return nil
 	}
@@ -326,9 +311,8 @@ func (b *schemaBuilder) pushRoute(
 			continue
 		}
 		sawCatalog = true
-		// This workspace served the catalog just now, which supersedes a gone
-		// answer an earlier one gave: the reads run in order, and the catalog
-		// cannot be absent before it is present.
+		// The reads run in order, so a workspace serving the catalog now supersedes a
+		// gone answer an earlier one gave.
 		provenGone = false
 
 		workspaceID := strconv.Itoa(workspace.ID)
@@ -348,11 +332,8 @@ func (b *schemaBuilder) pushRoute(
 			workspaceID:    workspaceID,
 		}, annos)
 		if err != nil {
-			// The permissions read this check ends on names the catalog missing
-			// only when it is gone: a workspace the catalog is not bound to
-			// refuses with 403 instead, which deniesTrust catches above. So a
-			// catalog dropped between the listing and this read is an absence,
-			// not a failed sync.
+			// This read names the catalog missing only when it is gone: a workspace the
+			// catalog is not bound to refuses with 403, which deniesTrust takes above.
 			if errors.Is(err, errCatalogGone) {
 				provenGone = true
 
@@ -373,17 +354,13 @@ func (b *schemaBuilder) pushRoute(
 
 		return nil
 	}
-	// A catalog proved gone holds no schemas, whether or not a workspace listed
-	// it a moment earlier. The catalog syncer drops the parent in the same sync,
-	// so this empties what C1 is already removing. A refusal anywhere
-	// in the walk leaves the picture mixed, and nothing is emptied on it.
+	// A catalog proved gone holds no schemas, and the catalog syncer drops the
+	// parent in the same sync. A refusal anywhere leaves the picture mixed.
 	if provenGone && lastDeny == nil {
 		return nil
 	}
 	if !sawCatalog {
-		// A workspace that does not serve the catalog answers the same way as
-		// one whose catalog is gone, so this is an absence only when no
-		// workspace refused.
+		// A workspace that does not serve the catalog answers like a gone one.
 		if sawGone && lastDeny == nil {
 			return nil
 		}
@@ -421,10 +398,9 @@ func schemaListingError(catalogName, workspace string, err error) error {
 }
 
 // schemaListingIsComplete is true when ListSchemas returns every schema of the
-// catalog, which ownership, a direct Admin of the owning admins group's workspace,
-// MANAGE, USE_SCHEMA or ALL_PRIVILEGES each settle. It reports errCatalogGone when
-// Databricks names the catalog missing, which is what tells an absent catalog apart
-// from a privilege this caller may not read.
+// catalog: ownership, a direct Admin of the owning admins group's workspace,
+// MANAGE, USE_SCHEMA or ALL_PRIVILEGES each settle it. It reports errCatalogGone
+// when Databricks names the catalog missing.
 func schemaListingIsComplete(
 	ctx context.Context,
 	client *databricks.Client,
@@ -462,9 +438,7 @@ func schemaGrantsAreTrustworthy(
 	trust securableTrust,
 	annos *annotations.Annotations,
 ) (bool, error) {
-	// An owner holds every privilege implicitly, which is not reported as a grant.
-	// On the live tenant the connector owns the metastore, so this settles the
-	// whole rule with no extra call at all.
+	// An owner holds every privilege implicitly, which is never reported as a grant.
 	if ownsPrincipal(trust.ownPrincipal, trust.metastoreOwner) ||
 		ownsPrincipal(trust.ownPrincipal, trust.parentOwner) ||
 		ownsPrincipal(trust.ownPrincipal, trust.owner) {
@@ -478,8 +452,7 @@ func schemaGrantsAreTrustworthy(
 		}
 	}
 
-	// MANAGE on the schema or on the catalog above it makes the privilege list
-	// complete, and one effective read reports both.
+	// One effective read reports MANAGE on the schema and on the catalog above it.
 	return holdsEffectivePrivilegeOn(ctx, client, trust, databricks.SecurableSchema, trust.fullName, managePrivilege, annos)
 }
 
@@ -504,9 +477,8 @@ func (b *schemaBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 	return nil, nil, nil
 }
 
-// Grants carries the sync session into the shared path so the workspace-Admin
-// check behind the trust rule is read once per workspace per sync rather than
-// once per schema.
+// Grants carries the sync session so the workspace-Admin check behind the trust
+// rule is read once per workspace per sync rather than once per schema.
 func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
 
@@ -551,12 +523,9 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 }
 
 // entitlementOnLiveRoute rebuilds the entitlement's schema from what Databricks
-// reports right now: the metastore owner, the catalog owner, the schema owner and
-// a workspace this sync still admits. The three owners are what the trust check
-// short-circuits on, and the last sync's copy of them can be hours old, so a
-// transfer away from the connector would otherwise let a partial privilege list
-// decide a write. The profile is trusted for the route to try first, never for
-// standing.
+// reports now: the three owners the trust check short-circuits on ride on the
+// profile, where they can be hours old, so a transfer away from the connector
+// would otherwise let a truncated privilege list decide the write.
 func (b *schemaBuilder) entitlementOnLiveRoute(
 	ctx context.Context,
 	entitlement *v2.Entitlement,
@@ -582,9 +551,8 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 	schema, rateLimit, err := b.client.GetSchema(ctx, route.Workspace, fullName)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
-		// Only Databricks naming the securable proves it is gone. A workspace the
-		// catalog is not bound to refuses with 403 instead, and reading that as an
-		// absence would report a revoke that never ran.
+		// Only Databricks naming the securable proves it gone; an unbound workspace
+		// refuses with 403, and reading that as an absence would report a false revoke.
 		if databricks.IsSecurableGone(err, errorCodeSchemaGone, errorCodeCatalogGone) {
 			return nil, errSecurableGone
 		}
@@ -608,12 +576,10 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 	return copyEntitlement, nil
 }
 
-// liveCatalogRoute picks the workspace the write goes through: the one the last
-// sync recorded when this sync still admits it and it still serves the catalog,
-// otherwise the first running in-scope workspace that does. A catalog no
-// workspace serves is not proof of deletion, because an unbound workspace answers
-// the same 404 as a deleted one, so that case refuses rather than reporting the
-// grant gone.
+// liveCatalogRoute picks the workspace the write goes through: the recorded one
+// when this sync still admits it and it still serves the catalog, otherwise the
+// first running in-scope workspace that does. A catalog no workspace serves is
+// not proof of deletion, so that case refuses.
 func (b *schemaBuilder) liveCatalogRoute(
 	ctx context.Context,
 	resource *v2.Resource,
@@ -622,9 +588,7 @@ func (b *schemaBuilder) liveCatalogRoute(
 ) (schemaRoute, *databricks.Catalog, error) {
 	if route, ok := b.profileRoute(resource, metastoreOwner); ok {
 		catalog, err := catalogThrough(ctx, b.client, route.Workspace, metastoreID, catalogName, annos)
-		// The recorded route is an optimization: any answer short of the catalog
-		// falls through to the walk, which reads the account listings and settles
-		// it there.
+		// Any answer short of the catalog falls through to the walk.
 		if err == nil && catalog != nil && catalog.MetastoreID == metastoreID {
 			return route, catalog, nil
 		}
@@ -675,8 +639,8 @@ func (b *schemaBuilder) liveCatalogRoute(
 
 // profileRoute is the route an earlier sync wrote, when this sync still admits
 // that workspace. The profile carries the three identifiers the configuration
-// matches on, so the allowlist and the exclude set are both answered without
-// reading the account's workspaces.
+// matches on, so the allowlist and the exclude set are answered without reading
+// the account's workspaces.
 func (b *schemaBuilder) profileRoute(resource *v2.Resource, metastoreOwner string) (schemaRoute, bool) {
 	profile := rs.GetProfile(resource)
 	route := schemaRoute{MetastoreOwner: metastoreOwner}

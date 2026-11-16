@@ -193,9 +193,9 @@ func (c *Client) ListSchemas(
 }
 
 // GetSchema (GET /api/2.1/unity-catalog/schemas/{full_name}) reads one schema
-// through workspaceId, which is a deployment name. The full name is dotted
-// ("catalog.schema"), and a workspace the catalog is not bound to answers 403,
-// while a deleted schema or catalog is named in error_code.
+// through workspaceId, which is a deployment name. The full name is dotted,
+// and a deleted schema or catalog is named in error_code while a workspace the
+// catalog is not bound to answers 403.
 func (c *Client) GetSchema(
 	ctx context.Context,
 	workspaceId, fullName string,
