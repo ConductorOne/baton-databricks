@@ -276,6 +276,12 @@ appears once under its metastore. The built-in `system` catalog and all catalogs
 Databricks identifies as `SYSTEM_CATALOG` (including `samples` when it has that
 type) are excluded, regardless of ownership.
 
+A workspace that refuses the catalog listing itself (401, 403, 404) leaves which
+catalogs exist unknown, so the sync fails with `FailedPrecondition` naming the
+metastore and that workspace instead of reporting a short list. Assign the
+service principal **Admin** on that workspace, or leave it out with `workspaces`
+or `databricks-exclude-workspaces`.
+
 ## Unity Catalog provisioning
 
 A metastore or catalog privilege can be granted to and revoked from a user,
@@ -296,8 +302,10 @@ through a workspace that passes that check. When no attached workspace does, the
 sync fails and ConductorOne keeps the grants it already has.
 
 For a catalog's full grants list, the service principal must own the metastore
-or catalog, hold `MANAGE` on the catalog, or have Admin assigned directly on the
-workspace whose admins group owns that catalog. Workspace Admin alone does not
+or the catalog itself, hold `MANAGE` on the catalog, or have Admin assigned
+directly on the workspace whose admins group owns that catalog. Ownership is
+matched against the service principal's own application ID, so a catalog owned
+by a group it belongs to does not count. Workspace Admin alone does not
 cover other catalogs. A non-owner using `MANAGE` also needs `USE_CATALOG` for
 catalog discovery. An incomplete grants list fails the sync rather than
 removing grants the connector cannot see.
