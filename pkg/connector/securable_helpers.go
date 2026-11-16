@@ -150,7 +150,7 @@ func ensureGrantsAreTrustworthy(
 
 // trustReadError classifies the 404 a trust read left for the level. A proven
 // absence reports errSecurableGone; an unproven one is refused, because read as
-// an empty result ConductorOne deletes everything the securable held.
+// an empty result C1 deletes everything the securable held.
 func trustReadError(level securableLevel, fullName, workspace string, err error) error {
 	if !errors.Is(err, errTrustRead404) {
 		return err
