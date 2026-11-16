@@ -292,7 +292,7 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	var sawCatalog, sawGone bool
+	var sawCatalog, sawGone, provenGone bool
 	var lastDeny error
 	for _, workspace := range usable {
 		catalog, err := catalogThrough(ctx, b.client, workspace.DeploymentName, metastoreID, catalogName, annos)
@@ -329,6 +329,17 @@ func (b *schemaBuilder) pushRoute(
 			workspaceID:    workspaceID,
 		}, annos)
 		if err != nil {
+			// The permissions read this check ends on names the catalog missing
+			// only when it is gone: a workspace the catalog is not bound to
+			// refuses with 403 instead, which deniesTrust catches above. So a
+			// catalog dropped between the listing and this read is an absence,
+			// not a failed sync.
+			if errors.Is(err, errCatalogGone) {
+				provenGone = true
+
+				continue
+			}
+
 			return err
 		}
 		if !complete {
@@ -343,9 +354,17 @@ func (b *schemaBuilder) pushRoute(
 
 		return nil
 	}
+	// A catalog proved gone holds no schemas, whether or not a workspace listed
+	// it a moment earlier. The catalog syncer drops the parent in the same sync,
+	// so this empties what ConductorOne is already removing. A refusal anywhere
+	// in the walk leaves the picture mixed, and nothing is emptied on it.
+	if provenGone && lastDeny == nil {
+		return nil
+	}
 	if !sawCatalog {
-		// The catalog syncer drops the parent in the same sync, so this empties
-		// what ConductorOne is already removing.
+		// A workspace that does not serve the catalog answers the same way as
+		// one whose catalog is gone, so this is an absence only when no
+		// workspace refused.
 		if sawGone && lastDeny == nil {
 			return nil
 		}

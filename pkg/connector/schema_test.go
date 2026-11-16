@@ -741,6 +741,30 @@ func TestSchemaListContinuesWhenTheFirstWorkspaceCannotListCompletely(t *testing
 	}
 }
 
+// A catalog dropped between the listing that found it and the privilege read
+// that ends the trust check answers CATALOG_DOES_NOT_EXIST on the permissions
+// endpoint, which a workspace the catalog is merely unbound from never does.
+// That is a proven absence, so List reports no schemas for the catalog the
+// catalog syncer removes in the same sync, rather than failing the sync.
+func TestSchemaListEmptiesACatalogProvedGoneByTheTrustRead(t *testing.T) {
+	f := &fakeSchemaAccount{
+		metastoreOwner: "eng",
+		catalogOwner:   "someone",
+		permStatus:     map[string]int{"wsa": http.StatusNotFound},
+		permErrorCode:  errorCodeCatalogGone,
+		schemas:        []map[string]any{{"name": "sales", "owner": "someone"}},
+	}
+	b := newTestSchemaBuilderAs(t, f, "app-9")
+
+	resources, err := listAllSchemas(t, b)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(resources) != 0 {
+		t.Fatalf("listed %d schemas, want none for a catalog proved gone", len(resources))
+	}
+}
+
 // The admins group that owns the catalog names its own workspace. A direct Admin
 // of that workspace reads every privilege, whatever route the schema is listed
 // through, so the first workspace already settles trust.
