@@ -113,8 +113,8 @@ func ensureGrantsAreTrustworthy(
 	owner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
 	metastoreOwner, _ := rs.GetProfileStringValue(profile, profileKeyMetastoreOwner)
 	workspaceID, _ := rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
-	// Only a schema hangs from a securable other than the metastore, so at the
-	// other levels this key is absent and the owner above is the metastore's.
+	// Only a schema hangs from something other than the metastore, so elsewhere
+	// this key is absent.
 	parentOwner, _ := rs.GetProfileStringValue(profile, profileKeyCatalogOwner)
 
 	trustworthy, err := level.trusts(ctx, client, securableTrust{
@@ -182,11 +182,8 @@ func (o securableOps) syncGrants(
 	pageToken := attr.PageToken.Token
 	if pageToken == "" && !level.listProvesTrust {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
-			// The trust read is the first call that can prove the securable gone,
-			// and one deleted between List and this read is not a failed sync.
-			// The permissions read below answers the same way, so answering
-			// differently here would fail the sync on the earlier of two reads
-			// that see the same deletion.
+			// The permissions read below answers a deletion the same way, so failing here
+			// would fail the sync on the earlier of two reads that see it.
 			if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
 				return nil, &rs.SyncOpResults{Annotations: annos}, nil
 			}
