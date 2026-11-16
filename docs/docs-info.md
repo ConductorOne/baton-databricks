@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs Unity Catalog metastores and their catalogs. Both resource types are opt-in — each stays off until enabled per resource type in ConductorOne.
+   > It also syncs Unity Catalog metastores and their catalogs. Both resource types are opt-in — each stays off until enabled per resource type in C1.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -47,7 +47,7 @@ While developing the connector, please fill out this form. This information is n
 
    * If applicable: Is the list of scopes or permissions different to sync (read) versus provision (read-write)? If so, list the difference here.
 
-     > No separate OAuth scopes. Catalog writes require metastore or catalog ownership, or `MANAGE` on the catalog; proving a catalog absent requires metastore ownership.
+     > No separate OAuth scopes. Catalog writes run the same trust check as reads, so they require metastore or catalog ownership, `MANAGE` on the catalog, or direct Admin on the workspace whose admins group owns it; proving a catalog absent requires metastore ownership.
 
    * What level of access or permissions does the user need in order to create the credentials? (For example, must be a super administrator, must have access to the admin console, etc.)
 
@@ -56,13 +56,14 @@ While developing the connector, please fill out this form. This information is n
 ## Limitations
 
 - **Direct grants only.** Databricks inherits privileges downward. The connector reports the assignments stored on the object. The inheritance endpoint does not return principal IDs.
-- **Full grants visibility is required.** Metastore ownership or direct workspace Admin permits metastore reads. Catalog reads require one of the catalog permissions listed above; workspace Admin applies only when that workspace's admins group owns the catalog. Admin inherited through a group does not count. The sync fails instead of reporting a partial list, so ConductorOne keeps the grants it already has.
+- **Full grants visibility is required.** Metastore ownership or direct workspace Admin permits metastore reads. Catalog reads require one of the catalog permissions listed above; workspace Admin applies only when that workspace's admins group owns the catalog. Admin inherited through a group does not count. The sync fails instead of reporting a partial list, so C1 keeps the grants it already has.
 - **Ownership is read-only.** It is shown and cannot be granted or revoked. An owner that is not an account identity (`System user`, `_workspace_admins_…`) is not shown.
 - **No `MANAGE` or `ALL_PRIVILEGES` on a metastore.** Databricks rejects both, so they are not offered.
 - **Read through one running workspace.** Privileges are not served on the account plane. The connector reads each metastore through the first running workspace in scope where it can see every privilege. With no running workspace in scope, the metastore is not synced and ConductorOne removes it. A workspace that is still provisioning fails the sync until it is `RUNNING`. An unreadable assignment list fails the sync and ConductorOne keeps the metastore.
 - **`workspaces` scopes metastores.** An allowlist that names no workspace on the account fails at credential validation, before any sync. A name that is also in `databricks-exclude-workspaces` is reported separately from a name the account does not have.
 - **Catalogs are opt-in.** The resource type is off until it is turned on from the connector's configuration page in C1.
-- **Catalog discovery visits every attached workspace in scope.** The connector asks each running workspace attached to the metastore, including for `ISOLATED` catalogs bound to only some workspaces. Each catalog name is kept once per metastore. A catalog bound only to workspaces the sync excludes is not listed, and ConductorOne removes it with its grants.
+- **Catalog discovery visits every attached workspace in scope.** The connector asks each running workspace attached to the metastore, including for `ISOLATED` catalogs bound to only some workspaces. Each catalog name is kept once per metastore. A catalog bound only to workspaces the sync excludes is not listed, and C1 removes it with its grants.
+- **A catalog is keyed by its name.** `CatalogInfo` exposes no immutable catalog id (only `name` and the derived `full_name`), so the resource id is `<metastore id>::<name>`. The update API accepts `new_name`, so an owner can rename a catalog; a rename re-keys the resource and its grants.
 - **System catalogs are excluded regardless of ownership.** The built-in `system` catalog and any catalog with `CatalogType == "SYSTEM_CATALOG"` are excluded, including `samples` when it has that type.
 - **Seeing a catalog needs more than `MANAGE`.** The list holds the catalogs the service principal owns or holds `USE_CATALOG` on, or every catalog when it is the metastore admin. `MANAGE` alone reads a catalog's privileges but does not make it appear.
 - **Not synced yet:** tables, volumes, functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.

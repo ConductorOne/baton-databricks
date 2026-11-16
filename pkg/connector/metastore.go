@@ -90,6 +90,7 @@ var metastoreLevel = securableLevel{
 	trustRemedy:     "the connector's service principal must own the metastore or be assigned Admin directly on the workspace",
 	permissionsName: metastorePermissionsName,
 	trusts:          metastoreGrantsAreTrustworthy,
+	listProvesTrust: true,
 }
 
 // List emits each metastore with the workspace its permissions are read through.
@@ -259,13 +260,11 @@ func (m *metastoreBuilder) entitlementOnLiveRoute(
 	}
 	liveOwner := metastores[found].Owner
 	profileOwner, _ := rs.GetProfileStringValue(profile, profileKeyOwner)
-	// The recorded workspace was picked under the owner the last sync saw, and
-	// the owner decides which workspaces read every privilege: with the
-	// connector owning the metastore any of them does, otherwise only the ones
-	// it is a direct Admin of. A transfer can therefore leave the recorded
-	// workspace unreadable while another attached one still works, so the route
-	// is kept only when it still reads under the live owner.
-	if workspace != nil && profileOwner != liveOwner {
+	// The owner decides which workspaces read every privilege: the metastore's
+	// owner reads through any of them, anyone else only through a workspace it
+	// is a direct Admin of. Either can be withdrawn after the sync that recorded
+	// the route, so the route is kept only when it still reads right now.
+	if workspace != nil {
 		readable := ownsPrincipal(m.clientID, liveOwner)
 		if !readable {
 			readable, err = isWorkspaceAdmin(ctx, m.client, m.clientID, strconv.Itoa(workspace.ID), annos)

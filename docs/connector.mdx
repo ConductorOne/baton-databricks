@@ -42,7 +42,7 @@ group's members as holders. Ownership is shown as a read-only `owner`
 entitlement — it cannot be granted or revoked through C1.
 
 <Note>
-The Metastores, Catalogs and Schemas resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Catalogs appear under their metastore and schemas under their catalog, and all of them use the same OAuth credentials; no additional configuration fields are needed.
+The Metastores, Catalogs and Schemas resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Catalogs sync under their metastore and schemas under their catalog, so turn on every level above the one you want; turning on Catalogs alone, or Schemas without Catalogs, syncs nothing. They all use the same OAuth credentials; no additional configuration fields are needed.
 </Note>
 
 <Note>
@@ -51,8 +51,8 @@ The Metastores, Catalogs and Schemas resource types are turned off by default. T
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
 - A catalog is synced when any running workspace in scope attached to its metastore lists it, and the same catalog name is kept once per metastore. A catalog that only excluded workspaces can reach is not synced.
-- The built-in `system` catalog and catalogs Databricks identifies as `SYSTEM_CATALOG` are excluded regardless of ownership. This includes `samples` when Databricks reports that type.
-- `information_schema` is skipped.
+- The built-in `system` catalog is never synced, and neither is any other catalog Databricks marks as a system catalog, whoever owns it.
+- `information_schema` is skipped in every catalog. Its views are owned by Databricks system principals that do not exist in your account.
 - If a catalog becomes unreachable, access requests can fail until the connector can distinguish deletion from a binding or visibility change. Catalog ownership or **MANAGE** alone cannot prove deletion; that check requires the **Metastore Admin**.
 - Unity Catalog tags are not synced.
 </Note>
@@ -64,6 +64,8 @@ The connector authenticates with **OAuth** — an account-level service principa
 ### Optional: faster updates between syncs
 
 By default, the Databricks connector picks up access changes on its regular sync schedule. You can optionally turn on incremental sync, which checks Databricks' activity log between full syncs so that changes like new group members show up in C1 sooner. Full syncs still run as usual and remain the source of truth. Removed group memberships are picked up incrementally too, but deleted users, groups, and service principals are only reflected after the next full sync.
+
+Role assignments that Databricks stores in access-control rule sets are also only reflected after the next full sync. These are group roles such as group manager, service principal roles, and the account `marketplace.admin` role.
 
 Incremental sync is turned on by providing the ID of a Databricks SQL warehouse (the **SQL Warehouse ID** setting, `BATON_SQL_WAREHOUSE_ID`) and turned off by leaving it empty — there is no separate on/off switch. Ask your connector operator or C1 support contact to enable it for you.
 
@@ -80,7 +82,7 @@ Your Databricks account must meet all of the following:
   - **Can use** on the SQL warehouse
 
 <Note>
-**We recommend a serverless SQL warehouse.** It starts in seconds, while a pro or classic warehouse can take several minutes to start. Each incremental update waits at most 5 minutes for the warehouse and query, so a slower start can delay updates until the next one. Serverless SQL warehouses require the Premium plan or above.
+**We recommend a serverless SQL warehouse.** It starts in seconds, while a pro or classic warehouse can take several minutes to start. The connector waits up to about 6 minutes for the warehouse to start and each query to finish, so a slower start can delay updates until the next one. Serverless SQL warehouses require the Premium plan or above.
 </Note>
 
 <Warning>
@@ -113,7 +115,7 @@ A Databricks user with the **Account admin** role, and the **Metastore admin** r
   </Step>
 </Steps>
 
-The SQL warehouse can live in any workspace in that region — the connector finds it automatically. Changes reach C1 roughly four hours after they happen: Databricks delivers audit log entries with a delay, so the connector waits before reading them.
+The SQL warehouse can live in any workspace in that region that is not listed in **Exclude Workspaces**, including a workspace outside **Workspaces** — the connector finds it automatically. **Workspaces** and **Exclude Workspaces** also limit which workspaces incremental sync updates, as they do for full syncs. Changes reach C1 roughly four hours after they happen: Databricks delivers audit log entries with a delay, so the connector waits before reading them.
 
 <Note>
 The incremental sync setup isn't checked when the connector starts, so a problem with it never blocks full syncs or provisioning. If something is missing, such as a permission or a warehouse that can't be found, every incremental update fails and the connector logs an error that names the cause until you fix it.
@@ -180,11 +182,15 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
   </Step>
 </Steps>
 
+<Warning>
+Without workspace **Admin** or **Metastore Admin**, the metastore sync fails with a permission error naming the metastore. Databricks shows a caller only the grants it is allowed to see, so reporting that shorter list would make C1 treat the rest as revoked.
+</Warning>
+
 ### Let the service principal read catalog privileges
 
-Skip this section if you are not syncing catalogs, or if the service principal is already the **Metastore Admin**. Databricks shows a catalog's full privilege list only to the metastore admin, the catalog owner, or a holder of **MANAGE** on it. Workspace **Admin** is enough only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`).
+Skip this section if you are not syncing catalogs, or if the service principal is already the **Metastore Admin**. Databricks shows a catalog's full privilege list only to the metastore admin, the service principal that owns the catalog itself, or a holder of **MANAGE** on it. The connector matches ownership against the service principal itself, so a catalog owned by a group it belongs to does not count. **Admin** assigned directly to the service principal on a workspace is enough only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`).
 
-Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced. **MANAGE** alone is not enough: Databricks does not return a catalog at all unless the caller is the metastore admin, owns it, or holds **USE CATALOG** on it, and a catalog it does not return is one ConductorOne removes.
+Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced. **MANAGE** alone is not enough: Databricks does not return a catalog at all unless the caller is the metastore admin, owns it, or holds **USE CATALOG** on it, and a catalog it does not return is one C1 removes.
 
 <Steps>
   <Step>
@@ -199,9 +205,11 @@ Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced.
 </Steps>
 
 <Warning>
-For a discovered catalog that is not excluded by the system-catalog rule above, missing these permissions fails the sync naming that catalog. Databricks would otherwise return only the privileges the caller can see, and reporting that short list would make ConductorOne delete the grants it cannot read. Failing keeps what ConductorOne already has.
+For a discovered catalog that is not excluded by the system-catalog rule above, missing these permissions fails the sync naming that catalog. Databricks would otherwise return only the privileges the caller can see, and reporting that short list would make C1 delete the grants it cannot read. Failing keeps what C1 already has.
 
-The connector asks every running workspace in scope attached to the metastore, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not, and ConductorOne removes it and its grants.
+The connector asks every running workspace in scope attached to the metastore, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not, and C1 removes it and its grants.
+
+If the service principal cannot list catalogs at all through one of those workspaces, the connector cannot tell which catalogs are there, so the sync fails naming the metastore and that workspace instead of removing the catalogs it could not list. Give the service principal **Admin** on that workspace, or leave that workspace out with **Workspaces** or **Exclude Workspaces**.
 </Warning>
 
 ### Let the service principal list every schema
@@ -354,7 +362,7 @@ stringData:
   BATON_CLIENT_ID: <C1 client ID>
   BATON_CLIENT_SECRET: <C1 client secret>
   
-  # Databricks account ID (required for both credential options below)
+  # Databricks account ID (required)
   BATON_ACCOUNT_ID: <Databricks account ID>
 
   # Databricks credentials: OAuth
@@ -370,7 +378,7 @@ stringData:
   # Optional: exclude specific workspaces from the sync
   # (workspace name, deployment name, or numeric ID).
   # Mutually exclusive with BATON_WORKSPACES — set one or the other, never both.
-  BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
+  # BATON_DATABRICKS_EXCLUDE_WORKSPACES: <workspace-a,workspace-b>
 
   # Optional: setting this enables incremental sync; leave it unset to disable it.
   # ID of the SQL warehouse used to query the system.access.audit log between full syncs.

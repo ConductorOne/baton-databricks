@@ -24,9 +24,6 @@ import (
 // securable's full name is already dot-separated.
 const securableKeySeparator = "::"
 
-// securableLevel is the only thing the permissions endpoint needs to tell one
-// Unity Catalog level from another: how a resource id addresses the securable,
-// what it can be granted, and what a refusal tells the operator.
 // securableOps is what the shared securable path needs: the client, the
 // connector's own principal, which principal types the sync emits, and the
 // level that decides the rules. Each builder embeds one, so the three shared
@@ -39,6 +36,9 @@ type securableOps struct {
 	level    securableLevel
 }
 
+// securableLevel is the only thing the permissions endpoint needs to tell one
+// Unity Catalog level from another: how a resource id addresses the securable,
+// what it can be granted, and what a refusal tells the operator.
 type securableLevel struct {
 	// securableType is the endpoint path segment, lowercase. It is not the
 	// uppercase securable_type a listed securable carries.
@@ -69,6 +69,11 @@ type securableLevel struct {
 	// the securable. What proves that differs per level, so the rule travels
 	// with the level rather than being decided by the shared path.
 	trusts func(ctx context.Context, client *databricks.Client, trust securableTrust, annos *annotations.Annotations) (bool, error)
+
+	// listProvesTrust is true when List already refused every securable whose
+	// privilege list is partial, so Grants does not prove it again. False is
+	// the safe default: the check runs on the first page of Grants.
+	listProvesTrust bool
 }
 
 // securableTrust is what the per-level rules read to settle a privilege list:
@@ -149,7 +154,7 @@ func trustReadError(level securableLevel, fullName, workspace string, err error)
 		level.noun, fullName, workspace), err)
 }
 
-// syncSecurableGrants emits the privileges held on one securable, plus its owner.
+// syncGrants emits the privileges held on one securable, plus its owner.
 // The workspace comes off the profile the last List wrote: every Unity Catalog
 // read is addressed to a workspace host, and resolving one here would be an
 // account-plane round trip per securable.
@@ -175,9 +180,7 @@ func (o securableOps) syncGrants(
 
 	annos := annotations.Annotations{}
 	pageToken := attr.PageToken.Token
-	// List already refused a catalog or a metastore whose privilege list is
-	// partial, so Grants does not prove it again.
-	if pageToken == "" && level.securableType != databricks.SecurableMetastore && level.securableType != databricks.SecurableCatalog {
+	if pageToken == "" && !level.listProvesTrust {
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
 			// The trust read is the first call that can prove the securable gone,
 			// and one deleted between List and this read is not a failed sync.
@@ -362,7 +365,7 @@ func (c change) updateError(verb string, err error) error {
 	return fmt.Errorf("databricks-connector: failed to %s %s on %s %s: %w", verb, c.privilege, c.level.noun, c.fullName, err)
 }
 
-// grantSecurable adds one privilege. Databricks no-ops a PATCH it cannot apply,
+// grant adds one privilege. Databricks no-ops a PATCH it cannot apply,
 // so the pre-read decides GrantAlreadyExists and the echo is the only proof the
 // change landed. A securable the trust check proves gone answers NotFound.
 func (o securableOps) grant(
@@ -414,7 +417,7 @@ func (o securableOps) grant(
 	return annos, nil
 }
 
-// revokeSecurable removes one privilege. Databricks no-ops a privilege already
+// revoke removes one privilege. Databricks no-ops a privilege already
 // absent, so the pre-read decides GrantAlreadyRevoked and the echo confirms the
 // removal. A securable the trust check proves gone holds nothing to revoke, so
 // it reports the grant already revoked rather than an unreadable securable.

@@ -378,6 +378,42 @@ func TestMetastoreGrantKeepsTheRouteWhenItStillReadsUnderTheNewOwner(t *testing.
 	}
 }
 
+// The owner deciding the route can stay the same while the standing that chose
+// the workspace is withdrawn: a direct Admin assignment removed from the recorded
+// workspace but kept on another attached one. Routing there anyway would fail the
+// call with PermissionDenied, which ConductorOne reports as a failed grant.
+func TestMetastoreGrantRepicksTheRouteWhenOnlyTheAdminWasRemoved(t *testing.T) {
+	f := defaultFakeAccount()
+	f.metastores = []map[string]any{{"metastore_id": "ms-a", "name": "main", "owner": "someone-else"}}
+	f.assignments = map[string]any{"ms-a": []int{1, 2}}
+	f.workspaces = []map[string]any{
+		{"workspace_id": 1, "workspace_name": "prod", "deployment_name": "wsa", "workspace_status": "RUNNING"},
+		{"workspace_id": 2, "workspace_name": "dev", "deployment_name": "wsb", "workspace_status": "RUNNING"},
+	}
+	// Admin on wsb only: the assignment that picked wsa is gone.
+	f.workspaceMembers = map[string]any{"1": nil, "2": adminByAppID}
+	m := newTestMetastoreBuilderAs(t, f, nil, syncPrincipals{}, "app-9")
+
+	// The profile carries the same owner the account reports, so nothing about
+	// the owner signals that the route has to be re-read.
+	resource, err := metastoreResource(context.Background(), &databricks.Metastore{
+		MetastoreID: "ms-a", Name: "main", Owner: "someone-else",
+	}, testAccountResourceID, "wsa", "1", "prod")
+	if err != nil {
+		t.Fatalf("metastoreResource: %v", err)
+	}
+	entitlement := grant.NewGrant(resource, "CREATE_CATALOG", alice.GetId()).GetEntitlement()
+
+	routed, err := m.entitlementOnLiveRoute(context.Background(), entitlement, &annotations.Annotations{})
+	if err != nil {
+		t.Fatalf("entitlementOnLiveRoute: %v", err)
+	}
+	workspace, _ := rs.GetProfileStringValue(rs.GetProfile(routed.GetResource()), profileKeyWorkspace)
+	if workspace != "wsb" {
+		t.Errorf("workspace = %q, want wsb: wsa no longer reads even though the owner did not change", workspace)
+	}
+}
+
 // testMetastore is the resource a provisioning call carries: an id, no profile.
 func testMetastore(t *testing.T) *v2.Resource {
 	t.Helper()
