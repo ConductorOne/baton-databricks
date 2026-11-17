@@ -387,9 +387,6 @@
       "resourceType": {
         "id": "table",
         "displayName": "Table",
-        "traits": [
-          "TRAIT_APP"
-        ],
         "annotations": [
           {
             "@type": "type.googleapis.com/c1.connector.v2.OptInRequired"
@@ -504,12 +501,12 @@
       "resourceType": {
         "id": "volume",
         "displayName": "Volume",
-        "traits": [
-          "TRAIT_APP"
-        ],
         "annotations": [
           {
             "@type": "type.googleapis.com/c1.connector.v2.OptInRequired"
+          },
+          {
+            "@type": "type.googleapis.com/c1.connector.v2.SkipEntitlements"
           },
           {
             "@type": "type.googleapis.com/c1.connector.v2.CapabilityPermissions",
@@ -539,9 +536,6 @@
                 "permission": "USE_SCHEMA"
               }
             ]
-          },
-          {
-            "@type": "type.googleapis.com/c1.connector.v2.SkipEntitlements"
           }
         ]
       },
