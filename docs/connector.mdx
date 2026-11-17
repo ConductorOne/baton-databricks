@@ -221,7 +221,7 @@ Workspace **Admin** does not list every schema, except when the catalog is owned
 Listing the schemas is not the same as reading who holds what on them. For a schema's full privilege list, and to grant or revoke a schema privilege, the service principal must own the metastore, the catalog or the schema, hold **MANAGE** on the schema or on the catalog above it, or be that direct Admin. **USE SCHEMA** and **ALL PRIVILEGES** list every schema and do not read their privileges, because Databricks leaves **MANAGE** out of **ALL PRIVILEGES**. A service principal given only **USE SCHEMA** gets its schemas synced and then a permission error on their grants, so grant **MANAGE** on the catalog to cover both.
 
 <Warning>
-A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error. `system` and `samples` are not a special case of that listing: the catalog sync leaves them out, when their privilege list cannot be proven complete, before their schemas are read.
+A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error. System catalogs are never synced, whoever owns them, so their schemas are not synced either.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
