@@ -102,6 +102,11 @@ Metastores, catalogs, schemas, tables, and volumes are Unity Catalog securables
 and are opt-in: each type stays off until it is enabled for the connector in
 ConductorOne. They use the existing OAuth credentials and configuration fields.
 
+The opt-in is a ConductorOne setting, so it does not apply to the CLI. A local
+run with no selection syncs every type, and it fails on a service principal that
+cannot list every table and volume. Pass `--sync-resource-types` to limit it, for
+example `--sync-resource-types account,user,group,metastore,catalog,schema`.
+
 ## Authentication
 
 OAuth is the only authentication method: an account-level service principal's
@@ -302,14 +307,9 @@ a workspace binding or visibility change. Requests can fail with
 
 The service principal must own the metastore, or be assigned **Admin** directly
 on at least one running workspace attached to it. Admin inherited only through a
-group is not enough. The connector reads a metastore only through a workspace
-that passes that check. Listing every schema takes ownership of the catalog, or
-`MANAGE`, `USE_SCHEMA`, or `ALL_PRIVILEGES` on that catalog. Listing every table
-or volume needs more: ownership of the metastore, the catalog, or the schema,
-direct Admin when the workspace admins group owns the catalog, or
-`ALL_PRIVILEGES` on the catalog. `MANAGE` and `USE_SCHEMA` are not enough for
-tables or volumes. Databricks answers an under-permissioned read with HTTP 200
-and only the rows the caller may see. The connector refuses that read, so the
+group is not enough. Databricks answers an under-permissioned read with HTTP 200
+and only the rows the caller may see, so the connector reads a metastore only
+through a workspace that passes that check. When no attached workspace does, the
 sync fails and ConductorOne keeps the grants it already has.
 
 For a catalog's full grants list, the service principal must own the metastore
@@ -329,6 +329,17 @@ schemas is a weaker requirement: `USE_SCHEMA` and `ALL_PRIVILEGES` on the
 catalog each return every schema, and neither reads their privileges. A service
 principal holding only one of them syncs its schemas and then fails on their
 grants.
+
+For a table's or a volume's full grants list, and to grant or revoke one of
+their privileges, the service principal must own the metastore, the catalog, the
+schema or the object itself, hold `MANAGE` on the object, its schema or its
+catalog, or have Admin assigned directly on the workspace whose admins group
+owns the catalog. Listing them is a separate right, and a stricter one than
+listing the schemas: ownership of the metastore, the catalog or the schema, that
+same Admin standing, or `ALL_PRIVILEGES` on the catalog. `USE_SCHEMA` and
+`MANAGE` return every schema and neither returns every table or volume, so a
+service principal holding only one of them syncs the schemas and then fails on
+their children.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
