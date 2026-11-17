@@ -519,3 +519,43 @@ func childEntitlementOnLiveRoute(
 
 	return copyEntitlement, nil
 }
+
+// schemaChildIsGone settles a 404 that a missing table or volume and a workspace
+// that cannot serve its catalog both answer with. The parent is read first
+// through that same workspace: only a schema it answers 200 for makes the
+// securable's own 404 proof of deletion. Any other answer leaves the absence
+// unproven, which is what keeps C1 from removing what it already has.
+func schemaChildIsGone(
+	ctx context.Context,
+	client *databricks.Client,
+	noun, fullName, workspace string,
+	annos *annotations.Annotations,
+	readSecurable func(ctx context.Context, workspace, fullName string) (*v2.RateLimitDescription, error),
+) (bool, error) {
+	cut := strings.LastIndex(fullName, schemaNameSeparator)
+	if cut <= 0 {
+		return false, status.Errorf(codes.InvalidArgument,
+			"databricks-connector: %s %s has no parent schema in its name", noun, fullName)
+	}
+	schemaFullName := fullName[:cut]
+
+	_, rateLimit, err := client.GetSchema(ctx, workspace, schemaFullName)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		return false, fmt.Errorf(
+			"databricks-connector: workspace %s does not answer for schema %s, so a %s missing there cannot be told from one it cannot serve: %w",
+			workspace, schemaFullName, noun, err)
+	}
+
+	rateLimit, err = readSecurable(ctx, workspace, fullName)
+	noteRateLimit(annos, rateLimit)
+	switch {
+	case err == nil:
+		return false, nil
+	case apiStatus(err) == http.StatusNotFound:
+		// The workspace serves the parent and still has no such securable.
+		return true, nil
+	}
+
+	return false, err
+}

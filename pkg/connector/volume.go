@@ -56,33 +56,30 @@ var volumeLevel = securableLevel{
 	trustRemedy:     volumeTrustRemedy,
 	permissionsName: volumePermissionsName,
 	trusts:          volumeGrantsAreTrustworthy,
-	// Dropping a parent drops the volume with it, and both parent codes name
-	// what is missing. The generic code does not, so it is confirmed first.
-	goneErrorCodes:     []string{errorCodeSchemaGone, errorCodeCatalogGone},
-	ambiguousGoneCodes: []string{errorCodeGenericGone},
+	// No code names a missing volume: Databricks never returns
+	// VOLUME_DOES_NOT_EXIST, and the generic code and both parent codes all come
+	// back from a workspace that cannot serve the catalog too. None of them is
+	// proof on its own, so every one is confirmed before it is believed.
+	ambiguousGoneCodes: []string{errorCodeGenericGone, errorCodeSchemaGone, errorCodeCatalogGone},
 	confirmGone:        volumeIsGone,
 }
 
-// volumeIsGone reads the volume itself after the permissions endpoint answered
-// the generic 404. The volume endpoint answers 200 while the volume exists, so
-// anything but a gone code there means the permissions read failed for another
-// reason and the absence stays unproven.
+// volumeIsGone confirms the parent schema through the same workspace and then
+// reads the volume itself. The volume endpoint answers 200 while the volume
+// exists, so a 404 from a workspace that has just served the parent is the
+// volume being gone rather than one it cannot reach.
 func volumeIsGone(
 	ctx context.Context,
 	client *databricks.Client,
 	fullName, workspace string,
 	annos *annotations.Annotations,
 ) (bool, error) {
-	volume, rateLimit, err := client.GetVolume(ctx, workspace, fullName)
-	noteRateLimit(annos, rateLimit)
-	if err == nil {
-		return volume == nil, nil
-	}
-	if databricks.IsSecurableGone(err, errorCodeGenericGone, errorCodeSchemaGone, errorCodeCatalogGone) {
-		return true, nil
-	}
+	return schemaChildIsGone(ctx, client, "volume", fullName, workspace, annos,
+		func(ctx context.Context, workspace, fullName string) (*v2.RateLimitDescription, error) {
+			_, rateLimit, err := client.GetVolume(ctx, workspace, fullName)
 
-	return false, err
+			return rateLimit, err
+		})
 }
 
 type volumeBuilder struct {
@@ -241,10 +238,10 @@ func (b *volumeBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 }
 
 // entitlementOnLiveRoute reads the volume itself after its parents, because its
-// owner is one of the four the trust check short-circuits on. The read runs
-// through a workspace that has just served the catalog and the schema, so a
-// generic 404 here is the volume being gone rather than a workspace that cannot
-// reach it.
+// owner is one of the four the trust check short-circuits on. liveChildRoute has
+// just had this workspace serve the catalog and answer 200 for the schema, so a
+// 404 here — generic or naming a parent — is the volume being gone rather than a
+// workspace that cannot route to it.
 func (b *volumeBuilder) entitlementOnLiveRoute(
 	ctx context.Context,
 	entitlement *v2.Entitlement,

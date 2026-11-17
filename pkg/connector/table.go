@@ -155,10 +155,30 @@ func tableLevel(privileges []string) securableLevel {
 		trustRemedy:     tableTrustRemedy,
 		permissionsName: tablePermissionsName,
 		trusts:          tableGrantsAreTrustworthy,
-		// Dropping a parent drops the table with it, so any of the three codes
-		// means there is no table left to revoke on.
-		goneErrorCodes: []string{errorCodeTableGone, errorCodeSchemaGone, errorCodeCatalogGone},
+		// Only a code naming the table itself is proof. Dropping a parent does drop
+		// the table with it, but a workspace that cannot serve the catalog answers
+		// with the parent's code too, so those two are settled by reading the parent
+		// and then the table through that same workspace.
+		goneErrorCodes:     []string{errorCodeTableGone},
+		ambiguousGoneCodes: []string{errorCodeSchemaGone, errorCodeCatalogGone},
+		confirmGone:        tableIsGone,
 	}
+}
+
+// tableIsGone confirms the parent schema through the same workspace before it
+// believes a 404 that named a parent rather than the table.
+func tableIsGone(
+	ctx context.Context,
+	client *databricks.Client,
+	fullName, workspace string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	return schemaChildIsGone(ctx, client, "table", fullName, workspace, annos,
+		func(ctx context.Context, workspace, fullName string) (*v2.RateLimitDescription, error) {
+			_, rateLimit, err := client.GetTable(ctx, workspace, fullName)
+
+			return rateLimit, err
+		})
 }
 
 func tableResource(
@@ -403,6 +423,9 @@ func (b *tableBuilder) entitlementOnLiveRoute(
 			table, rateLimit, err := b.client.GetTable(ctx, route.Workspace, fullName)
 			noteRateLimit(annos, rateLimit)
 			if err != nil {
+				// liveChildRoute has just had this workspace serve the catalog and
+				// answer 200 for the schema, so a parent code here is a deletion
+				// between the two reads rather than a workspace that cannot route.
 				if databricks.IsSecurableGone(err, errorCodeTableGone, errorCodeSchemaGone, errorCodeCatalogGone) {
 					return nil, errSecurableGone
 				}
