@@ -19,12 +19,12 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
-// profileKeySchemaOwner carries the owner of the parent schema. Owning the
-// schema is one of the things that makes a table's or a volume's privilege read
-// complete, and Grants is handed only the table, so List writes the owner down
-// instead of listing the schemas again on every call.
+// profileKeySchemaOwner carries the parent schema's owner, which is one of the
+// things that makes a table's or a volume's privilege read complete. Grants is
+// handed only the table, so List writes it down.
 const profileKeySchemaOwner = "schema_owner"
 
 // schemaChildRoute is the workspace a schema's tables or volumes are listed
@@ -41,12 +41,9 @@ type schemaChildRoute struct {
 }
 
 // listSchemaChildren pages one level that hangs from a schema — a table or a
-// volume. pushSchemaChildRoute re-runs the schema syncer's completeness proof
-// on the first page of every schema, once for tables and again for volumes.
-// The privilege reads in that proof bypass the HTTP cache. The owners the
-// proof learns are written onto each resource, so Grants does not repeat it.
-//
-// fetch reads one page through the routed workspace and turns it into resources.
+// volume — through a workspace proved to list every one of them, calling fetch
+// for each page. The owners that proof learns are written onto each resource,
+// so Grants does not run it again.
 func listSchemaChildren(
 	ctx context.Context,
 	client *databricks.Client,
@@ -59,6 +56,7 @@ func listSchemaChildren(
 	fetch func(ctx context.Context, route schemaChildRoute, metastoreID, catalogName, schemaName, pageToken string) (
 		[]*v2.Resource, string, *v2.RateLimitDescription, error),
 ) ([]*v2.Resource, *rs.SyncOpResults, error) {
+	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
 	if parentResourceID.GetResourceType() != schemaResourceType.Id {
 		return nil, nil, nil
 	}
@@ -105,6 +103,11 @@ func listSchemaChildren(
 			schemaChildListingError(noun, catalogName+schemaNameSeparator+schemaName, route.Workspace, err)
 	}
 
+	if next != "" && next == bag.PageToken() {
+		return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.Internal,
+			"databricks-connector: listing the %ss of schema %s.%s repeated page token %q", noun, catalogName, schemaName, next)
+	}
+
 	nextToken, err := bag.NextToken(next)
 	if err != nil {
 		return nil, &rs.SyncOpResults{Annotations: annos}, err
@@ -121,8 +124,10 @@ const childListRemedy = "the connector's service principal must own the metastor
 
 // pushSchemaChildRoute records a workspace that can list every table or volume
 // of the schema, walking the running in-scope workspaces until one serves the
-// catalog and the child listing is complete. A workspace that does not serve it
-// is skipped; an empty result is an error unless every workspace named it gone.
+// catalog, serves the schema and proves the child listing complete. A workspace
+// that answers neither is skipped and the walk goes on. Pushing nothing empties
+// the listing, so that is reserved for a parent every workspace named as gone
+// with none refusing a read; any refusal left standing is an error instead.
 func pushSchemaChildRoute(
 	ctx context.Context,
 	client *databricks.Client,
@@ -153,22 +158,25 @@ func pushSchemaChildRoute(
 	}
 
 	owner, err := metastoreOwner(ctx, client, metastoreID, annos)
+	// The metastore syncer removes the parent in the same sync.
+	if errors.Is(err, errMetastoreGone) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 
 	fullName := catalogName + schemaNameSeparator + schemaName
-	var sawCatalog, sawGone bool
+	var sawCatalog, sawGone, provenGone, sawForeign bool
 	var lastDeny error
 	for i := range usable {
 		workspace := usable[i]
 		catalog, err := catalogThrough(ctx, client, workspace.DeploymentName, metastoreID, catalogName, annos)
 		if err != nil {
-			// A workspace that does not serve the catalog says nothing about the
-			// schema below it, so the walk goes on. Returning the error instead
-			// reaches the SDK as NotFound for a 404 carrying no code, which it
-			// reads as a warning: the children would be emitted as none and
-			// ConductorOne would delete them.
+			// A 404 carrying no code reaches the SDK as NotFound, which it reads as
+			// a warning: the children would be emitted as none and C1 would delete
+			// them. A workspace that does not serve the catalog says nothing about
+			// the schema below it, so the walk goes on instead.
 			if errors.Is(err, errCatalogGone) {
 				sawGone = true
 
@@ -183,9 +191,16 @@ func pushSchemaChildRoute(
 			return err
 		}
 		if catalog == nil {
+			// A catalog of another metastore is an answer, not an absence, so it
+			// cannot stand in for proof that this metastore's catalog is gone.
+			sawForeign = true
+
 			continue
 		}
 		sawCatalog = true
+		// The reads run in order, so a workspace serving the catalog now supersedes a
+		// gone answer an earlier one gave.
+		provenGone = false
 
 		route := schemaChildRoute{
 			Workspace:      workspace.DeploymentName,
@@ -204,6 +219,14 @@ func pushSchemaChildRoute(
 		}
 		schemasComplete, err := schemaListingIsComplete(ctx, client, trust, annos)
 		if err != nil {
+			// A workspace the catalog is not bound to refuses with 403, which
+			// deniesTrust takes above, so this read names it missing only when it is.
+			if errors.Is(err, errCatalogGone) {
+				provenGone = true
+
+				continue
+			}
+
 			return err
 		}
 
@@ -214,6 +237,15 @@ func pushSchemaChildRoute(
 			schema, err = nil, nil
 		}
 		if err != nil {
+			// A workspace that refuses the schema read says nothing about the ones
+			// that have not been asked yet, so the walk goes on as it does for the
+			// catalog read above.
+			if deniesTrust(err) {
+				lastDeny = err
+
+				continue
+			}
+
 			return err
 		}
 		if schemasComplete && schema == nil {
@@ -233,6 +265,12 @@ func pushSchemaChildRoute(
 		trust.schemaOwner = schema.Owner
 		childrenComplete, err := childListingIsComplete(ctx, client, trust, annos)
 		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				provenGone = true
+
+				continue
+			}
+
 			return err
 		}
 		if !childrenComplete {
@@ -248,11 +286,14 @@ func pushSchemaChildRoute(
 
 		return nil
 	}
+	// A catalog proved gone holds no tables or volumes, and the catalog syncer
+	// drops the parent in the same sync. A refusal anywhere leaves the picture mixed.
+	if provenGone && lastDeny == nil {
+		return nil
+	}
 	if !sawCatalog {
-		// Every workspace named the catalog as gone and none refused the read.
-		// The catalog syncer drops it in the same sync, so this empties what
-		// ConductorOne is already removing.
-		if sawGone && lastDeny == nil {
+		// A workspace that does not serve the catalog answers like a gone one.
+		if sawGone && lastDeny == nil && !sawForeign {
 			return nil
 		}
 		msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
@@ -358,7 +399,9 @@ func schemaChildProfile(metastoreID, catalogName, schemaName, fullName, owner, s
 	}
 }
 
-// schemaChildGrantsAreTrustworthy is true for an owner of the table or volume, its schema, its catalog, or the metastore, or for a holder of MANAGE on any of those.
+// schemaChildGrantsAreTrustworthy is true for an owner of the table or volume,
+// its schema, its catalog or the metastore, for a holder of MANAGE on any of
+// those, or for a direct Admin when the workspace admins group owns the catalog.
 func schemaChildGrantsAreTrustworthy(
 	ctx context.Context,
 	client *databricks.Client,
@@ -385,4 +428,94 @@ func schemaChildGrantsAreTrustworthy(
 	// MANAGE on the securable, its schema or its catalog makes the privilege
 	// list complete, and one effective read reports all three.
 	return holdsEffectivePrivilegeOn(ctx, client, trust, securableType, trust.fullName, managePrivilege, annos)
+}
+
+// liveChildRoute rebuilds the route and the owners above a table or a volume
+// from what Databricks reports now. The metastore owner comes from a live
+// listing, the catalog from the recorded workspace when this sync still admits
+// it and otherwise from the first running in-scope workspace that serves it,
+// and the schema from a read through that workspace.
+func liveChildRoute(
+	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
+	workspaces map[string]struct{},
+	resource *v2.Resource,
+	metastoreID, catalogName, schemaName string,
+	annos *annotations.Annotations,
+) (schemaChildRoute, error) {
+	owner, err := metastoreOwner(ctx, client, metastoreID, annos)
+	if err != nil {
+		return schemaChildRoute{}, err
+	}
+
+	route, catalog, err := liveCatalogRoute(ctx, client, clientID, workspaces, resource, metastoreID, catalogName, owner, annos)
+	if err != nil {
+		return schemaChildRoute{}, err
+	}
+
+	fullName := catalogName + schemaNameSeparator + schemaName
+	schema, rateLimit, err := client.GetSchema(ctx, route.Workspace, fullName)
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		// Only Databricks naming the securable proves it gone; an unbound workspace
+		// refuses with 403, and reading that as an absence would report a false revoke.
+		if databricks.IsSecurableGone(err, errorCodeSchemaGone, errorCodeCatalogGone) {
+			return schemaChildRoute{}, errSecurableGone
+		}
+
+		return schemaChildRoute{}, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: failed to read schema %s through workspace %s", fullName, route.Workspace), err)
+	}
+
+	return schemaChildRoute{
+		Workspace:      route.Workspace,
+		WorkspaceID:    route.WorkspaceID,
+		WorkspaceName:  route.WorkspaceName,
+		MetastoreOwner: owner,
+		CatalogOwner:   catalog.Owner,
+		SchemaOwner:    schema.Owner,
+	}, nil
+}
+
+// childEntitlementOnLiveRoute rebuilds the entitlement's table or volume from
+// what Databricks reports now: the four owners the trust check short-circuits
+// on — metastore, catalog, schema and the securable itself — ride on the
+// profile, where they can be hours old, so a transfer away from the connector
+// would otherwise let a truncated privilege list decide the write. read is the
+// level's own leaf read, which also answers whether the securable is gone.
+func childEntitlementOnLiveRoute(
+	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
+	workspaces map[string]struct{},
+	noun string,
+	entitlement *v2.Entitlement,
+	annos *annotations.Annotations,
+	read func(ctx context.Context, route schemaChildRoute, metastoreID, catalogName, schemaName, name string,
+		parent *v2.ResourceId, annos *annotations.Annotations) (*v2.Resource, error),
+) (*v2.Entitlement, error) {
+	resource := entitlement.GetResource()
+	metastoreID, catalogName, schemaName, name, err := parseSchemaChildID(resource.GetId().GetResource(), noun)
+	if err != nil {
+		return nil, err
+	}
+
+	route, err := liveChildRoute(ctx, client, clientID, workspaces, resource, metastoreID, catalogName, schemaName, annos)
+	if err != nil {
+		return nil, err
+	}
+
+	routed, err := read(ctx, route, metastoreID, catalogName, schemaName, name, resource.GetParentResourceId(), annos)
+	if err != nil {
+		return nil, err
+	}
+
+	copyEntitlement, ok := proto.Clone(entitlement).(*v2.Entitlement)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "databricks-connector: cannot copy the %s entitlement", noun)
+	}
+	copyEntitlement.Resource = routed
+
+	return copyEntitlement, nil
 }

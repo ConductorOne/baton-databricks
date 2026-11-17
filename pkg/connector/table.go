@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,8 +24,6 @@ var _ connectorbuilder.ResourceSyncerV2 = (*tableBuilder)(nil)
 const (
 	securableTypeTable = "TABLE"
 
-	// errorCodeTableGone is what Databricks names in error_code when the table a
-	// request addresses does not exist.
 	errorCodeTableGone = "TABLE_DOES_NOT_EXIST"
 
 	// The canonical UPPER_SNAKE form the API answers with.
@@ -46,12 +45,9 @@ const (
 	profileKeyTableName = "table_name"
 	profileKeyTableType = "table_type"
 
-	// tableWriteRemedy is what a 403 on the PATCH tells the operator.
 	tableWriteRemedy = "the connector must own the metastore, the parent catalog, the parent schema or the table, " +
 		"or hold MANAGE on the table, the parent schema or the parent catalog"
 
-	// tableTrustRemedy is what a refusal to report a partial privilege list
-	// tells the operator.
 	tableTrustRemedy = "the connector's service principal must own the metastore, the parent catalog, the parent schema or the table, " +
 		"hold MANAGE on the table, the parent schema or the parent catalog, or be assigned Admin directly on the workspace whose " +
 		"admins group owns the parent catalog"
@@ -281,7 +277,7 @@ func privilegesForTable(ctx context.Context, resource *v2.Resource) []string {
 
 // Entitlements are per table, not static: the privilege set follows table_type,
 // and a privilege the grants API refuses must not be offered as requestable.
-// ConductorOne would otherwise advertise requests that always fail.
+// C1 would otherwise advertise requests that always fail.
 func (b *tableBuilder) Entitlements(ctx context.Context, resource *v2.Resource, _ rs.SyncOpAttrs) ([]*v2.Entitlement, *rs.SyncOpResults, error) {
 	variant, _ := rs.GetProfileStringValue(rs.GetProfile(resource), profileKeyTableType)
 	grantable := ent.WithGrantableTo(userResourceType, groupResourceType, servicePrincipalResourceType)
@@ -312,17 +308,37 @@ func (b *tableBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 	return rv, nil, nil
 }
 
+// Grants carries the sync session so the workspace-Admin check behind the trust
+// rule is read once per workspace per sync rather than once per table.
 func (b *tableBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
+
 	return b.withLevel(tableLevel(privilegesForTable(ctx, resource))).syncGrants(ctx, resource, attr)
 }
 
 func (b *tableBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	resource := entitlement.GetResource()
-	if err := refuseUngrantableTablePrivilege(resource, entitlement); err != nil {
-		return nil, err
+	ctx = databricks.WithoutCache(ctx)
+	annos := annotations.Annotations{}
+	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
+	if err != nil {
+		if isSecurableGoneSentinel(err) || errors.Is(err, errSecurableGone) {
+			return annos, status.Errorf(codes.NotFound, "databricks-connector: table %s no longer exists",
+				entitlement.GetResource().GetId().GetResource())
+		}
+
+		return annos, err
 	}
 
-	return b.withLevel(tableLevel(privilegesForTable(ctx, resource))).grant(ctx, principal.GetId(), entitlement)
+	// The live table_type decides this, not the one the last sync wrote: a view
+	// replaced by a table takes privileges the recorded variant refuses.
+	resource := routed.GetResource()
+	if err := refuseUngrantableTablePrivilege(resource, routed); err != nil {
+		return annos, err
+	}
+
+	writeAnnos, err := b.withLevel(tableLevel(privilegesForTable(ctx, resource))).grant(ctx, principal.GetId(), routed)
+
+	return append(annos, writeAnnos...), err
 }
 
 // refuseUngrantableTablePrivilege rejects the two privileges a table reports but
@@ -352,7 +368,49 @@ func refuseUngrantableTablePrivilege(resource *v2.Resource, entitlement *v2.Enti
 }
 
 func (b *tableBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	resource := revoked.GetEntitlement().GetResource()
+	ctx = databricks.WithoutCache(ctx)
+	annos := annotations.Annotations{}
+	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
+	if err != nil {
+		if isSecurableGoneSentinel(err) || errors.Is(err, errSecurableGone) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
 
-	return b.withLevel(tableLevel(privilegesForTable(ctx, resource))).revoke(ctx, revoked.GetPrincipal().GetId(), revoked.GetEntitlement())
+			return annos, nil
+		}
+
+		return annos, err
+	}
+
+	writeAnnos, err := b.withLevel(tableLevel(privilegesForTable(ctx, routed.GetResource()))).
+		revoke(ctx, revoked.GetPrincipal().GetId(), routed)
+
+	return append(annos, writeAnnos...), err
+}
+
+// entitlementOnLiveRoute reads the table itself after its parents, because the
+// owner decides whether the privilege list is complete and table_type decides
+// which privileges the write may ask for.
+func (b *tableBuilder) entitlementOnLiveRoute(
+	ctx context.Context,
+	entitlement *v2.Entitlement,
+	annos *annotations.Annotations,
+) (*v2.Entitlement, error) {
+	return childEntitlementOnLiveRoute(ctx, b.client, b.clientID, b.workspaces, "table", entitlement, annos,
+		func(ctx context.Context, route schemaChildRoute, metastoreID, catalogName, schemaName, name string,
+			parent *v2.ResourceId, annos *annotations.Annotations,
+		) (*v2.Resource, error) {
+			fullName := strings.Join([]string{catalogName, schemaName, name}, schemaNameSeparator)
+			table, rateLimit, err := b.client.GetTable(ctx, route.Workspace, fullName)
+			noteRateLimit(annos, rateLimit)
+			if err != nil {
+				if databricks.IsSecurableGone(err, errorCodeTableGone, errorCodeSchemaGone, errorCodeCatalogGone) {
+					return nil, errSecurableGone
+				}
+
+				return nil, refuseUnreadable(fmt.Sprintf(
+					"databricks-connector: failed to read table %s through workspace %s", fullName, route.Workspace), err)
+			}
+
+			return tableResource(table, metastoreID, catalogName, schemaName, parent, route)
+		})
 }

@@ -152,10 +152,58 @@ func (c *Client) GetVolume(
 ) {
 	var res Volume
 
+	if fullName == "" {
+		return nil, nil, invalidArgument("volume full name is required")
+	}
+
 	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogVolumesEndpoint, fullName)
+	if !addressesSecurable(u, "/"+fullName) {
+		return nil, nil, invalidArgument("cannot address volume %q: the name does not survive URL assembly", fullName)
+	}
+
 	ratelimitData, err := c.Get(ctx, u, &res)
 	if err != nil {
 		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read volume %s: %w", fullName, err))
+	}
+
+	if res.FullName != fullName {
+		return nil, ratelimitData, invalidArgument("asked Databricks for volume %q and it answered with %q", fullName, res.FullName)
+	}
+
+	return &res, ratelimitData, nil
+}
+
+// GetTable (GET /api/2.1/unity-catalog/tables/{full_name}) reads one table
+// through workspaceId, which is a deployment name. It answers the two things a
+// write needs and the listing cannot be trusted to still hold: the owner, which
+// decides whether the privilege list is complete, and table_type, which decides
+// which privileges the table takes.
+func (c *Client) GetTable(
+	ctx context.Context,
+	workspaceId, fullName string,
+) (
+	*Table,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res Table
+
+	if fullName == "" {
+		return nil, nil, invalidArgument("table full name is required")
+	}
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogTablesEndpoint, fullName)
+	if !addressesSecurable(u, "/"+fullName) {
+		return nil, nil, invalidArgument("cannot address table %q: the name does not survive URL assembly", fullName)
+	}
+
+	ratelimitData, err := c.Get(ctx, u, &res)
+	if err != nil {
+		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read table %s: %w", fullName, err))
+	}
+
+	if res.FullName != fullName {
+		return nil, ratelimitData, invalidArgument("asked Databricks for table %q and it answered with %q", fullName, res.FullName)
 	}
 
 	return &res, ratelimitData, nil
@@ -200,48 +248,6 @@ func (c *Client) GetCatalog(
 	return &res, ratelimitData, nil
 }
 
-// GetSchema (GET /api/2.1/unity-catalog/schemas/{full_name}) reads one schema
-// through workspaceId, which is a deployment name. full_name is "{catalog}.{schema}".
-// It separates the two answers draining ListSchemas runs together: a 404 naming
-// SCHEMA_DOES_NOT_EXIST is Databricks naming the schema missing, which a caller
-// that merely cannot see it is answered with too, and any other refusal is this
-// workspace not serving it. Which of the two a named 404 is belongs to the
-// caller. The name is checked against the assembled URL for the same reason
-// permissionsUrl checks it.
-func (c *Client) GetSchema(
-	ctx context.Context,
-	workspaceId, fullName string,
-) (
-	*Schema,
-	*v2.RateLimitDescription,
-	error,
-) {
-	var res Schema
-
-	if fullName == "" {
-		return nil, nil, invalidArgument("schema full name is required")
-	}
-
-	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogSchemasEndpoint, fullName)
-	if !addressesSecurable(u, "/"+fullName) {
-		return nil, nil, invalidArgument("cannot address schema %q: the name does not survive URL assembly", fullName)
-	}
-
-	ratelimitData, err := c.Get(ctx, u, &res)
-	if err != nil {
-		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read schema %s: %w", fullName, err))
-	}
-
-	// An answer about another schema, or one that names no schema at all, does not
-	// describe the one asked for, and its owner is what decides whether the
-	// children listing is complete.
-	if res.FullName != fullName {
-		return nil, ratelimitData, invalidArgument("asked Databricks for schema %q and it answered with %q", fullName, res.FullName)
-	}
-
-	return &res, ratelimitData, nil
-}
-
 // ListSchemas (GET /api/2.1/unity-catalog/schemas?catalog_name=) reads one page of
 // the schemas of catalogName, through workspaceId, which is a deployment name.
 // Unlike the catalogs listing, this one pages, so the cursor is passed through.
@@ -272,9 +278,13 @@ func (c *Client) ListSchemas(
 }
 
 // GetSchema (GET /api/2.1/unity-catalog/schemas/{full_name}) reads one schema
-// through workspaceId, which is a deployment name. The full name is dotted,
-// and a deleted schema or catalog is named in error_code while a workspace the
-// catalog is not bound to answers 403.
+// through workspaceId, which is a deployment name. The full name is dotted. It
+// separates the two answers draining ListSchemas runs together: a 404 naming
+// SCHEMA_DOES_NOT_EXIST is Databricks naming the schema missing, and any other
+// refusal, 403 among them, is this workspace not serving it. Which of the two a
+// named 404 is belongs to the caller. An answer that names another schema, or
+// none at all, is refused: its owner would otherwise be read as this schema's,
+// and that owner decides whether a privilege list is complete.
 func (c *Client) GetSchema(
 	ctx context.Context,
 	workspaceId, fullName string,
@@ -299,7 +309,7 @@ func (c *Client) GetSchema(
 		return nil, ratelimitData, nameWorkspace403Remedy(workspaceId, fmt.Errorf("failed to read schema %s: %w", fullName, err))
 	}
 
-	if res.FullName != "" && res.FullName != fullName {
+	if res.FullName != fullName {
 		return nil, ratelimitData, invalidArgument("asked Databricks for schema %q and it answered with %q", fullName, res.FullName)
 	}
 

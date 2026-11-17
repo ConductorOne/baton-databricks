@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*volumeBuilder)(nil)
@@ -25,12 +28,9 @@ const (
 	profileKeyVolumeName = "volume_name"
 	profileKeyVolumeType = "volume_type"
 
-	// volumeWriteRemedy is what a 403 on the PATCH tells the operator.
 	volumeWriteRemedy = "the connector must own the metastore, the parent catalog, the parent schema or the volume, " +
 		"or hold MANAGE on the volume, the parent schema or the parent catalog"
 
-	// volumeTrustRemedy is what a refusal to report a partial privilege list
-	// tells the operator.
 	volumeTrustRemedy = "the connector's service principal must own the metastore, the parent catalog, the parent schema or the volume, " +
 		"hold MANAGE on the volume, the parent schema or the parent catalog, or be assigned Admin directly on the workspace whose " +
 		"admins group owns the parent catalog"
@@ -195,14 +195,77 @@ func (b *volumeBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 	return nil, nil, nil
 }
 
+// Grants carries the sync session so the workspace-Admin check behind the trust
+// rule is read once per workspace per sync rather than once per volume.
 func (b *volumeBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
+	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
+
 	return b.syncGrants(ctx, resource, attr)
 }
 
 func (b *volumeBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
-	return b.grant(ctx, principal.GetId(), entitlement)
+	ctx = databricks.WithoutCache(ctx)
+	annos := annotations.Annotations{}
+	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
+	if err != nil {
+		if isSecurableGoneSentinel(err) || errors.Is(err, errSecurableGone) {
+			return annos, status.Errorf(codes.NotFound, "databricks-connector: volume %s no longer exists",
+				entitlement.GetResource().GetId().GetResource())
+		}
+
+		return annos, err
+	}
+
+	writeAnnos, err := b.grant(ctx, principal.GetId(), routed)
+
+	return append(annos, writeAnnos...), err
 }
 
 func (b *volumeBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
-	return b.revoke(ctx, revoked.GetPrincipal().GetId(), revoked.GetEntitlement())
+	ctx = databricks.WithoutCache(ctx)
+	annos := annotations.Annotations{}
+	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
+	if err != nil {
+		if isSecurableGoneSentinel(err) || errors.Is(err, errSecurableGone) {
+			annos.Update(&v2.GrantAlreadyRevoked{})
+
+			return annos, nil
+		}
+
+		return annos, err
+	}
+
+	writeAnnos, err := b.revoke(ctx, revoked.GetPrincipal().GetId(), routed)
+
+	return append(annos, writeAnnos...), err
+}
+
+// entitlementOnLiveRoute reads the volume itself after its parents, because its
+// owner is one of the four the trust check short-circuits on. The read runs
+// through a workspace that has just served the catalog and the schema, so a
+// generic 404 here is the volume being gone rather than a workspace that cannot
+// reach it.
+func (b *volumeBuilder) entitlementOnLiveRoute(
+	ctx context.Context,
+	entitlement *v2.Entitlement,
+	annos *annotations.Annotations,
+) (*v2.Entitlement, error) {
+	return childEntitlementOnLiveRoute(ctx, b.client, b.clientID, b.workspaces, "volume", entitlement, annos,
+		func(ctx context.Context, route schemaChildRoute, metastoreID, catalogName, schemaName, name string,
+			parent *v2.ResourceId, annos *annotations.Annotations,
+		) (*v2.Resource, error) {
+			fullName := strings.Join([]string{catalogName, schemaName, name}, schemaNameSeparator)
+			volume, rateLimit, err := b.client.GetVolume(ctx, route.Workspace, fullName)
+			noteRateLimit(annos, rateLimit)
+			if err != nil {
+				if databricks.IsSecurableGone(err, errorCodeGenericGone, errorCodeSchemaGone, errorCodeCatalogGone) {
+					return nil, errSecurableGone
+				}
+
+				return nil, refuseUnreadable(fmt.Sprintf(
+					"databricks-connector: failed to read volume %s through workspace %s", fullName, route.Workspace), err)
+			}
+
+			return volumeResource(volume, metastoreID, catalogName, schemaName, parent, route)
+		})
 }

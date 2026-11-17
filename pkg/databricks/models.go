@@ -197,12 +197,18 @@ type Table struct {
 	Name      string `json:"name"`
 	Owner     string `json:"owner"`
 	TableType string `json:"table_type"`
+	// FullName is the dotted "catalog.schema.table" Databricks addresses the
+	// table by. A single read is checked against it.
+	FullName string `json:"full_name"`
 }
 
 type Volume struct {
 	Name       string `json:"name"`
 	Owner      string `json:"owner"`
 	VolumeType string `json:"volume_type"`
+	// FullName is the dotted "catalog.schema.volume" Databricks addresses the
+	// volume by. A single read is checked against it.
+	FullName string `json:"full_name"`
 }
 
 type PrivilegeAssignment struct {

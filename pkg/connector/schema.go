@@ -520,7 +520,7 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 		return nil, err
 	}
 
-	route, catalog, err := b.liveCatalogRoute(ctx, resource, metastoreID, catalogName, owner, annos)
+	route, catalog, err := liveCatalogRoute(ctx, b.client, b.clientID, b.workspaces, resource, metastoreID, catalogName, owner, annos)
 	if err != nil {
 		return nil, err
 	}
@@ -553,15 +553,18 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 // first running in-scope workspace that does. A catalog no workspace serves is
 // not proof of deletion, so that case is settled against the metastore's
 // unbound listing.
-func (b *schemaBuilder) liveCatalogRoute(
+func liveCatalogRoute(
 	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
+	workspaces map[string]struct{},
 	resource *v2.Resource,
 	metastoreID, catalogName, metastoreOwner string,
 	annos *annotations.Annotations,
 ) (schemaRoute, *databricks.Catalog, error) {
 	var probe catalogProbe
-	if route, ok := profileCatalogRoute(b.client, b.workspaces, resource, metastoreOwner); ok {
-		catalog, err := catalogThrough(ctx, b.client, route.Workspace, metastoreID, catalogName, annos)
+	if route, ok := profileCatalogRoute(client, workspaces, resource, metastoreOwner); ok {
+		catalog, err := catalogThrough(ctx, client, route.Workspace, metastoreID, catalogName, annos)
 		switch {
 		case err == nil:
 		case errors.Is(err, errCatalogGone):
@@ -578,11 +581,11 @@ func (b *schemaBuilder) liveCatalogRoute(
 		}
 	}
 
-	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
+	scope, err := scopedWorkspaces(ctx, client, workspaces, annos)
 	if err != nil {
 		return schemaRoute{}, nil, err
 	}
-	usable, _, err := scope.attached(ctx, b.client, metastoreID, annos)
+	usable, _, err := scope.attached(ctx, client, metastoreID, annos)
 	if err != nil {
 		return schemaRoute{}, nil, assignmentListError(metastoreID, err)
 	}
@@ -592,11 +595,11 @@ func (b *schemaBuilder) liveCatalogRoute(
 			metastoreID, catalogName)
 	}
 
-	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, probe, nil, annos)
+	workspace, catalog, err := workspaceForCatalog(ctx, client, metastoreID, catalogName, usable, probe, nil, annos)
 	if err != nil {
 		if errors.Is(err, errCatalogGone) {
 			return schemaRoute{}, nil, confirmCatalogGone(
-				ctx, b.client, b.clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
+				ctx, client, clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
 		}
 
 		return schemaRoute{}, nil, err
