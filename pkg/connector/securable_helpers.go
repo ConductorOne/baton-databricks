@@ -192,7 +192,7 @@ func (o securableOps) syncGrants(
 		if err := ensureGrantsAreTrustworthy(ctx, client, clientID, level, resource, fullName, workspace, &annos); err != nil {
 			// The permissions read below answers a deletion the same way, so failing here
 			// would fail the sync on the earlier of two reads that see it.
-			if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+			if isSecurableGoneSentinel(err) {
 				return nil, &rs.SyncOpResults{Annotations: annos}, nil
 			}
 
@@ -415,7 +415,7 @@ func (o securableOps) grant(
 	annos := annotations.Annotations{}
 	change, err := resolveChange(ctx, client, clientID, level, principal, entitlement, true, &annos)
 	if err != nil {
-		if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+		if isSecurableGoneSentinel(err) {
 			return annos, status.Errorf(codes.NotFound, "databricks-connector: %s %s no longer exists",
 				level.noun, entitlement.GetResource().GetId().GetResource())
 		}
@@ -468,7 +468,7 @@ func (o securableOps) revoke(
 	annos := annotations.Annotations{}
 	change, err := resolveChange(ctx, client, clientID, level, principal, entitlement, false, &annos)
 	if err != nil {
-		if errors.Is(err, errSecurableGone) || isSecurableGoneSentinel(err) {
+		if isSecurableGoneSentinel(err) {
 			annos.Update(&v2.GrantAlreadyRevoked{})
 
 			return annos, nil
@@ -526,8 +526,11 @@ func (o securableOps) revoke(
 	return annos, nil
 }
 
-// isSecurableGoneSentinel reports whether err is one of the per-level sentinels
-// for a securable Databricks named as missing.
+// isSecurableGoneSentinel reports whether err is one of the sentinels for a
+// securable Databricks named as missing: the shared one a trust read raises, or
+// a per-level one naming the securable itself or a parent. Callers that need
+// only the shared sentinel, because they translate it into a per-level one,
+// compare against errSecurableGone directly.
 func isSecurableGoneSentinel(err error) bool {
-	return errors.Is(err, errCatalogGone) || errors.Is(err, errMetastoreGone)
+	return errors.Is(err, errSecurableGone) || errors.Is(err, errCatalogGone) || errors.Is(err, errMetastoreGone)
 }

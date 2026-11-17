@@ -478,7 +478,7 @@ func (b *schemaBuilder) Grant(ctx context.Context, principal *v2.Resource, entit
 	annos := annotations.Annotations{}
 	routed, err := b.entitlementOnLiveRoute(ctx, entitlement, &annos)
 	if err != nil {
-		if isSecurableGoneSentinel(err) || errors.Is(err, errSecurableGone) {
+		if isSecurableGoneSentinel(err) {
 			return annos, status.Errorf(codes.NotFound, "databricks-connector: schema %s no longer exists",
 				entitlement.GetResource().GetId().GetResource())
 		}
@@ -496,7 +496,7 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 	annos := annotations.Annotations{}
 	routed, err := b.entitlementOnLiveRoute(ctx, revoked.GetEntitlement(), &annos)
 	if err != nil {
-		if isSecurableGoneSentinel(err) || errors.Is(err, errSecurableGone) {
+		if isSecurableGoneSentinel(err) {
 			annos.Update(&v2.GrantAlreadyRevoked{})
 
 			return annos, nil
