@@ -73,8 +73,8 @@ The Metastores, Catalogs and Schemas resource types are turned off by default. T
 - Metastore privileges held by a workspace's built-in admins group, and that group's members, are shown as read-only grants when the workspace is in the sync scope. The group appears as `admins (<workspace name>)`. C1 can't grant or revoke either, and Databricks doesn't allow a revoked privilege to be granted back to this group. Manage both in Databricks.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
 - A catalog is synced when any running workspace in scope attached to its metastore lists it, and the same catalog name is kept once per metastore. A catalog that only excluded workspaces can reach is not synced.
-- The built-in `system` catalog is never synced, and neither is any other catalog Databricks marks as a system catalog, whoever owns it.
-- `information_schema` is skipped in every catalog. Databricks creates it read-only and its privileges cannot be granted.
+- The built-in `system` catalog is never synced, and neither is any other catalog Databricks marks as a system catalog, whoever owns it. Their schemas are not synced either.
+- `information_schema` is skipped in every catalog.
 - If a catalog becomes unreachable, access requests can fail until the connector can distinguish deletion from a binding or visibility change. Catalog ownership or **MANAGE** alone cannot prove deletion; that check requires the **Metastore Admin**.
 - Unity Catalog tags are not synced.
 </Note>
@@ -246,14 +246,28 @@ If the service principal cannot list catalogs at all through one of those worksp
 
 ### Let the service principal list schemas and read their privileges
 
-Skip this section if you are not syncing schemas, or if the service principal owns the metastore or the catalog.
+Skip this section if you are not syncing schemas, or if the service principal is the **Metastore Admin** or owns the catalog.
 
-Workspace **Admin** does not list every schema, except when the catalog is owned by the workspace admins group (`_workspace_admins_<workspace>_<id>`) and the service principal is a direct Admin of that workspace. On any other catalog the service principal does not own, Databricks returns only the schemas it owns or can use, with HTTP 200. To list every schema, the service principal must own the metastore, own the catalog, be that direct Admin, or hold **MANAGE**, **USE SCHEMA**, or **ALL PRIVILEGES** on the catalog.
+Grant **MANAGE** on each catalog whose schemas you want synced, on top of the **USE CATALOG** from the previous section. **MANAGE** covers both halves: it lists every schema in the catalog and it reads who holds what on each one.
 
-Listing the schemas is not the same as reading who holds what on them. For a schema's full privilege list, and to grant or revoke a schema privilege, the service principal must own the metastore, the catalog or the schema, hold **MANAGE** on the schema or on the catalog above it, or be that direct Admin. **USE SCHEMA** and **ALL PRIVILEGES** list every schema and do not read their privileges, because Databricks leaves **MANAGE** out of **ALL PRIVILEGES**. A service principal given only **USE SCHEMA** gets its schemas synced and then a permission error on their grants, so grant **MANAGE** on the catalog to cover both.
+**USE SCHEMA** and **ALL PRIVILEGES** are not substitutes: either one lists every schema, and then the sync fails on their grants.
+
+Workspace **Admin** replaces all of this only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`) and the service principal is a direct Admin of that workspace.
+
+<Steps>
+  <Step>
+  In the workspace, open **Catalog Explorer** and open the catalog.
+  </Step>
+  <Step>
+  Select **Permissions**, then click **Grant**.
+  </Step>
+  <Step>
+  Select the service principal, check **MANAGE**, and confirm.
+  </Step>
+</Steps>
 
 <Warning>
-A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error. System catalogs are never synced, whoever owns them, so their schemas are not synced either.
+A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
