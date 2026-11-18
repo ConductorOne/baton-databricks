@@ -164,5 +164,23 @@
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg"
+  "iconUrl": "/static/app-icons/databricks.svg",
+  "fieldGroups": [
+    {
+      "name": "client-secret",
+      "displayName": "Client Secret",
+      "helpText": "Authenticate with the Databricks service principal's OAuth client ID and client secret.",
+      "fields": [
+        "account-hostname",
+        "account-id",
+        "databricks-client-id",
+        "hostname",
+        "workspaces",
+        "base-url",
+        "databricks-exclude-workspaces",
+        "databricks-client-secret"
+      ],
+      "default": true
+    }
+  ]
 }
