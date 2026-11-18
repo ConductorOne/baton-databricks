@@ -1,8 +1,8 @@
 ---
 title: "Set up a Databricks connector"
 og:title: "Set up a Databricks connector"
-description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs) and enable just-in-time access requests."
-og:description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs) and enable just-in-time access requests."
+description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs), enable just-in-time access requests, and automatically provision and deprovision access."
+og:description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs), enable just-in-time access requests, and automatically provision and deprovision access."
 sidebarTitle: "Databricks"
 ---
 
@@ -29,7 +29,7 @@ Revoking the workspace **member** entitlement removes the principal's entire wor
 
 ### Connector actions
 
-Connector actions are custom capabilities that extend C1 automations with app-specific operations.
+Connector actions are custom capabilities that extend C1 automations with app-specific operations. Use the [Account lifecycle action](/product/admin/automations-steps-reference#account-lifecycle-action) automation step to run `enable_user` and `disable_user`. The Databricks actions don't appear under **Perform connector action**.
 
 | Automation step | Actions offered | How the target is selected |
 |-----------------|-----------------|----------------------------|
@@ -41,7 +41,11 @@ Connector actions are custom capabilities that extend C1 automations with app-sp
 | `disable_user` | `user_id` (string, required) | Deactivates a Databricks account user. |
 
 <Note>
-These actions act on the account-level user, so disabling a user blocks them in the Databricks account and in every workspace. Only the user's active status changes: their permissions and memberships are kept, so enabling the user restores the same access. Running an action on a user who is already in the target state succeeds. Account provisioning doesn't reactivate an inactive user; run `enable_user` instead.
+These actions act on the account-level user, so disabling a user blocks them in the Databricks account and in every workspace. Only the user's active status changes: their permissions and memberships are kept, so enabling the user restores the same access. Running an action on a user who is already in the target state succeeds. Databricks can take up to about three minutes to apply the change, so a sync that runs sooner can still show the previous status. Account provisioning doesn't reactivate an inactive user; run `enable_user` instead.
+
+The service principal that runs these actions needs the **Account admin** role. Without it, Databricks rejects the request with "This API is disabled for users without account admin status" and the action fails with a permission error.
+
+The `user_id` value is the user's Databricks account user ID: a string of digits, such as `1234567890123456`. The actions reject usernames, email addresses, and any value that contains a character other than 0-9 with the error "user ID must contain only digits 0-9". An ID that belongs to a group or service principal, or that does not exist, returns a not-found error. Databricks ignores leading zeros, so `0001234567890123456` acts on the same user as `1234567890123456`. Within a C1 automation, C1 fills this value from the target account.
 </Note>
 
 ## Authentication methods
@@ -53,7 +57,7 @@ The connector authenticates with **OAuth** — an account-level service principa
 Configuring the connector requires you to pass in credentials generated in Databricks. Gather these credentials before you move on.
 
 <Warning>
-A user with the **Account admin** role in each Databricks workspace you want to sync must perform this task.
+A user with the **Account admin** role in the Databricks account, and the **Admin** role in each workspace you want to sync, must perform this task.
 </Warning>
 
 ### Look up your Databricks account ID
@@ -77,6 +81,12 @@ The Databricks connector authenticates with OAuth, which syncs info from all Dat
 <Steps>
   <Step>
   Follow the [Databricks OAuth authentication documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and create an OAuth secret.
+  </Step>
+  <Step>
+  Assign the service principal the **Account admin** role in the Databricks account console. C1 needs this role to read account data and to run account lifecycle actions.
+  </Step>
+  <Step>
+  Add the service principal to each workspace you want to sync and assign it the **Admin** role in that workspace. Workspace sync fails with a 403 error for any workspace where the service principal is not an admin.
   </Step>
   <Step>
   Carefully copy and save the OAuth client ID and secret.
