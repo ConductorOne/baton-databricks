@@ -561,7 +561,7 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 	}
 
 	var probe catalogProbe
-	if route, ok := b.profileRoute(resource, owner); ok {
+	if route, ok := profileCatalogRoute(b.client, b.workspaces, resource, owner); ok {
 		catalog, err := catalogThrough(ctx, b.client, route.Workspace, metastoreID, catalogName, annos)
 		// This read is an optimization, so no answer it gives is fatal: a catalog
 		// absent from this one workspace is not absent from the metastore, a refusal
@@ -602,10 +602,10 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 			metastoreID, catalogName)
 	}
 
-	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, probe, annos)
+	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, probe, nil, annos)
 	if err != nil {
 		if errors.Is(err, errCatalogGone) {
-			return nil, b.confirmCatalogGone(ctx, metastoreID, catalogName, usable[0].DeploymentName, owner, annos)
+			return nil, confirmCatalogGone(ctx, b.client, b.clientID, metastoreID, catalogName, usable[0].DeploymentName, owner, annos)
 		}
 		return nil, err
 	}
@@ -628,24 +628,30 @@ type catalogProbe struct {
 	deny      error
 }
 
-// profileRoute is the route an earlier sync wrote, when this sync still admits
-// that workspace. The profile carries the three identifiers the configuration
-// matches on, so the allowlist and the exclude set are both answered here without
-// reading the account's workspaces or the metastore's assignments.
-func (b *catalogBuilder) profileRoute(resource *v2.Resource, owner string) (catalogRoute, bool) {
+// profileCatalogRoute is the route an earlier sync wrote, when this sync still
+// admits that workspace. The profile carries the three identifiers the
+// configuration matches on, so the allowlist and the exclude set are both
+// answered here without reading the account's workspaces or the metastore's
+// assignments.
+func profileCatalogRoute(
+	client *databricks.Client,
+	workspaces map[string]struct{},
+	resource *v2.Resource,
+	metastoreOwner string,
+) (catalogRoute, bool) {
 	profile := rs.GetProfile(resource)
-	route := catalogRoute{MetastoreOwner: owner}
+	route := catalogRoute{MetastoreOwner: metastoreOwner}
 	route.Workspace, _ = rs.GetProfileStringValue(profile, profileKeyWorkspace)
 	route.WorkspaceID, _ = rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
 	route.WorkspaceName, _ = rs.GetProfileStringValue(profile, profileKeyWorkspaceName)
 	if route.Workspace == "" {
 		return catalogRoute{}, false
 	}
-	if b.client.IsWorkspaceExcluded(route.WorkspaceName, route.Workspace, route.WorkspaceID) {
+	if client.IsWorkspaceExcluded(route.WorkspaceName, route.Workspace, route.WorkspaceID) {
 		return catalogRoute{}, false
 	}
-	if len(b.workspaces) > 0 {
-		if _, ok := matchConfiguredWorkspace(b.workspaces, route.Workspace, route.WorkspaceName, route.WorkspaceID); !ok {
+	if len(workspaces) > 0 {
+		if _, ok := matchConfiguredWorkspace(workspaces, route.Workspace, route.WorkspaceName, route.WorkspaceID); !ok {
 			return catalogRoute{}, false
 		}
 	}
@@ -665,19 +671,34 @@ func routedEntitlement(
 		return nil, err
 	}
 
-	copyEntitlement := proto.Clone(entitlement).(*v2.Entitlement)
+	return entitlementOnResource(entitlement, routed)
+}
+
+// entitlementOnResource returns the entitlement addressed at the securable as it
+// was just read, leaving the caller's copy untouched.
+func entitlementOnResource(entitlement *v2.Entitlement, routed *v2.Resource) (*v2.Entitlement, error) {
+	copyEntitlement, ok := proto.Clone(entitlement).(*v2.Entitlement)
+	if !ok {
+		return nil, status.Error(codes.Internal, "databricks-connector: cannot copy the entitlement")
+	}
 	copyEntitlement.Resource = routed
 
 	return copyEntitlement, nil
 }
 
-func (b *catalogBuilder) confirmCatalogGone(
+// confirmCatalogGone turns "no workspace in scope lists the catalog" into proof
+// of deletion, which only the metastore owner can get: it lists the metastore's
+// catalogs with include_unbound=true, where a catalog hidden by a binding still
+// appears.
+func confirmCatalogGone(
 	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
 	metastoreID, catalogName, workspace, metastoreOwner string,
 	annos *annotations.Annotations,
 ) error {
 	ctx = databricks.WithoutCache(ctx)
-	if !ownsPrincipal(b.clientID, metastoreOwner) || workspace == "" {
+	if !ownsPrincipal(clientID, metastoreOwner) || workspace == "" {
 		return status.Errorf(codes.FailedPrecondition,
 			"databricks-connector: cannot prove whether catalog %s of metastore %s was deleted; the metastore owner must list it with include_unbound=true",
 			catalogName, metastoreID)
@@ -685,7 +706,7 @@ func (b *catalogBuilder) confirmCatalogGone(
 
 	pageToken := ""
 	for {
-		catalogs, next, rateLimit, err := b.client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize, true)
+		catalogs, next, rateLimit, err := client.ListCatalogs(ctx, workspace, pageToken, ResourcesPageSize, true)
 		noteRateLimit(annos, rateLimit)
 		if err != nil {
 			msg := fmt.Sprintf("databricks-connector: cannot prove whether catalog %s of metastore %s was deleted with include_unbound=true",

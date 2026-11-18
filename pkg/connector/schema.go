@@ -22,7 +22,6 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 var _ connectorbuilder.StaticEntitlementSyncerV2 = (*schemaBuilder)(nil)
@@ -163,13 +162,15 @@ func schemaResource(
 
 // schemaRoute is the workspace a catalog's schemas are listed through, carried
 // in the page token so later pages neither re-resolve it nor prove the listing
-// complete again.
+// complete again. It is the catalog's route plus the catalog's owner, which a
+// schema's trust check needs and a catalog's does not.
 type schemaRoute struct {
-	Workspace      string `json:"w"`
-	WorkspaceID    string `json:"i"`
-	WorkspaceName  string `json:"n"`
-	MetastoreOwner string `json:"o"`
-	CatalogOwner   string `json:"c"`
+	catalogRoute
+	CatalogOwner string `json:"c"`
+}
+
+func schemaRouteOn(route catalogRoute, catalog *databricks.Catalog) schemaRoute {
+	return schemaRoute{catalogRoute: route, CatalogOwner: catalog.Owner}
 }
 
 // List pages a catalog's schemas through a workspace that can see every schema.
@@ -245,8 +246,7 @@ func (b *schemaBuilder) List(ctx context.Context, parentResourceID *v2.ResourceI
 
 // pushRoute records the first running in-scope workspace that both lists the
 // catalog and can read every schema, and refuses when none can: returning no
-// schemas would make C1 delete them. A gone answer is not proof on its own, so
-// the listing is emptied only when every workspace said gone and none refused.
+// schemas would make C1 delete them.
 func (b *schemaBuilder) pushRoute(
 	ctx context.Context,
 	metastoreID, catalogName string,
@@ -280,88 +280,45 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	var sawCatalog, sawGone, provenGone bool
-	var lastDeny error
-	for _, workspace := range usable {
-		catalog, err := catalogThrough(ctx, b.client, workspace.DeploymentName, metastoreID, catalogName, annos)
-		if err != nil {
-			if errors.Is(err, errCatalogGone) {
-				sawGone = true
-				continue
-			}
-			if deniesTrust(err) {
-				lastDeny = err
-				continue
-			}
-			return err
-		}
-		if catalog == nil {
-			continue
-		}
-		sawCatalog = true
-		// The reads run in order, so a workspace serving the catalog now supersedes a
-		// gone answer an earlier one gave.
-		provenGone = false
-
-		workspaceID := strconv.Itoa(workspace.ID)
-		route := schemaRoute{
-			Workspace:      workspace.DeploymentName,
-			WorkspaceID:    workspaceID,
-			WorkspaceName:  workspace.Name,
-			MetastoreOwner: owner,
-			CatalogOwner:   catalog.Owner,
-		}
-		complete, err := schemaListingIsComplete(ctx, b.client, securableTrust{
+	accept := func(ctx context.Context, workspace databricks.Workspace, catalog *databricks.Catalog) (bool, error) {
+		return schemaListingIsComplete(ctx, b.client, securableTrust{
 			ownPrincipal:   b.clientID,
 			metastoreOwner: owner,
 			parentOwner:    catalog.Owner,
 			fullName:       catalogName,
-			workspace:      route.Workspace,
-			workspaceID:    workspaceID,
+			workspace:      workspace.DeploymentName,
+			workspaceID:    strconv.Itoa(workspace.ID),
 		}, annos)
-		if err != nil {
-			// This read names the catalog missing only when it is gone: a workspace the
-			// catalog is not bound to refuses with 403, which deniesTrust takes above.
-			if errors.Is(err, errCatalogGone) {
-				provenGone = true
-
-				continue
-			}
-
-			return err
-		}
-		if !complete {
-			continue
-		}
-
-		encoded, err := json.Marshal(route)
-		if err != nil {
-			return err
-		}
-		bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
-
-		return nil
 	}
-	// A catalog proved gone holds no schemas, and the catalog syncer drops the
-	// parent in the same sync. A refusal anywhere leaves the picture mixed.
-	if provenGone && lastDeny == nil {
-		return nil
-	}
-	if !sawCatalog {
-		// A workspace that does not serve the catalog answers like a gone one.
-		if sawGone && lastDeny == nil {
+
+	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, catalogProbe{}, accept, annos)
+	if err != nil {
+		switch {
+		// A catalog proved gone holds no schemas, and the catalog syncer drops the
+		// parent in the same sync.
+		case errors.Is(err, errCatalogGone):
 			return nil
+		case errors.Is(err, errCatalogNotAccepted):
+			return status.Errorf(codes.PermissionDenied,
+				"databricks-connector: cannot list every schema in catalog %s; %s",
+				catalogName, schemaListRemedy)
+		default:
+			return err
 		}
-		msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s", catalogName, metastoreID)
-		if lastDeny != nil {
-			msg = fmt.Sprintf("%s: %s", msg, lastDeny.Error())
-		}
-		return status.Errorf(codes.FailedPrecondition, "%s", msg)
 	}
 
-	return status.Errorf(codes.PermissionDenied,
-		"databricks-connector: cannot list every schema in catalog %s; %s",
-		catalogName, schemaListRemedy)
+	encoded, err := json.Marshal(schemaRouteOn(catalogRoute{
+		Workspace:      workspace.DeploymentName,
+		WorkspaceID:    strconv.Itoa(workspace.ID),
+		WorkspaceName:  workspace.Name,
+		MetastoreOwner: owner,
+	}, catalog))
+	if err != nil {
+		return err
+	}
+	bag.Push(pagination.PageState{ResourceTypeID: schemaResourceType.Id, ResourceID: string(encoded)})
+
+	return nil
 }
 
 // schemaListingError returns NotFound only when Databricks names the missing
@@ -486,9 +443,7 @@ func (b *schemaBuilder) Grant(ctx context.Context, principal *v2.Resource, entit
 		return annos, err
 	}
 
-	writeAnnos, err := b.grant(ctx, principal.GetId(), routed)
-
-	return append(annos, writeAnnos...), err
+	return b.grant(ctx, principal.GetId(), routed)
 }
 
 func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotations.Annotations, error) {
@@ -505,9 +460,7 @@ func (b *schemaBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotati
 		return annos, err
 	}
 
-	writeAnnos, err := b.revoke(ctx, revoked.GetPrincipal().GetId(), routed)
-
-	return append(annos, writeAnnos...), err
+	return b.revoke(ctx, revoked.GetPrincipal().GetId(), routed)
 }
 
 // entitlementOnLiveRoute rebuilds the entitlement's schema from what Databricks
@@ -555,30 +508,36 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 		return nil, err
 	}
 
-	copyEntitlement, ok := proto.Clone(entitlement).(*v2.Entitlement)
-	if !ok {
-		return nil, status.Error(codes.Internal, "databricks-connector: cannot copy the schema entitlement")
-	}
-	copyEntitlement.Resource = routed
-
-	return copyEntitlement, nil
+	return entitlementOnResource(entitlement, routed)
 }
 
 // liveCatalogRoute picks the workspace the write goes through: the recorded one
 // when this sync still admits it and it still serves the catalog, otherwise the
 // first running in-scope workspace that does. A catalog no workspace serves is
-// not proof of deletion, so that case refuses.
+// not proof of deletion, so that case is settled against the metastore's
+// unbound listing.
 func (b *schemaBuilder) liveCatalogRoute(
 	ctx context.Context,
 	resource *v2.Resource,
 	metastoreID, catalogName, metastoreOwner string,
 	annos *annotations.Annotations,
 ) (schemaRoute, *databricks.Catalog, error) {
-	if route, ok := b.profileRoute(resource, metastoreOwner); ok {
+	var probe catalogProbe
+	if route, ok := profileCatalogRoute(b.client, b.workspaces, resource, metastoreOwner); ok {
 		catalog, err := catalogThrough(ctx, b.client, route.Workspace, metastoreID, catalogName, annos)
-		// Any answer short of the catalog falls through to the walk.
-		if err == nil && catalog != nil && catalog.MetastoreID == metastoreID {
-			return route, catalog, nil
+		switch {
+		case err == nil:
+		case errors.Is(err, errCatalogGone):
+			probe = catalogProbe{workspace: route.Workspace, gone: true}
+		case deniesTrust(err):
+			probe = catalogProbe{workspace: route.Workspace, deny: err}
+		}
+		switch {
+		case catalog != nil && catalog.MetastoreID == metastoreID:
+			return schemaRouteOn(route, catalog), catalog, nil
+		case catalog != nil:
+		case err == nil:
+			probe = catalogProbe{workspace: route.Workspace}
 		}
 	}
 
@@ -596,56 +555,20 @@ func (b *schemaBuilder) liveCatalogRoute(
 			metastoreID, catalogName)
 	}
 
-	var lastDeny error
-	for _, workspace := range usable {
-		catalog, err := catalogThrough(ctx, b.client, workspace.DeploymentName, metastoreID, catalogName, annos)
-		switch {
-		case err == nil && catalog != nil:
-			return schemaRoute{
-				Workspace:      workspace.DeploymentName,
-				WorkspaceID:    strconv.Itoa(workspace.ID),
-				WorkspaceName:  workspace.Name,
-				MetastoreOwner: metastoreOwner,
-				CatalogOwner:   catalog.Owner,
-			}, catalog, nil
-		case err == nil, errors.Is(err, errCatalogGone):
-		case deniesTrust(err):
-			lastDeny = err
-		default:
-			return schemaRoute{}, nil, err
+	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, probe, nil, annos)
+	if err != nil {
+		if errors.Is(err, errCatalogGone) {
+			return schemaRoute{}, nil, confirmCatalogGone(
+				ctx, b.client, b.clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
 		}
+
+		return schemaRoute{}, nil, err
 	}
 
-	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope serves catalog %s of metastore %s, so whether schema %s still exists cannot be proved",
-		catalogName, metastoreID, resource.GetId().GetResource())
-	if lastDeny != nil {
-		return schemaRoute{}, nil, uhttp.WrapErrors(codes.FailedPrecondition, msg, lastDeny)
-	}
-
-	return schemaRoute{}, nil, status.Errorf(codes.FailedPrecondition, "%s", msg)
-}
-
-// profileRoute is the route an earlier sync wrote, when this sync still admits
-// that workspace. The profile carries the three identifiers the configuration
-// matches on, so the allowlist and the exclude set are answered without reading
-// the account's workspaces.
-func (b *schemaBuilder) profileRoute(resource *v2.Resource, metastoreOwner string) (schemaRoute, bool) {
-	profile := rs.GetProfile(resource)
-	route := schemaRoute{MetastoreOwner: metastoreOwner}
-	route.Workspace, _ = rs.GetProfileStringValue(profile, profileKeyWorkspace)
-	route.WorkspaceID, _ = rs.GetProfileStringValue(profile, profileKeyWorkspaceID)
-	route.WorkspaceName, _ = rs.GetProfileStringValue(profile, profileKeyWorkspaceName)
-	if route.Workspace == "" {
-		return schemaRoute{}, false
-	}
-	if b.client.IsWorkspaceExcluded(route.WorkspaceName, route.Workspace, route.WorkspaceID) {
-		return schemaRoute{}, false
-	}
-	if len(b.workspaces) > 0 {
-		if _, ok := matchConfiguredWorkspace(b.workspaces, route.Workspace, route.WorkspaceName, route.WorkspaceID); !ok {
-			return schemaRoute{}, false
-		}
-	}
-
-	return route, true
+	return schemaRouteOn(catalogRoute{
+		Workspace:      workspace.DeploymentName,
+		WorkspaceID:    strconv.Itoa(workspace.ID),
+		WorkspaceName:  workspace.Name,
+		MetastoreOwner: metastoreOwner,
+	}, catalog), catalog, nil
 }
