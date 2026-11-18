@@ -614,17 +614,32 @@ func assignmentListError(metastoreID string, err error) error {
 		fmt.Sprintf("databricks-connector: failed to list the workspaces assigned to metastore %s", metastoreID), err)
 }
 
-// workspaceForCatalog returns the first in-scope workspace whose catalog listing
-// contains catalogName. None listing it is an error, never an absence: a catalog
-// bound to a workspace outside the sync, or one the connector lost USE_CATALOG
-// on, is not listed either and still exists. Reporting it as gone would delete
-// its subtree on a sync, and confirm a revoke that never happened.
+// catalogAccept decides whether a workspace that serves the catalog is the one
+// to route through. It runs only after catalogThrough answered, so a gone answer
+// from it is the catalog disappearing between two reads rather than a workspace
+// the catalog is not bound to. A nil predicate accepts the first workspace that
+// serves the catalog.
+type catalogAccept func(ctx context.Context, workspace databricks.Workspace, catalog *databricks.Catalog) (bool, error)
+
+// errCatalogNotAccepted reports that the catalog was served but no workspace
+// passed the caller's acceptance check.
+var errCatalogNotAccepted = errors.New("no workspace serving the catalog passed the acceptance check")
+
+// workspaceForCatalog returns the workspace to route the catalog through and the
+// catalog as that workspace read it. No workspace serving it is an error, never
+// an absence: a catalog bound to a workspace outside the sync, or one the
+// connector lost USE_CATALOG on, is not served either and still exists, so
+// reporting it as gone would delete its subtree and confirm a revoke that never
+// happened. It reports errCatalogGone only when every answer said gone and none
+// refused, and errCatalogNotAccepted when the catalog was served but accept
+// turned every workspace down.
 func workspaceForCatalog(
 	ctx context.Context,
 	client *databricks.Client,
 	metastoreID, catalogName string,
 	usable []databricks.Workspace,
 	probe catalogProbe,
+	accept catalogAccept,
 	annos *annotations.Annotations,
 ) (*databricks.Workspace, *databricks.Catalog, error) {
 	lastDeny := probe.deny
@@ -635,6 +650,7 @@ func workspaceForCatalog(
 	if probe.workspace != "" && !probe.gone {
 		allGone = false
 	}
+	var served, namedGone bool
 	for _, workspace := range usable {
 		if workspace.DeploymentName == probe.workspace {
 			continue
@@ -651,13 +667,35 @@ func workspaceForCatalog(
 			}
 			return nil, nil, err
 		}
-		if catalog != nil {
+		if catalog == nil {
+			allGone = false
+			continue
+		}
+		if accept == nil {
 			return &workspace, catalog, nil
 		}
+		// The reads run in order, so a workspace serving the catalog now supersedes
+		// a gone answer an earlier acceptance check gave.
+		namedGone = false
+		ok, err := accept(ctx, workspace, catalog)
+		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				namedGone = true
+				continue
+			}
+			return nil, nil, err
+		}
 		allGone = false
+		served = true
+		if ok {
+			return &workspace, catalog, nil
+		}
 	}
-	if allGone {
+	if allGone || (namedGone && lastDeny == nil) {
 		return nil, nil, errCatalogGone
+	}
+	if served {
+		return nil, nil, errCatalogNotAccepted
 	}
 
 	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",
