@@ -237,6 +237,28 @@ func (c *Client) UpdateUser(ctx context.Context, workspaceId string, user *User)
 	return c.Put(ctx, u, user, nil)
 }
 
+// SetUserActive sets the account-level user's active flag with a SCIM PATCH that
+// targets only the active attribute, so roles, entitlements, group memberships and
+// workspace assignments are untouched. The replace is idempotent: setting the state
+// the user already has succeeds. A user ID that is not all digits is rejected before any
+// request, since it would change the URL path.
+//
+// PATCH /api/2.0/accounts/{account_id}/scim/v2/Users/{id} — https://docs.databricks.com/api/scim/v1/patch-account-user
+// Required permission: account admin (the OAuth service principal uses scope all-apis).
+func (c *Client) SetUserActive(ctx context.Context, userID string, active bool) (*v2.RateLimitDescription, error) {
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
+
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId), userID)
+	body := PatchRequest{
+		Schemas:    []string{PatchOpSchema},
+		Operations: []PatchOperation{{Op: "replace", Path: "active", Value: active}},
+	}
+
+	return c.Patch(ctx, u, body, nil)
+}
+
 func (c *Client) FindUserID(
 	ctx context.Context,
 	workspaceId string,
@@ -706,6 +728,19 @@ func validatePrincipalID(principalID string) error {
 		return uhttp.WrapErrors(
 			codes.InvalidArgument,
 			fmt.Sprintf("principal ID must be numeric; compound group IDs are not supported here: %q", principalID),
+		)
+	}
+
+	return nil
+}
+
+// validateUserID accepts only ASCII digits, the form of a Databricks user ID. Unlike
+// strconv.Atoi it rejects signs ("+42", "-1"), and the message names the user ID.
+func validateUserID(userID string) error {
+	if userID == "" || strings.IndexFunc(userID, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("user ID must contain only digits 0-9: %q", userID),
 		)
 	}
 

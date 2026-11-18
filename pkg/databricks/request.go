@@ -276,8 +276,11 @@ func (c *Client) doRequestWithOptions(
 		Detail  string `json:"detail"`
 		Message string `json:"message"`
 	}
-	if err := parseJSON(resp.Body, &errorResponse); err != nil {
-		return nil, err
+	// The body is best effort: gateways and rate limiters answer with HTML or nothing, and that
+	// must not replace the HTTP error, which carries the status, gRPC code and rate-limit data.
+	if decodeErr := parseJSON(resp.Body, &errorResponse); decodeErr != nil {
+		errorResponse.Detail, errorResponse.Message = "", ""
+		ctxzap.Extract(ctx).Debug("error response body is not JSON", zap.Int("status", resp.StatusCode), zap.Error(decodeErr))
 	}
 
 	return ratelimitData, &APIError{
