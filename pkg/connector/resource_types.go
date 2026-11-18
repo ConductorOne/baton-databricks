@@ -99,6 +99,7 @@ var (
 		Id:          "schema",
 		DisplayName: "Schema",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
-		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
+		Annotations: annotationsForStaticSecurableResourceType(
+			securablePermissions(permissionUseCatalog, permissionUseSchema, privilegeManage)...),
 	}
 )
