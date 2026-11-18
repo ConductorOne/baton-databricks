@@ -292,6 +292,9 @@
               },
               {
                 "permission": "USE_SCHEMA"
+              },
+              {
+                "permission": "MANAGE"
               }
             ]
           },
@@ -329,6 +332,9 @@
           },
           {
             "permission": "USE_SCHEMA"
+          },
+          {
+            "permission": "MANAGE"
           }
         ]
       },
