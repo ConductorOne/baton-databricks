@@ -316,9 +316,9 @@ service principal must own the metastore, the catalog or the schema, hold
 `MANAGE` on the schema or on the catalog above it, or have Admin assigned
 directly on the workspace whose admins group owns the catalog. Listing the
 schemas is a weaker requirement: `USE_SCHEMA` and `ALL_PRIVILEGES` on the
-catalog each return every schema, and neither reads their privileges, because
-Databricks leaves `MANAGE` out of `ALL_PRIVILEGES`. A service principal holding
-only one of them syncs its schemas and then fails on their grants.
+catalog each return every schema, and neither reads their privileges. A service
+principal holding only one of them syncs its schemas and then fails on their
+grants.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`
