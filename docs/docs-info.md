@@ -6,7 +6,7 @@ While developing the connector, please fill out this form. This information is n
 
    > The connector syncs the Databricks account, workspaces, users, groups, service principals, and roles.
    >
-   > It also syncs Unity Catalog metastores and their catalogs. Both resource types are opt-in — each stays off until enabled per resource type in C1.
+   > It also syncs Unity Catalog metastores, catalogs, schemas, tables, and volumes. Those resource types are opt-in — each stays off until enabled per resource type in C1.
 
 2. Can the connector provision any resources? If so, which ones?
 
@@ -14,7 +14,7 @@ While developing the connector, please fill out this form. This information is n
    >
    > - **User accounts**: create and delete account users.
    > - **Entitlements**: grant and revoke role and membership assignments on accounts, workspaces, groups, service principals, and roles.
-   > - **Unity Catalog privileges**: grant and revoke a metastore or catalog privilege for a user, group or service principal. The `owner` entitlement is read-only and cannot be granted or revoked.
+   > - **Unity Catalog privileges**: grant and revoke a privilege on a metastore, catalog, schema, table, or volume for a user, group or service principal. The `owner` entitlement is read-only and cannot be granted or revoked.
 
 ## Connector credentials
 
@@ -57,7 +57,7 @@ While developing the connector, please fill out this form. This information is n
 
 - **Direct grants only.** Databricks inherits privileges downward. The connector reports the assignments stored on the object. The inheritance endpoint does not return principal IDs.
 - **Full grants visibility is required.** Metastore ownership or direct workspace Admin permits metastore reads. Catalog reads require one of the catalog permissions listed above; workspace Admin applies only when that workspace's admins group owns the catalog. Admin inherited through a group does not count. The sync fails instead of reporting a partial list, so C1 keeps the grants it already has.
-- **Ownership is read-only.** It is shown and cannot be granted or revoked. An owner that is not an account identity (`System user`, `_workspace_admins_…`) is not shown.
+- **Ownership is read-only.** It is shown and cannot be granted or revoked. An owner that does not resolve to an account identity, such as `System user`, is not shown. A workspace admins group is shown when it resolves as an account group.
 - **No `MANAGE` or `ALL_PRIVILEGES` on a metastore.** Databricks rejects both, so they are not offered.
 - **Read through one running workspace.** Privileges are not served on the account plane. The connector reads each metastore through the first running workspace in scope where it can see every privilege. With no running workspace in scope, the metastore is not synced and ConductorOne removes it. A workspace that is still provisioning fails the sync until it is `RUNNING`. An unreadable assignment list fails the sync and ConductorOne keeps the metastore.
 - **`workspaces` scopes metastores.** An allowlist in which every name is either missing from the account or listed in `databricks-exclude-workspaces` fails at credential validation, before any sync, with one error that names both causes.
@@ -70,4 +70,8 @@ While developing the connector, please fill out this form. This information is n
 - **A schema is keyed by its full name.** `SchemaInfo` does carry an immutable `schema_id`, but no endpoint accepts it: `GET` and `PATCH` on a schema both address it as `catalog.schema`, so keying on the id would mean listing the catalog's schemas on every read and write just to recover that name. The parent catalog has no immutable id at all, so a catalog rename re-keys the schema either way. The resource id is `<metastore id>::<catalog>.<schema>`, and a schema rename re-keys the resource and its grants, as it does for a catalog.
 - **`information_schema` is skipped in every catalog.** Databricks creates it read-only in every catalog and its privileges cannot be granted, so it would sync entitlements no one can hold or request.
 - **Listing schemas is weaker than reading their privileges.** `USE_SCHEMA` and `ALL_PRIVILEGES` on the catalog each make the listing complete. Neither reads a schema's privileges, because Databricks leaves `MANAGE` out of `ALL_PRIVILEGES`: that read needs ownership of the metastore, the catalog or the schema, `MANAGE` on the schema or the catalog, or direct workspace Admin where the admins group owns the catalog.
-- **Not synced yet:** tables, volumes, functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.
+- **Tables and volumes are opt-in and hang from a schema.** Each is off until it is turned on in C1, and syncs nothing unless Schemas, Catalogs and Metastores are on as well.
+- **A table and a volume are keyed by their full name.** Neither exposes an immutable id, so the resource id extends the schema key: `<metastore id>::<catalog>.<schema>.<name>`. A rename re-keys the resource and its grants, as it does for a catalog and a schema.
+- **One `table` securable covers more than tables.** Views, materialized views, metric views and streaming tables are all `table`. `table_type` picks the privilege set, so a table's entitlements are built per instance. `ALL_PRIVILEGES` on a view, `MODIFY` on a streaming table, and `REFRESH` on a type whose grants API refuses it are reported when already held and cannot be requested.
+- **Listing a schema's tables or volumes is stricter than listing its schemas.** `USE_SCHEMA` and `ALL_PRIVILEGES` on the catalog each list every schema; only `ALL_PRIVILEGES` lists every table and volume, alongside ownership of the metastore, the catalog or the schema, or direct workspace Admin where the admins group owns the catalog. Reading one table's or one volume's privileges needs ownership of the metastore, the catalog, the schema or the object itself, or `MANAGE` on the object, its schema or its catalog.
+- **Not synced yet:** functions, registered models, external locations, storage credentials, connections, shares, recipients, and tags.

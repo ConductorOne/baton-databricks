@@ -83,6 +83,9 @@ baton resources
 - Roles
 - Metastores
 - Catalogs (under their metastore)
+- Schemas (under their catalog)
+- Tables (under their schema)
+- Volumes (under their schema)
 
 The connector fetches all resources from the account and every workspace the
 service principal can access. To limit the scope, pass a comma-separated list of
@@ -95,9 +98,14 @@ other metastores and their grants from ConductorOne. Catalogs must also be
 visible through a listed workspace. A list that names no workspace on the
 account is rejected during credential validation, before any sync runs.
 
-Metastores and catalogs are opt-in: each resource type stays off until enabled
-for the connector in ConductorOne. Catalog sync uses the existing OAuth
-credentials and configuration fields.
+Metastores, catalogs, schemas, tables, and volumes are Unity Catalog securables
+and are opt-in: each type stays off until it is enabled for the connector in
+ConductorOne. They use the existing OAuth credentials and configuration fields.
+
+The opt-in is a ConductorOne setting, so it does not apply to the CLI. A local
+run with no selection syncs every type, and it fails on a service principal that
+cannot list every table and volume. Pass `--sync-resource-types` to limit it, for
+example `--sync-resource-types account,user,group,metastore,catalog,schema`.
 
 ## Authentication
 
@@ -238,6 +246,8 @@ account
 └── metastore
     └── catalog
         └── schema
+            ├── table
+            └── volume
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
@@ -285,11 +295,11 @@ or `databricks-exclude-workspaces`.
 
 ## Unity Catalog provisioning
 
-A metastore, catalog or schema privilege can be granted to and revoked from a
-user, group or service principal. The `owner` entitlement is read-only: granting
-or revoking it fails with an `InvalidArgument` error.
+A privilege on a metastore, catalog, schema, table or volume can be granted to
+and revoked from a user, group or service principal. The `owner` entitlement is
+read-only: granting or revoking it fails with an `InvalidArgument` error.
 
-If a catalog becomes unreachable, provisioning must distinguish deletion from
+If a securable becomes unreachable, provisioning must distinguish deletion from
 a workspace binding or visibility change. Requests can fail with
 `FailedPrecondition` when deletion cannot be proved.
 
@@ -319,6 +329,17 @@ schemas is a weaker requirement: `USE_SCHEMA` and `ALL_PRIVILEGES` on the
 catalog each return every schema, and neither reads their privileges. A service
 principal holding only one of them syncs its schemas and then fails on their
 grants.
+
+For a table's or a volume's full grants list, and to grant or revoke one of
+their privileges, the service principal must own the metastore, the catalog, the
+schema or the object itself, hold `MANAGE` on the object, its schema or its
+catalog, or have Admin assigned directly on the workspace whose admins group
+owns the catalog. Listing them is a separate right, and a stricter one than
+listing the schemas: ownership of the metastore, the catalog or the schema, that
+same Admin standing, or `ALL_PRIVILEGES` on the catalog. `USE_SCHEMA` and
+`MANAGE` return every schema and neither returns every table or volume, so a
+service principal holding only one of them syncs the schemas and then fails on
+their children.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`

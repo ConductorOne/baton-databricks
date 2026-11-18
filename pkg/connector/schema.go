@@ -156,7 +156,11 @@ func schemaResource(
 		nil,
 		rs.WithResourceProfile(profile),
 		rs.WithParentResourceID(parent),
-		rs.WithAnnotation(&v2.RawId{Id: resourceID}),
+		rs.WithAnnotation(
+			&v2.ChildResourceType{ResourceTypeId: tableResourceType.Id},
+			&v2.ChildResourceType{ResourceTypeId: volumeResourceType.Id},
+			&v2.RawId{Id: resourceID},
+		),
 	)
 }
 
@@ -321,8 +325,41 @@ func (b *schemaBuilder) pushRoute(
 	return nil
 }
 
+// errSchemaGone marks a schema Databricks named as missing.
+var errSchemaGone = errors.New("schema no longer exists")
+
+// schemaThrough reads one schema through workspace. It reports errSchemaGone
+// when Databricks names the schema itself missing, which proves nothing on its
+// own, so the caller decides what that absence means. Every other refusal leaves
+// the schema unknown: read as empty, C1 would delete its tables and volumes.
+func schemaThrough(
+	ctx context.Context,
+	client *databricks.Client,
+	workspace, catalogName, schemaName string,
+	annos *annotations.Annotations,
+) (*databricks.Schema, error) {
+	fullName := catalogName + schemaNameSeparator + schemaName
+	schema, rateLimit, err := client.GetSchema(ctx, workspace, fullName)
+	noteRateLimit(annos, rateLimit)
+	switch {
+	case err == nil:
+	case databricks.IsSecurableGone(err, errorCodeSchemaGone):
+		return nil, errSchemaGone
+	case status.Code(err) == codes.InvalidArgument:
+		// The answer does not describe the schema asked for.
+		return nil, err
+	default:
+		return nil, refuseUnreadable(fmt.Sprintf(
+			"databricks-connector: schema %s cannot be read through workspace %s, "+
+				"so its tables and volumes are unknown", fullName, workspace), err)
+	}
+
+	return schema, nil
+}
+
 // schemaListingError returns NotFound only when Databricks names the missing
-// catalog; any other refusal leaves the schema listing unknown.
+// catalog. Any other refusal leaves the listing unknown rather than empty: a
+// short list would read as deletions in C1.
 func schemaListingError(catalogName, workspace string, err error) error {
 	if databricks.IsSecurableGone(err, errorCodeCatalogGone) {
 		return uhttp.WrapErrors(codes.NotFound,
@@ -483,7 +520,7 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 		return nil, err
 	}
 
-	route, catalog, err := b.liveCatalogRoute(ctx, resource, metastoreID, catalogName, owner, annos)
+	route, catalog, err := liveCatalogRoute(ctx, b.client, b.clientID, b.workspaces, resource, metastoreID, catalogName, owner, annos)
 	if err != nil {
 		return nil, err
 	}
@@ -516,15 +553,18 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 // first running in-scope workspace that does. A catalog no workspace serves is
 // not proof of deletion, so that case is settled against the metastore's
 // unbound listing.
-func (b *schemaBuilder) liveCatalogRoute(
+func liveCatalogRoute(
 	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
+	workspaces map[string]struct{},
 	resource *v2.Resource,
 	metastoreID, catalogName, metastoreOwner string,
 	annos *annotations.Annotations,
 ) (schemaRoute, *databricks.Catalog, error) {
 	var probe catalogProbe
-	if route, ok := profileCatalogRoute(b.client, b.workspaces, resource, metastoreOwner); ok {
-		catalog, err := catalogThrough(ctx, b.client, route.Workspace, metastoreID, catalogName, annos)
+	if route, ok := profileCatalogRoute(client, workspaces, resource, metastoreOwner); ok {
+		catalog, err := catalogThrough(ctx, client, route.Workspace, metastoreID, catalogName, annos)
 		switch {
 		case err == nil:
 		case errors.Is(err, errCatalogGone):
@@ -541,11 +581,11 @@ func (b *schemaBuilder) liveCatalogRoute(
 		}
 	}
 
-	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
+	scope, err := scopedWorkspaces(ctx, client, workspaces, annos)
 	if err != nil {
 		return schemaRoute{}, nil, err
 	}
-	usable, _, err := scope.attached(ctx, b.client, metastoreID, annos)
+	usable, _, err := scope.attached(ctx, client, metastoreID, annos)
 	if err != nil {
 		return schemaRoute{}, nil, assignmentListError(metastoreID, err)
 	}
@@ -555,11 +595,11 @@ func (b *schemaBuilder) liveCatalogRoute(
 			metastoreID, catalogName)
 	}
 
-	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, probe, nil, annos)
+	workspace, catalog, err := workspaceForCatalog(ctx, client, metastoreID, catalogName, usable, probe, nil, annos)
 	if err != nil {
 		if errors.Is(err, errCatalogGone) {
 			return schemaRoute{}, nil, confirmCatalogGone(
-				ctx, b.client, b.clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
+				ctx, client, clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
 		}
 
 		return schemaRoute{}, nil, err
