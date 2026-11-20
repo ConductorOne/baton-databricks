@@ -133,6 +133,14 @@
       }
     },
     {
+      "name": "databricks-c1-token",
+      "displayName": "ConductorOne token",
+      "description": "JWT ConductorOne issues for a hosted connector. The hosted runtime supplies it; leave it unset anywhere else.",
+      "stringField": {
+        "type": "STRING_FIELD_TYPE_OAUTH2"
+      }
+    },
+    {
       "name": "hostname",
       "displayName": "Hostname",
       "description": "The Databricks hostname used to connect to the Databricks API",
@@ -164,5 +172,38 @@
   ],
   "displayName": "Databricks",
   "helpUrl": "/docs/baton/databricks",
-  "iconUrl": "/static/app-icons/databricks.svg"
+  "iconUrl": "/static/app-icons/databricks.svg",
+  "fieldGroups": [
+    {
+      "name": "client-secret",
+      "displayName": "Client Secret",
+      "helpText": "Authenticate with the Databricks service principal's OAuth client ID and client secret.",
+      "fields": [
+        "account-hostname",
+        "account-id",
+        "databricks-client-id",
+        "hostname",
+        "workspaces",
+        "base-url",
+        "databricks-exclude-workspaces",
+        "databricks-client-secret"
+      ],
+      "default": true
+    },
+    {
+      "name": "workload-identity-c1",
+      "displayName": "Workload identity (ConductorOne)",
+      "helpText": "For a ConductorOne-hosted connector. ConductorOne issues a short-lived JWT for this connector, and Databricks exchanges it for an access token through a service principal federation policy. The token's audience is the OAuth client ID.",
+      "fields": [
+        "account-hostname",
+        "account-id",
+        "databricks-client-id",
+        "hostname",
+        "workspaces",
+        "base-url",
+        "databricks-exclude-workspaces",
+        "databricks-c1-token"
+      ]
+    }
+  ]
 }
