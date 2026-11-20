@@ -27,8 +27,9 @@ and secret) to it. You can do that by going to the user management tab and
 clicking on the Service Principals tab. Then click on the Add Service principal
 button and name it. You then need to add an OAuth secret to it by clicking on
 the Generate secret button. You can use this secret to authenticate across all
-workspaces that service principal has access to. This requires admin access to
-the Databricks account and each workspace you want to sync.
+workspaces that service principal has access to. This requires the service
+principal to have the Account admin role on the Databricks account and the Admin
+role on each workspace you want to sync.
 
 # Using Azure Databricks
 
@@ -121,6 +122,20 @@ to that workspace too. This also applies to groups: revoking workspace
 membership from a group removes the group's entire workspace assignment,
 including admin access if the group is a workspace admin, so its members lose
 it.
+
+## Account provisioning
+
+The connector creates account users and deletes them. Account creation requires an
+email address and a display name in the profile.
+
+## Account lifecycle actions
+
+The `enable_user` and `disable_user` actions set an account user's active status.
+Both take a required `user_id` argument: the Databricks account user ID, digits
+only. Only the status changes; the user's permissions and memberships are kept.
+Running an action on a user already in the target state succeeds. Databricks can
+take up to about three minutes to apply the change. The service principal needs the
+Account admin role.
 
 # Contributing, Support and Issues
 
