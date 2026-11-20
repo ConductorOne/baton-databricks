@@ -9,6 +9,9 @@ import (
 const (
 	ClientSecretAuthMethod         = "client-secret"
 	WorkloadIdentityFileAuthMethod = "workload-identity-file"
+	// WorkloadIdentityC1AuthMethod is the group a ConductorOne-hosted connector
+	// selects. The name is the value ConductorOne sends as auth-method.
+	WorkloadIdentityC1AuthMethod = "workload-identity-c1"
 )
 
 var (
@@ -30,6 +33,16 @@ var (
 		field.WithIsSecret(true),
 		field.WithRequired(true),
 		field.WithDisplayName("OAuth2 Client Secret"),
+	)
+	// DatabricksC1TokenField is what makes a hosted runtime attach its token
+	// source: the source is attached only when the selected group contains an
+	// OAuth2 field. ConductorOne supplies the JWT through that source, so the
+	// field holds nothing an operator sets and is not required.
+	DatabricksC1TokenField = field.Oauth2Field(
+		"databricks-c1-token",
+		field.WithDescription("JWT ConductorOne issues for a hosted connector. The hosted runtime supplies it; leave it unset anywhere else."),
+		field.WithDisplayName("ConductorOne token"),
+		field.WithHidden(true),
 	)
 	DatabricksOIDCTokenFileField = field.StringField(
 		"databricks-oidc-token-file",
@@ -82,9 +95,10 @@ var (
 		ExcludeWorkspacesField,
 	}
 
-	// The client secret is the default. The token file exchanges an externally
-	// issued JWT, and is read again on every exchange, so a rotated file keeps
-	// working without a restart.
+	// The client secret is the default. The ConductorOne group is for a hosted
+	// connector, which receives a JWT from ConductorOne instead of a secret.
+	// The token file is for a connector you run yourself, and is read again on
+	// every exchange, so a rotated file keeps working without a restart.
 	fieldGroups = []field.SchemaFieldGroup{
 		{
 			Name:        ClientSecretAuthMethod,
@@ -92,6 +106,14 @@ var (
 			HelpText:    "Authenticate with the Databricks service principal's OAuth client ID and client secret.",
 			Default:     true,
 			Fields:      append(append([]field.SchemaField{}, commonFields...), DatabricksClientSecretField),
+		},
+		{
+			Name:        WorkloadIdentityC1AuthMethod,
+			DisplayName: "Workload identity (ConductorOne)",
+			HelpText: "For a ConductorOne-hosted connector. ConductorOne issues a short-lived JWT for this connector, " +
+				"and Databricks exchanges it for an access token through a service principal federation policy. " +
+				"The token's audience is the OAuth client ID.",
+			Fields: append(append([]field.SchemaField{}, commonFields...), DatabricksC1TokenField),
 		},
 		{
 			Name:        WorkloadIdentityFileAuthMethod,
@@ -108,6 +130,7 @@ var (
 		AccountIdField,
 		DatabricksClientIdField,
 		DatabricksClientSecretField,
+		DatabricksC1TokenField,
 		DatabricksOIDCTokenFileField,
 		HostnameField,
 		WorkspacesField,

@@ -32,17 +32,22 @@ func TestAuthGroupsOfferOneCredentialEach(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		group, holds, omits string
+		group string
+		holds string
+		omits []string
 	}{
-		{"client-secret", DatabricksClientSecretField.FieldName, DatabricksOIDCTokenFileField.FieldName},
-		{"workload-identity-file", DatabricksOIDCTokenFileField.FieldName, DatabricksClientSecretField.FieldName},
+		{"client-secret", DatabricksClientSecretField.FieldName, []string{DatabricksOIDCTokenFileField.FieldName, DatabricksC1TokenField.FieldName}},
+		{"workload-identity-file", DatabricksOIDCTokenFileField.FieldName, []string{DatabricksClientSecretField.FieldName, DatabricksC1TokenField.FieldName}},
+		{"workload-identity-c1", DatabricksC1TokenField.FieldName, []string{DatabricksClientSecretField.FieldName, DatabricksOIDCTokenFileField.FieldName}},
 	} {
 		fields := Config.FieldGroupFields(tt.group)
 		if _, ok := fields[tt.holds]; !ok {
 			t.Errorf("group %q does not offer %q", tt.group, tt.holds)
 		}
-		if _, ok := fields[tt.omits]; ok {
-			t.Errorf("group %q also offers %q, so the two credentials are not separated", tt.group, tt.omits)
+		for _, omitted := range tt.omits {
+			if _, ok := fields[omitted]; ok {
+				t.Errorf("group %q also offers %q, so the credentials are not separated", tt.group, omitted)
+			}
 		}
 	}
 }
@@ -106,6 +111,12 @@ func TestCredentialValidation(t *testing.T) {
 			cfg:     Databricks{},
 			wantErr: "databricks-client-secret",
 		},
+		{
+			// The JWT arrives through the hosted token source, not this field.
+			name:       "hosted workload identity requires no stored credential",
+			authMethod: "workload-identity-c1",
+			cfg:        Databricks{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -127,6 +138,18 @@ func TestCredentialValidation(t *testing.T) {
 				t.Errorf("Validate returned %q, want it to name %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// The hosted runtime attaches its token source only for an OAuth2 field, so
+// this field has to stay one. A plain string would leave the connector with
+// no way to receive the JWT ConductorOne signs.
+func TestHostedWorkloadIdentityFieldIsOAuth2(t *testing.T) {
+	if DatabricksC1TokenField.ConnectorConfig.FieldType != field.OAuth2 {
+		t.Errorf("databricks-c1-token field type = %q, want %q", DatabricksC1TokenField.ConnectorConfig.FieldType, field.OAuth2)
+	}
+	if DatabricksC1TokenField.Required {
+		t.Error("databricks-c1-token must not be required: ConductorOne supplies the JWT, the field holds no value")
 	}
 }
 
