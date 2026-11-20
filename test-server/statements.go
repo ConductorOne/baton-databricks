@@ -375,6 +375,7 @@ var (
 	cutoffRe      = regexp.MustCompile(`(?i)\bevent_time\s*<=\s*:(\w+)`)
 	serviceListRe = regexp.MustCompile(`(?i)\bservice_name\s+IN\s*\(([^)]*)\)`)
 	actionListRe  = regexp.MustCompile(`(?i)\baction_name\s+IN\s*\(([^)]*)\)`)
+	statusCodeRe  = regexp.MustCompile(`(?i)\bresponse\.status_code\s*=\s*(\d+)\b`)
 	orderByRe     = regexp.MustCompile(`(?i)\bORDER\s+BY\s+event_time(\s+ASC)?\s*,\s*event_id(\s+ASC)?\b`)
 	limitRe       = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)\s*;?\s*$`)
 )
@@ -514,6 +515,7 @@ func (st *state) runAuditQuery(sql string, params []statementParameter, region s
 		hasStartDate, hasAfter       bool
 		hasCutoff                    bool
 		services, actions            []string
+		statusCode                   = -1
 		limit                        = -1
 		err                          *sqlError
 	)
@@ -545,6 +547,9 @@ func (st *state) runAuditQuery(sql string, params []statementParameter, region s
 	if mm := actionListRe.FindStringSubmatch(sql); mm != nil {
 		actions = parseInList(mm[1])
 	}
+	if mm := statusCodeRe.FindStringSubmatch(sql); mm != nil {
+		statusCode, _ = strconv.Atoi(mm[1])
+	}
 	if mm := limitRe.FindStringSubmatch(sql); mm != nil {
 		limit, _ = strconv.Atoi(mm[1])
 	}
@@ -575,6 +580,9 @@ func (st *state) runAuditQuery(sql string, params []statementParameter, region s
 		if actions != nil && !contains(actions, row.ActionName) {
 			continue
 		}
+		if statusCode >= 0 && row.statusCode() != statusCode {
+			continue
+		}
 		matched = append(matched, row)
 	}
 
@@ -597,6 +605,14 @@ func (st *state) runAuditQuery(sql string, params []statementParameter, region s
 		rows = append(rows, values)
 	}
 	return cols, rows, nil
+}
+
+// statusCode is the row's response.status_code, where an unset value means 200.
+func (row auditRow) statusCode() int {
+	if row.StatusCode == 0 {
+		return 200
+	}
+	return row.StatusCode
 }
 
 // formatValue renders a column value as JSON_ARRAY does.

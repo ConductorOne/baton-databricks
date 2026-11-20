@@ -169,7 +169,8 @@ The server doesn't run SQL. It recognizes `SELECT <columns> FROM system.access.a
 - binds the typed `:name` parameters;
 - applies the predicates the connector's query uses, recognized by shape:
   `event_date >= :d`, `(event_time > :t OR (event_time = :t AND event_id > :id))`,
-  `event_time <= :cutoff`, `service_name IN (...)` and `action_name IN (...)`;
+  `event_time <= :cutoff`, `service_name IN (...)`, `action_name IN (...)` and
+  `response.status_code = n` (seed rows are 200 unless they set another status);
 - requires `ORDER BY event_time ASC, event_id ASC` and applies a trailing `LIMIT n`;
 - fails any other statement with `FAILED` and "test-server: unsupported statement".
 
@@ -245,6 +246,7 @@ account, as in full sync.
 | 24 | −5h | ws-alpha | clusters / `create` | | none: not requested |
 | 25 | −2h | 0 | accounts / `add` | targetUserId bob | none: newer than the 4-hour lag cutoff |
 | 26 | −72h | 0 | accounts / `add` | targetUserId carol | none: older than the feed start |
+| 27 | −18h30m | 0 | accounts / `removePrincipalFromGroup`, `response.status_code` 403 | data-engineers ← alice | none: the request failed, so alice is still a member |
 
 The table lists what each row maps to, 31 events in all. Within one poll, `ListEvents` keeps
 only the last change for each resource (by resource and parent ID), because a resource change

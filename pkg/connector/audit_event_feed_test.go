@@ -1289,6 +1289,9 @@ func TestListEventsEndToEnd(t *testing.T) {
 		if !strings.Contains(body.Statement, "'accounts'") {
 			t.Errorf("statement does not filter service_name IN ('accounts', ...): %s", body.Statement)
 		}
+		if !strings.Contains(body.Statement, "response.status_code = 200") {
+			t.Errorf("statement does not filter out failed requests with response.status_code = 200: %s", body.Statement)
+		}
 
 		w.Header().Set("X-Ratelimit-Limit", strconv.Itoa(wantLimit))
 		w.Header().Set("X-Ratelimit-Remaining", strconv.Itoa(wantRemaining))

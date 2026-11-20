@@ -146,5 +146,8 @@ func seedAudit(start time.Time) []auditRow {
 		// Outside the window: older than an --event-feed-start-at of 2 days ago.
 		{EventID: "e0000001-0000-4000-8000-000000000026", EventTime: at(72, 0), ServiceName: "accounts", ActionName: "add",
 			RequestParams: user("scim", userCarol, "carol@example.com")},
+		// A request Databricks rejected: alice stays in data-engineers, so it must not become a revoke.
+		{EventID: "e0000001-0000-4000-8000-000000000027", EventTime: at(18, 30), ServiceName: "accounts", ActionName: "removePrincipalFromGroup",
+			RequestParams: membership(groupDataEngineers, "data-engineers", userAlice, "alice@example.com"), StatusCode: 403},
 	}
 }

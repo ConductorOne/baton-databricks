@@ -67,6 +67,7 @@ const connectorStatement = `
 		  AND event_time <= :lag_cutoff
 		  AND service_name IN ('accounts', 'workspace')
 		  AND action_name IN (%s)
+		  AND response.status_code = 200
 		ORDER BY event_time ASC, event_id ASC
 		LIMIT %d
 	`
@@ -338,6 +339,41 @@ func TestAuditQueryPaging(t *testing.T) {
 	_, body = ts.do(t, http.MethodPost, alphaURL+"/api/2.0/sql/statements", statementRequest(t, "wh-serverless", "10s", rowTime(21), eventID(21), 1))
 	if got := eventIDs(t, body); len(got) != 1 || got[0] != eventID(22) {
 		t.Errorf("tiebreak after row 21: got %v", got)
+	}
+}
+
+func TestAuditQueryStatusCode(t *testing.T) {
+	ts := newTestServer(config{})
+	params := []statementParameter{
+		{Name: "start_date", Value: ptr(testStart.Add(-48 * time.Hour).Format(time.DateOnly)), Type: "DATE"},
+		{Name: "start_time", Value: ptr(testStart.Add(-48 * time.Hour).Format(time.RFC3339Nano)), Type: "TIMESTAMP"},
+		{Name: "start_after_event_id", Value: ptr(""), Type: "STRING"},
+		{Name: "lag_cutoff", Value: ptr(testStart.Add(-4 * time.Hour).Format(time.RFC3339Nano)), Type: "TIMESTAMP"},
+	}
+	ids := func(stmt string) map[string]bool {
+		t.Helper()
+		_, rows, err := ts.st.runAuditQuery(stmt, params, "us-east-1")
+		if err != nil {
+			t.Fatal(err.message)
+		}
+		got := map[string]bool{}
+		for _, r := range rows {
+			got[*r[0]] = true
+		}
+		return got
+	}
+
+	filtered := ids(fmt.Sprintf(connectorStatement, connectorActions, 1000))
+	if filtered[eventID(27)] {
+		t.Error("response.status_code = 200 should exclude the failed row 27")
+	}
+	if !filtered[eventID(8)] {
+		t.Error("response.status_code = 200 should keep the successful row 8")
+	}
+
+	unfiltered := ids(strings.Replace(fmt.Sprintf(connectorStatement, connectorActions, 1000), "AND response.status_code = 200", "", 1))
+	if !unfiltered[eventID(27)] {
+		t.Error("without a status filter the failed row 27 should be returned")
 	}
 }
 

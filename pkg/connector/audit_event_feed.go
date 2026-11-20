@@ -977,6 +977,8 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 	// with a composite > predicate, so progress never stalls even if many rows share one
 	// event_time (see advanceEventCursor); this holds as long as event_id compares consistently
 	// under Databricks SQL's ">"/ORDER BY, which is true for this table's opaque IDs.
+	// The table also logs requests Databricks rejected (e.g. a 403 on removePrincipalFromGroup),
+	// so only successful ones are read; a failed one would otherwise become a false grant or revoke.
 	statement := fmt.Sprintf(`
 		SELECT event_id, event_time, workspace_id, action_name, service_name, request_params
 		FROM system.access.audit
@@ -985,6 +987,7 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		  AND event_time <= :lag_cutoff
 		  AND service_name IN (%s)
 		  AND action_name IN (%s)
+		  AND response.status_code = 200
 		ORDER BY event_time ASC, event_id ASC
 		LIMIT %d
 	`, quotedInClause(auditLogServiceNames()), quotedInClause(auditLogActionNames()), auditLogPageLimit)
