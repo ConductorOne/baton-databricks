@@ -86,6 +86,25 @@ func (f FileSubjectTokenSource) SubjectToken() (string, error) {
 	return token, nil
 }
 
+// OAuth2TokenSubjectTokenSource takes the JWT from an oauth2.TokenSource. A hosted
+// connector's runtime supplies one that asks ConductorOne for a freshly signed
+// JWT, so every exchange presents an unexpired subject token.
+type OAuth2TokenSubjectTokenSource struct {
+	Source oauth2.TokenSource
+}
+
+func (o OAuth2TokenSubjectTokenSource) SubjectToken() (string, error) {
+	token, err := o.Source.Token()
+	if err != nil {
+		return "", uhttp.WrapErrors(codes.Unauthenticated, "failed to get workload identity token from ConductorOne", err)
+	}
+	if token.AccessToken == "" {
+		return "", uhttp.WrapErrors(codes.Unauthenticated, "ConductorOne returned an empty workload identity token")
+	}
+
+	return token.AccessToken, nil
+}
+
 type TokenFederation struct {
 	clientID string
 	tokenURL string

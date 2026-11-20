@@ -3,6 +3,8 @@ package connector
 import (
 	"testing"
 
+	"golang.org/x/oauth2"
+
 	"github.com/conductorone/baton-databricks/pkg/config"
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 )
@@ -43,6 +45,12 @@ func TestPrepareClientAuthSelectsTheCredential(t *testing.T) {
 			federated:  true,
 		},
 		{
+			name:       "ConductorOne token source",
+			authMethod: config.WorkloadIdentityC1AuthMethod,
+			cfg:        config.Databricks{DatabricksClientSecret: "leftover"},
+			federated:  true,
+		},
+		{
 			// No method selected falls back to the default group, which
 			// validation has already checked for a client secret.
 			name: "no method selected",
@@ -59,7 +67,7 @@ func TestPrepareClientAuthSelectsTheCredential(t *testing.T) {
 			cfg.DatabricksClientId = "sp-client-id"
 			cfg.Hostname = "cloud.databricks.com"
 
-			auth := prepareClientAuth(&cfg, tt.authMethod)
+			auth := prepareClientAuth(&cfg, tt.authMethod, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "c1-jwt"}))
 			_, federated := auth.(*databricks.TokenFederation)
 			if federated != tt.federated {
 				t.Errorf("prepareClientAuth returned %T, federated = %v, want %v", auth, federated, tt.federated)
