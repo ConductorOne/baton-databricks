@@ -18,10 +18,11 @@ While developing the connector, please fill out this form. This information is n
 
 1. What credentials or information are needed to set up the connector? (For example, API key, client ID and secret, domain, etc.)
 
-   > The connector requires a Databricks account ID and a service principal OAuth client ID. It syncs the account and every workspace that service principal can access. The service principal is then authenticated in one of two ways:
+   > The connector requires a Databricks account ID and a service principal OAuth client ID. It syncs the account and every workspace that service principal can access. The service principal is then authenticated in one of three ways:
    >
    > - **OAuth client secret** (default): the service principal's OAuth client secret.
    > - **Workload identity federation**: an externally issued JWT identifying the workload, such as a SPIFFE JWT-SVID or a Kubernetes projected service account token, read from a file. The connector exchanges it for a short-lived Databricks token, so no long-lived secret is stored. This requires a service principal federation policy in Databricks. It is available only when you run the connector yourself, on the command line or in service mode, and is selected with `--auth-method workload-identity-file`.
+   > - **Workload identity federation (C1-hosted)**: C1 signs a short-lived JWT for the connector, and Databricks exchanges it for a short-lived token. No credential is stored. The hosted runtime selects this method; it is not available from the command line.
    >
    > The authentication method selects the credential.
    >
@@ -32,7 +33,8 @@ While developing the connector, please fill out this form. This information is n
 
      > - **Account ID**: in the Databricks account console, open the menu next to your username in the upper-right corner; the account ID is shown there.
      > - **OAuth client ID and secret**: follow the [Databricks OAuth (M2M) documentation](https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html) to create a service principal and generate an OAuth secret.
-     > - **Workload identity federation**: follow the [Databricks OAuth token federation documentation](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange) to add a federation policy to that same service principal. The JWT itself comes from the workload's own platform, not from Databricks.
+     > - **Workload identity federation**: follow the [Databricks OAuth token federation documentation](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange) to add a federation policy to that same service principal. For a self-run connector, the JWT comes from the workload's own platform, not from Databricks.
+     > - **Workload identity federation (C1-hosted)**: add a federation policy to that same service principal. Point it at the C1 OIDC issuer `<tenant endpoint>/auth/v1/workload-identity`, which publishes its own discovery document and JWKS. The audience is the Databricks OAuth client ID, and the subject is `c1:tenant/<tenant id>/app/<app id>/connector/<connector id>`.
      > - **Deployment name**: the subdomain in the workspace URL (not the numeric workspace ID).
 
    - Does the credential need any specific scopes or permissions? If so, list them here.

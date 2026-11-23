@@ -16,6 +16,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -96,9 +97,15 @@ type OAuth2TokenSubjectTokenSource struct {
 func (o OAuth2TokenSubjectTokenSource) SubjectToken() (string, error) {
 	token, err := o.Source.Token()
 	if err != nil {
-		return "", uhttp.WrapErrors(codes.Unauthenticated, "failed to get workload identity token from ConductorOne", err)
+		// ConductorOne returns real gRPC statuses (FailedPrecondition when the
+		// feature is off, Unavailable when minting is down); keep them so
+		// retryable errors stay retryable.
+		if status.Code(err) != codes.Unknown {
+			return "", err
+		}
+		return "", uhttp.WrapErrors(codes.FailedPrecondition, "failed to get workload identity token from ConductorOne", err)
 	}
-	if token.AccessToken == "" {
+	if token == nil || token.AccessToken == "" {
 		return "", uhttp.WrapErrors(codes.Unauthenticated, "ConductorOne returned an empty workload identity token")
 	}
 
@@ -216,8 +223,8 @@ func (o *OAuth2) Apply(req *http.Request) {
 	// No need to set the Authorization header here, the oauth2 client does it automatically
 }
 
-// NewTokenFederation builds the federation auth. Exactly one of token or tokenFile
-// carries the JWT.
+// NewTokenFederation builds the federation auth. The source supplies the subject
+// JWT on every token exchange.
 func NewTokenFederation(accID, clientID, accountHostname string, source SubjectTokenSource) *TokenFederation {
 	return &TokenFederation{
 		clientID: clientID,

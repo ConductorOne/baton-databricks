@@ -89,8 +89,8 @@ The connector always authenticates as an account-level service principal, named
 by `--databricks-client-id`. There is no personal access token (PAT) or
 workspace-token option, and no username/password option.
 
-Exactly one of the following credentials must be supplied. Passing more than one
-is a configuration error.
+`--auth-method` selects which credential is used. Fields for other methods are
+ignored.
 
 ### Client secret (default)
 
@@ -121,9 +121,9 @@ The file is read again on every token refresh, so whatever rotates it controls
 the lifetime and the connector needs no restart.
 
 This method runs the connector yourself: on the command line or in service mode.
-A ConductorOne-hosted connector has no file system you control, so the option is
-not offered there. Hosted support needs ConductorOne to issue the JWT, which is
-tracked in CXE-1557.
+A C1-hosted connector uses workload identity too, but C1 issues the JWT and the
+hosted runtime selects the method, so there is no file and no flag to set. The
+federation policy a hosted connector needs is in the connector documentation.
 
 Nothing else changes: the exchange happens at the same account token endpoint,
 and the resulting token is used for both account and workspace APIs.
