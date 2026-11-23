@@ -269,6 +269,31 @@ func (w *workspaceBuilder) Grants(ctx context.Context, resource *v2.Resource, at
 	return rv, &rs.SyncOpResults{NextPageToken: nextPage, Annotations: annos}, nil
 }
 
+// Get re-fetches a single workspace, used to re-sync it after a RESOURCE_CHANGE event.
+// GetWorkspace excludes it the same way ListWorkspaces does, so a deliberately excluded
+// workspace naturally comes back not-found rather than needing a separate check here.
+func (w *workspaceBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	workspace, rateLimitData, err := w.client.GetWorkspace(databricks.WithoutCache(ctx), resourceId.Resource)
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return nil, annos, fmt.Errorf("databricks-connector: failed to get workspace %s: %w", resourceId.Resource, err)
+	}
+
+	resource, err := workspaceResource(ctx, workspace, parentResourceId)
+	if err != nil {
+		return nil, annos, err
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed workspace",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
+	return resource, annos, nil
+}
+
 // workspacePrincipalID returns the numeric principal ID the permission assignments API expects.
 // Groups are only synced under the account, so only "account/<account>/group/<n>" group IDs of
 // the given account are accepted; anything else is rejected.

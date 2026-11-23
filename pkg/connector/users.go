@@ -11,6 +11,8 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -66,8 +68,9 @@ func (u *userBuilder) userResource(ctx context.Context, user *databricks.User, p
 		rs.WithResourceStatus(status, ""),
 		rs.WithAnnotation(&v2.RawId{Id: user.ID}),
 	}
+
 	// keep the parent resource id, only if the parent resource is account
-	if parent.ResourceType == accountResourceType.Id {
+	if parent.GetResourceType() == accountResourceType.Id {
 		options = append(options, rs.WithParentResourceID(parent))
 	}
 
@@ -270,6 +273,34 @@ func (o *userBuilder) CreateAccount(ctx context.Context, accountInfo *v2.Account
 		Resource:              resource,
 		IsCreateAccountResult: true,
 	}, nil, nil, nil
+}
+
+// Get re-fetches a single user, used to re-sync it after a RESOURCE_CHANGE event.
+func (u *userBuilder) Get(ctx context.Context, resourceId *v2.ResourceId, parentResourceId *v2.ResourceId) (*v2.Resource, annotations.Annotations, error) {
+	var workspaceId string
+	if parentResourceId.GetResourceType() == workspaceResourceType.Id {
+		workspaceId = parentResourceId.Resource
+	}
+
+	user, rateLimitData, err := u.client.GetUser(databricks.WithoutCache(ctx), workspaceId, resourceId.Resource)
+	annos := annotations.Annotations{}
+	if rateLimitData != nil {
+		annos.WithRateLimiting(rateLimitData)
+	}
+	if err != nil {
+		return nil, annos, fmt.Errorf("databricks-connector: failed to get user %s: %w", resourceId.Resource, err)
+	}
+
+	resource, err := u.userResource(ctx, user, parentResourceId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ctxzap.Extract(ctx).Debug("databricks-connector: Get: refreshed user",
+		zap.String("resource_id", resourceId.Resource),
+		zap.String("parent_resource_id", parentResourceId.GetResource()),
+	)
+	return resource, annos, nil
 }
 
 func (o *userBuilder) Delete(ctx context.Context, resourceId *v2.ResourceId) (annotations.Annotations, error) {
