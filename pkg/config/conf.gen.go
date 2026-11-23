@@ -12,6 +12,7 @@ type Databricks struct {
 	Workspaces []string `mapstructure:"workspaces"`
 	BaseUrl string `mapstructure:"base-url"`
 	DatabricksExcludeWorkspaces []string `mapstructure:"databricks-exclude-workspaces"`
+	SqlWarehouseId string `mapstructure:"sql-warehouse-id"`
 }
 
 func (c *Databricks) findFieldByTag(tagValue string) (any, bool) {
