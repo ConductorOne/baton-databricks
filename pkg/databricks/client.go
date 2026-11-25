@@ -393,13 +393,16 @@ func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId strin
 	return c.getGroup(ctx, c.getNoCache, workspaceId, groupId, vars...)
 }
 
-// FindGroup resolves a single group by id via a filtered list (filter=id eq '<id>',
-// count=1) instead of a direct GET. Vendor semantics: some tenants strip the requested
-// attributes from multi-group lists AND from single-group GETs, but honor them on a
-// filtered list — this is the read to use when the caller needs meta/roles/entitlements
-// and the projection must actually arrive. An empty result means the group does not
-// exist (deleted, or not visible from the requested plane) — the list equivalent of the
-// 404 a direct GET returns.
+// FindGroupByID resolves a single group by id via a filtered list (filter=id eq '<id>',
+// count=1) instead of a direct GET. Vendor semantics (CI tenant, runs 45715149358 /
+// 45719189560 / 45720792196): the account-plane SCIM API strips an explicit
+// attributes=roles,entitlements,meta projection from multi-group lists, filtered lists
+// AND single-group GETs alike, but returns meta when NO attributes param is sent (the
+// default projection). Callers that need meta should therefore call this WITHOUT
+// attribute vars; roles/entitlements come back when the vendor includes them in the
+// default projection. An empty result means the group does not exist (deleted, or not
+// visible from the requested plane) — the list equivalent of the 404 a direct GET
+// returns.
 func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	[]Group,
 	*uint,

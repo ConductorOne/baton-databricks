@@ -230,16 +230,19 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
 			// Classify the group. Groups without meta in the list object get one fallback
-			// filtered single-group read: some tenants strip the projection from multi-group
-			// list responses (every entry arrives as {"id":"...","displayName":""}) — and
-			// even from direct single-group GETs — while a filtered list (filter=id eq ...)
-			// honors attributes=roles,entitlements,meta reliably, so a meta-less list entry
-			// is not proof the group is unclassifiable. Only meta-less entries trigger the
-			// fallback read, and results are not cached across calls.
+			// filtered single-group read. Vendor evidence (CI tenant, runs 45715149358 /
+			// 45719189560 / 45720792196): the account-plane SCIM API strips an explicit
+			// attributes=roles,entitlements,meta projection from multi-group lists, filtered
+			// lists AND direct single-group GETs, but returns meta when no attributes param
+			// is sent (default projection) — so a meta-less list entry is not proof the
+			// group is unclassifiable. The fallback deliberately requests no attributes; the
+			// role check uses whatever roles/entitlements the default projection carries.
+			// Only meta-less entries trigger the fallback read, and results are not cached
+			// across calls.
 			if g.GroupClass() == databricks.UnknownGroupClass {
 				l.Debug("databricks-connector: list entry missing meta; classifying via filtered single-group read",
 					zap.String("group_id", g.ID))
-				found, _, _, err := r.client.FindGroupByID(ctx, workspaceId, g.ID, databricks.NewGroupRolesAttrVars())
+				found, _, _, err := r.client.FindGroupByID(ctx, workspaceId, g.ID)
 				if err != nil {
 					return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, g.DisplayName, err)
 				}

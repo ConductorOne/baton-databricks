@@ -455,9 +455,10 @@ func TestGrantsEmitsGrantForAccountGroupWithRole(t *testing.T) {
 
 // Stripped multi-group list responses ({"id","displayName"} only) must be classified via
 // a filtered single-group list fallback instead of failing the sync or silently dropping
-// grants. The vendor strips attributes from multi-group lists — and even from direct
-// single-group GETs (observed on the CI tenant, run 45719189560) — while a filtered list
-// (filter=id eq '<id>', count=1) honors attributes=roles,entitlements,meta.
+// grants. The vendor strips the explicit attributes=roles,entitlements,meta projection
+// from account-plane multi-group lists, filtered lists AND single-group GETs (observed on
+// the CI tenant, runs 45719189560/45720792196), while a filtered list sent WITHOUT an
+// attributes param (default projection) returns meta.
 func TestGrantsClassifiesStrippedListViaFilteredReadFallback(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -504,7 +505,12 @@ func TestGrantsClassifiesStrippedListViaFilteredReadFallback(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				if req.URL.Query().Get("filter") == "id eq 'g1'" {
 					fallbackReads++
-					_, _ = w.Write([]byte(fmt.Sprintf(`{"Resources":[%s],"totalResults":%d}`, tt.filteredBody, tt.filteredTotal)))
+					// The fallback must NOT send an attributes param: an explicit projection
+					// is exactly what this tenant's account-plane API strips.
+					if attrs := req.URL.Query().Get("attributes"); attrs != "" {
+						t.Errorf("fallback read sent attributes=%q, want none (default projection)", attrs)
+					}
+					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":%d}`, tt.filteredBody, tt.filteredTotal)
 					return
 				}
 				// Every group list page is stripped: id and displayName only.
