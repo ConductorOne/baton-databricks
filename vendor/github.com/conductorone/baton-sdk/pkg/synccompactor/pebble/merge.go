@@ -191,6 +191,9 @@ func MergeInto(ctx context.Context, dest *enginepkg.Engine, sources []SourceSync
 	if err := dest.SetCurrentSync(ctx, destSyncID); err != nil {
 		return stats, fmt.Errorf("synccompactor/pebble.MergeInto: bind dest sync: %w", err)
 	}
+	if err := requireUnsampledSource(ctx, dest, destSyncID); err != nil {
+		return stats, err
+	}
 	// Folds write the dest keyspace through the raw DB handle; invalidate
 	// the engine's bare-id lookup state on the way out (even on error —
 	// earlier sources may already have been folded in).
@@ -202,6 +205,9 @@ func MergeInto(ctx context.Context, dest *enginepkg.Engine, sources []SourceSync
 		s := sources[i]
 		if s.Engine == nil || s.SyncID == "" {
 			continue
+		}
+		if err := requireUnsampledSource(ctx, s.Engine, s.SyncID); err != nil {
+			return stats, err
 		}
 		srcStats, err := mergeOneSource(ctx, dest, s, destSyncID, opts.collectGrantEntitlementIDs)
 		stats.Add(srcStats)
@@ -260,13 +266,13 @@ func mergeBucketRawIfNewerWithCommitFailure(
 ) (FoldStats, error) {
 	var stats FoldStats
 	lower, upper := bucket.syncRange()
-	iter, err := src.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := src.Expansion().NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
 		return stats, err
 	}
 	defer func() { _ = iter.Close() }()
 
-	batch := dest.NewFoldBatch()
+	batch := dest.Expansion().NewFoldBatch()
 	defer func() { _ = batch.Close() }()
 	pending := 0
 	var scratch rawIndexScratch
@@ -289,7 +295,7 @@ func mergeBucketRawIfNewerWithCommitFailure(
 			return err
 		}
 		_ = batch.Close()
-		batch = dest.NewFoldBatch()
+		batch = dest.Expansion().NewFoldBatch()
 		pending = 0
 		return nil
 	}
@@ -302,7 +308,7 @@ func mergeBucketRawIfNewerWithCommitFailure(
 		// Point-read the committed incumbent. Safe against the pending
 		// batch: a sync holds one record per key, so no key repeats
 		// within this loop, and earlier sources were fully flushed.
-		oldVal, closer, getErr := dest.Get(key)
+		oldVal, closer, getErr := dest.Expansion().Get(key)
 		switch {
 		case getErr == nil:
 			if bytes.Equal(oldVal, value) {

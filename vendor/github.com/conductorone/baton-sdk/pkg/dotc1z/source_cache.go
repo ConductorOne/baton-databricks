@@ -134,7 +134,7 @@ func sourceCacheEngine(store any) (*pebble.Engine, bool) {
 }
 
 func validateReplaySourceEligible(ctx context.Context, previous *pebble.Engine) error {
-	run, err := previous.LatestFinishedSyncRecord(ctx, nil)
+	run, err := previous.SyncRuns().LatestFinishedSyncRecord(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("source cache replay: read previous sync lifecycle: %w", err)
 	}
@@ -146,6 +146,9 @@ func validateReplaySourceEligible(ctx context.Context, previous *pebble.Engine) 
 	}
 	if run.GetCompacted() {
 		return errors.New("source cache replay: compacted artifacts are not replay-eligible")
+	}
+	if run.GetSampled() {
+		return errors.New("source cache replay: sampled artifacts are not replay-eligible")
 	}
 	return nil
 }
@@ -218,7 +221,7 @@ func (s *pebbleStore) PutSourceCacheEntry(ctx context.Context, kind sourcecache.
 		return err
 	}
 	defer done()
-	return s.Engine.PutSourceCacheEntry(ctx, string(kind), scopeKey, cacheValidator)
+	return s.engine.PutSourceCacheEntry(ctx, string(kind), scopeKey, cacheValidator)
 }
 
 func (s *pebbleStore) ReplaySourceCache(ctx context.Context, prev connectorstore.Reader, kind sourcecache.RowKind, scopeKey string) (SourceCacheReplayResult, error) {
@@ -238,7 +241,7 @@ func (s *pebbleStore) ReplaySourceCache(ctx context.Context, prev connectorstore
 	if !ok {
 		return SourceCacheReplayResult{}, errors.New("source cache replay: previous sync store is not a pebble store")
 	}
-	if prevEngine == s.Engine {
+	if prevEngine == s.engine {
 		return SourceCacheReplayResult{}, errors.New("source cache replay: previous and current stores are the same")
 	}
 	if err := validateReplaySourceEligible(ctx, prevEngine); err != nil {

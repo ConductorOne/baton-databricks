@@ -3976,7 +3976,7 @@ func (m *Task_SyncFullTask) validate(all bool) error {
 		if _, ok := _Task_SyncFullTask_StorageEngine_InLookup[m.GetStorageEngine()]; !ok {
 			err := Task_SyncFullTaskValidationError{
 				field:  "StorageEngine",
-				reason: "value must be in list [pebble sqlite]",
+				reason: "value must be in list [pebble]",
 			}
 			if !all {
 				return err
@@ -4068,7 +4068,6 @@ var _ interface {
 
 var _Task_SyncFullTask_StorageEngine_InLookup = map[string]struct{}{
 	"pebble": {},
-	"sqlite": {},
 }
 
 // Validate checks the field values on Task_EventFeedTask with the rules
@@ -6379,6 +6378,38 @@ func (m *Task_ListTicketSchemasTask) validate(all bool) error {
 
 	}
 
+	// no validation rules for Paginate
+
+	if m.GetPageToken() != "" {
+
+		if len(m.GetPageToken()) > 4096 {
+			err := Task_ListTicketSchemasTaskValidationError{
+				field:  "PageToken",
+				reason: "value length must be at most 4096 bytes",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
+
+	if m.GetPageSize() != 0 {
+
+		if val := m.GetPageSize(); val < 1 || val > 1000 {
+			err := Task_ListTicketSchemasTaskValidationError{
+				field:  "PageSize",
+				reason: "value must be inside range [1, 1000]",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
+
 	if len(errors) > 0 {
 		return Task_ListTicketSchemasTaskMultiError(errors)
 	}
@@ -7683,6 +7714,17 @@ func (m *BatonServiceHelloRequest_BuildInfo) validate(all bool) error {
 	if utf8.RuneCountInString(m.GetPackageVersion()) > 256 {
 		err := BatonServiceHelloRequest_BuildInfoValidationError{
 			field:  "PackageVersion",
+			reason: "value length must be at most 256 runes",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if utf8.RuneCountInString(m.GetSdkVersion()) > 256 {
+		err := BatonServiceHelloRequest_BuildInfoValidationError{
+			field:  "SdkVersion",
 			reason: "value length must be at most 256 runes",
 		}
 		if !all {

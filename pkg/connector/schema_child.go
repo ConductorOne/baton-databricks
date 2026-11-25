@@ -144,12 +144,12 @@ func pushSchemaChildRoute(
 		return err
 	}
 
-	usable, inScope, err := scope.attached(ctx, client, metastoreID, annos)
+	usable, pending, err := scope.attached(ctx, client, metastoreID, annos)
 	if err != nil {
 		return assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
-		if inScope {
+		if len(pending) > 0 {
 			return status.Errorf(codes.FailedPrecondition,
 				"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
 		}
@@ -449,7 +449,8 @@ func liveChildRoute(
 		return schemaChildRoute{}, err
 	}
 
-	route, catalog, err := liveCatalogRoute(ctx, client, clientID, workspaces, resource, metastoreID, catalogName, owner, annos)
+	route, catalog, err := liveCatalogRoute(ctx, client, clientID, workspaces, resource, metastoreID, catalogName, owner,
+		fmt.Sprintf("to write catalog %s through", catalogName), annos)
 	if err != nil {
 		return schemaChildRoute{}, err
 	}

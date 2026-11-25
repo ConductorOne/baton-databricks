@@ -262,6 +262,28 @@ func (c *Client) UpdateUser(ctx context.Context, workspaceId string, user *User)
 	return c.Put(ctx, u, user, nil)
 }
 
+// SetUserActive sets the account-level user's active flag with a SCIM PATCH that
+// targets only the active attribute, so roles, entitlements, group memberships and
+// workspace assignments are untouched. The replace is idempotent: setting the state
+// the user already has succeeds. A user ID that is not all digits is rejected before any
+// request, since it would change the URL path.
+//
+// PATCH /api/2.0/accounts/{account_id}/scim/v2/Users/{id} — https://docs.databricks.com/api/scim/v1/patch-account-user
+// Required permission: account admin (the OAuth service principal uses scope all-apis).
+func (c *Client) SetUserActive(ctx context.Context, userID string, active bool) (*v2.RateLimitDescription, error) {
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
+
+	u := c.accountBaseUrl.JoinPath(fmt.Sprintf(accountUsersEndpoint, c.accountId), userID)
+	body := PatchRequest{
+		Schemas:    []string{PatchOpSchema},
+		Operations: []PatchOperation{{Op: "replace", Path: "active", Value: active}},
+	}
+
+	return c.Patch(ctx, u, body, nil)
+}
+
 func (c *Client) FindUserID(
 	ctx context.Context,
 	workspaceId string,
@@ -608,6 +630,100 @@ func (c *Client) FindServicePrincipalAppID(
 	return servicePrincipals[0].ApplicationID, ratelimitData, nil
 }
 
+// scimFilterMaxTerms is the widest "id eq" or-chain the account accepts: Databricks refuses a
+// SCIM filter above 200 nodes and an n-term chain is 2n-1 of them.
+const scimFilterMaxTerms = 100
+
+// scimIDFilter builds the "id eq ... or id eq ..." filter that reads ids in one request.
+func scimIDFilter(ids []string) string {
+	terms := make([]string, 0, len(ids))
+	for _, id := range ids {
+		terms = append(terms, "id eq "+strconv.Quote(id))
+	}
+
+	return strings.Join(terms, " or ")
+}
+
+// FindAccountHeldIDs reports which of ids the account holds as memberType, one request per
+// batch of scimFilterMaxTerms rather than one per id. An id the account does not hold is
+// absent from the set, so a page shorter than the filter matched is an error, not an answer.
+func (c *Client) FindAccountHeldIDs(
+	ctx context.Context,
+	memberType string,
+	ids []string,
+) (
+	map[string]struct{},
+	*v2.RateLimitDescription,
+	error,
+) {
+	switch memberType {
+	case "Users", "Groups", "ServicePrincipals":
+	default:
+		return nil, nil, fmt.Errorf("invalid member type: %s", memberType)
+	}
+
+	held := make(map[string]struct{}, len(ids))
+	var rateLimitData *v2.RateLimitDescription
+
+	for start := 0; start < len(ids); start += scimFilterMaxTerms {
+		end := min(start+scimFilterMaxTerms, len(ids))
+		batch := ids[start:end]
+
+		vars := []Vars{
+			&PaginationVars{Count: uint(len(batch))},
+			NewFilterVars(scimIDFilter(batch)),
+			&AttrVars{Attrs: []string{"id"}},
+		}
+
+		var (
+			found              []string
+			matched            uint
+			batchRateLimitData *v2.RateLimitDescription
+			err                error
+		)
+
+		switch memberType {
+		case "Users":
+			var users []User
+			users, matched, batchRateLimitData, err = c.ListUsers(ctx, "", vars...)
+			for _, u := range users {
+				found = append(found, u.ID)
+			}
+		case "Groups":
+			var groups []Group
+			groups, matched, batchRateLimitData, err = c.ListGroups(ctx, "", vars...)
+			for _, g := range groups {
+				found = append(found, g.ID)
+			}
+		case "ServicePrincipals":
+			var servicePrincipals []ServicePrincipal
+			servicePrincipals, matched, batchRateLimitData, err = c.ListServicePrincipals(ctx, "", vars...)
+			for _, sp := range servicePrincipals {
+				found = append(found, sp.ID)
+			}
+		}
+
+		if batchRateLimitData != nil {
+			rateLimitData = batchRateLimitData
+		}
+
+		if err != nil {
+			return nil, rateLimitData, err
+		}
+
+		if matched > uint(len(found)) {
+			return nil, rateLimitData, fmt.Errorf(
+				"account returned %d of %d matched %s for a filtered read of %d ids", len(found), matched, memberType, len(batch))
+		}
+
+		for _, id := range found {
+			held[id] = struct{}{}
+		}
+	}
+
+	return held, rateLimitData, nil
+}
+
 func (c *Client) ListRoles(
 	ctx context.Context,
 	workspaceId string,
@@ -759,6 +875,19 @@ func validatePrincipalID(principalID string) error {
 		return uhttp.WrapErrors(
 			codes.InvalidArgument,
 			fmt.Sprintf("principal ID must be numeric; compound group IDs are not supported here: %q", principalID),
+		)
+	}
+
+	return nil
+}
+
+// validateUserID accepts only ASCII digits, the form of a Databricks user ID. Unlike
+// strconv.Atoi it rejects signs ("+42", "-1"), and the message names the user ID.
+func validateUserID(userID string) error {
+	if userID == "" || strings.IndexFunc(userID, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return uhttp.WrapErrors(
+			codes.InvalidArgument,
+			fmt.Sprintf("user ID must contain only digits 0-9: %q", userID),
 		)
 	}
 

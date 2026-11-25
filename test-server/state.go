@@ -63,6 +63,8 @@ type auditRow struct {
 	ServiceName   string
 	ActionName    string
 	RequestParams map[string]string
+	// StatusCode is response.status_code. Zero means 200; seedAudit fills it in.
+	StatusCode int
 }
 
 // state is the in-memory account, seeded at startup (see seeds.go) and reset on every start.

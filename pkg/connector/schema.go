@@ -262,12 +262,12 @@ func (b *schemaBuilder) pushRoute(
 		return err
 	}
 
-	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
+	usable, pending, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if err != nil {
 		return assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
-		if inScope {
+		if len(pending) > 0 {
 			return status.Errorf(codes.FailedPrecondition,
 				"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
 		}
@@ -464,7 +464,7 @@ func (b *schemaBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 func (b *schemaBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
 
-	return b.syncGrants(ctx, resource, attr)
+	return b.syncGrants(ctx, resource, attr, nil)
 }
 
 func (b *schemaBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
@@ -520,10 +520,12 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 		return nil, err
 	}
 
-	route, catalog, err := liveCatalogRoute(ctx, b.client, b.clientID, b.workspaces, resource, metastoreID, catalogName, owner, annos)
+	parent, catalog, err := liveCatalogRoute(ctx, b.client, b.clientID, b.workspaces, resource, metastoreID, catalogName, owner,
+		fmt.Sprintf("to write catalog %s through", catalogName), annos)
 	if err != nil {
 		return nil, err
 	}
+	route := schemaRouteOn(parent, catalog)
 
 	fullName := catalogName + schemaNameSeparator + schemaName
 	schema, rateLimit, err := b.client.GetSchema(ctx, route.Workspace, fullName)
@@ -539,76 +541,10 @@ func (b *schemaBuilder) entitlementOnLiveRoute(
 			"databricks-connector: failed to read schema %s through workspace %s", fullName, route.Workspace), err)
 	}
 
-	route.CatalogOwner = catalog.Owner
 	routed, err := schemaResource(schema, metastoreID, catalogName, resource.GetParentResourceId(), route)
 	if err != nil {
 		return nil, err
 	}
 
 	return entitlementOnResource(entitlement, routed)
-}
-
-// liveCatalogRoute picks the workspace the write goes through: the recorded one
-// when this sync still admits it and it still serves the catalog, otherwise the
-// first running in-scope workspace that does. A catalog no workspace serves is
-// not proof of deletion, so that case is settled against the metastore's
-// unbound listing.
-func liveCatalogRoute(
-	ctx context.Context,
-	client *databricks.Client,
-	clientID string,
-	workspaces map[string]struct{},
-	resource *v2.Resource,
-	metastoreID, catalogName, metastoreOwner string,
-	annos *annotations.Annotations,
-) (schemaRoute, *databricks.Catalog, error) {
-	var probe catalogProbe
-	if route, ok := profileCatalogRoute(client, workspaces, resource, metastoreOwner); ok {
-		catalog, err := catalogThrough(ctx, client, route.Workspace, metastoreID, catalogName, annos)
-		switch {
-		case err == nil:
-		case errors.Is(err, errCatalogGone):
-			probe = catalogProbe{workspace: route.Workspace, gone: true}
-		case deniesTrust(err):
-			probe = catalogProbe{workspace: route.Workspace, deny: err}
-		}
-		switch {
-		case catalog != nil && catalog.MetastoreID == metastoreID:
-			return schemaRouteOn(route, catalog), catalog, nil
-		case catalog != nil:
-		case err == nil:
-			probe = catalogProbe{workspace: route.Workspace}
-		}
-	}
-
-	scope, err := scopedWorkspaces(ctx, client, workspaces, annos)
-	if err != nil {
-		return schemaRoute{}, nil, err
-	}
-	usable, _, err := scope.attached(ctx, client, metastoreID, annos)
-	if err != nil {
-		return schemaRoute{}, nil, assignmentListError(metastoreID, err)
-	}
-	if len(usable) == 0 {
-		return schemaRoute{}, nil, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: metastore %s has no running workspace in sync scope to write catalog %s through",
-			metastoreID, catalogName)
-	}
-
-	workspace, catalog, err := workspaceForCatalog(ctx, client, metastoreID, catalogName, usable, probe, nil, annos)
-	if err != nil {
-		if errors.Is(err, errCatalogGone) {
-			return schemaRoute{}, nil, confirmCatalogGone(
-				ctx, client, clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
-		}
-
-		return schemaRoute{}, nil, err
-	}
-
-	return schemaRouteOn(catalogRoute{
-		Workspace:      workspace.DeploymentName,
-		WorkspaceID:    strconv.Itoa(workspace.ID),
-		WorkspaceName:  workspace.Name,
-		MetastoreOwner: metastoreOwner,
-	}, catalog), catalog, nil
 }

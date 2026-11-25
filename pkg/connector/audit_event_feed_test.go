@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -335,11 +336,7 @@ func TestAdvanceEventCursorDrainedJumpsToLagCutoff(t *testing.T) {
 }
 
 func TestMapAuditRowToResource(t *testing.T) {
-	// None of these cases are grant-mapped, so mapAuditRowToResource should never reach the
-	// principal-type lookup; a client that fails any request proves that.
-	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected request %s %s: no case here is grant-mapped", r.Method, r.URL.Path)
-	})
+	client := principalKindTestClient(t, "u-1", "Users")
 	workspaceLookup := map[int64]string{123: "my-workspace"}
 	accountId := "acct-1"
 
@@ -505,8 +502,50 @@ func TestMapAuditRowToResource(t *testing.T) {
 			},
 			want: []wantResource{
 				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
 				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "updateGroup in a workspace refreshes the group and every workspace entitlement role",
+			row: auditLogRow{
+				ActionName:    "updateGroup",
+				ServiceName:   "accounts",
+				WorkspaceID:   123,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent), workspaceResourceType.Id, "my-workspace"},
+			},
+		},
+		{
+			name: "account-level updateUser refreshes only the user",
+			row: auditLogRow{
+				ActionName:    "updateUser",
+				ServiceName:   "accounts",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"targetUserId": "u-1"},
+			},
+			want: []wantResource{
+				{userResourceType.Id, "u-1", accountResourceType.Id, accountId},
+			},
+		},
+		{
+			name: "account-level updateGroup refreshes only the group",
+			row: auditLogRow{
+				ActionName:    "updateGroup",
+				ServiceName:   "accounts",
+				WorkspaceID:   0,
+				RequestParams: map[string]string{"targetGroupId": "g-1"},
+			},
+			want: []wantResource{
+				{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent), accountResourceType.Id, accountId},
 			},
 		},
 		{
@@ -516,6 +555,10 @@ func TestMapAuditRowToResource(t *testing.T) {
 		{
 			name: "known action_name under an unmapped service_name is skipped",
 			row:  auditLogRow{ActionName: "delete", ServiceName: "clusters"},
+		},
+		{
+			name: "principal delete is left to full sync",
+			row:  auditLogRow{ActionName: "delete", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "u-1"}},
 		},
 		{
 			name: "unresolvable workspace is skipped",
@@ -534,7 +577,7 @@ func TestMapAuditRowToResource(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := mapAuditRowToResource(context.Background(), client, principalTypeCache{}, tc.row, accountId, workspaceLookup)
+			got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), tc.row, accountId, workspaceLookup)
 			if err != nil {
 				t.Fatalf("mapAuditRowToResource() error = %v", err)
 			}
@@ -587,6 +630,139 @@ func principalKindTestClient(t *testing.T, nativeId, kind string) *databricks.Cl
 	})
 }
 
+// TestMapAuditRowToResourceResolvesPrincipalType covers principal-lifecycle rows whose
+// targetUserId names a service principal, a group, or nothing that still exists.
+func TestMapAuditRowToResourceResolvesPrincipalType(t *testing.T) {
+	accountId := "acct-1"
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
+	workspaceParent := &v2.ResourceId{ResourceType: workspaceResourceType.Id, Resource: "my-workspace"}
+	workspaceLookup := map[int64]string{123: "my-workspace"}
+	accountAdmin := roleResourceId(AccountAdminRole, accountParent)
+
+	type want struct{ resourceType, resource string }
+	cases := []struct {
+		name     string
+		nativeId string
+		kind     string
+		row      auditLogRow
+		want     []want
+	}{
+		{
+			name: "add of a service principal", nativeId: "sp-1", kind: "ServicePrincipals",
+			row:  auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "sp-1"}},
+			want: []want{{servicePrincipalResourceType.Id, "sp-1"}},
+		},
+		{
+			name: "setAdmin on a service principal", nativeId: "sp-1", kind: "ServicePrincipals",
+			row:  auditLogRow{ActionName: "setAdmin", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "sp-1"}},
+			want: []want{{servicePrincipalResourceType.Id, "sp-1"}, {roleResourceType.Id, accountAdmin}},
+		},
+		{
+			name: "updateUser on a service principal in a workspace", nativeId: "sp-1", kind: "ServicePrincipals",
+			row: auditLogRow{ActionName: "updateUser", ServiceName: "accounts", WorkspaceID: 123, RequestParams: map[string]string{"targetUserId": "sp-1"}},
+			want: []want{
+				{servicePrincipalResourceType.Id, "sp-1"},
+				{roleResourceType.Id, roleResourceId(WorkspaceAccessRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(SQLAccessRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(ClusterCreateRole, workspaceParent)},
+				{roleResourceType.Id, roleResourceId(InstancePoolCreateRole, workspaceParent)},
+			},
+		},
+		{
+			name: "add naming a group uses the full-sync group id", nativeId: "g-1", kind: "Groups",
+			row:  auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "g-1"}},
+			want: []want{{groupResourceType.Id, groupResourceId(context.Background(), "g-1", accountParent)}},
+		},
+		{
+			name: "setAdmin on an unknown principal still refreshes the role", nativeId: "gone-1", kind: "none",
+			row:  auditLogRow{ActionName: "setAdmin", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "gone-1"}},
+			want: []want{{userResourceType.Id, "gone-1"}, {roleResourceType.Id, accountAdmin}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := principalKindTestClient(t, tc.nativeId, tc.kind)
+			got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), tc.row, accountId, workspaceLookup)
+			if err != nil {
+				t.Fatalf("mapAuditRowToResource() error = %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d affected resources, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i, w := range tc.want {
+				if got[i].resourceId.GetResourceType() != w.resourceType || got[i].resourceId.GetResource() != w.resource {
+					t.Errorf("[%d] resourceId = %+v, want type=%s id=%s", i, got[i].resourceId, w.resourceType, w.resource)
+				}
+			}
+			if p := got[0].parentResourceId; p.GetResourceType() != accountResourceType.Id || p.GetResource() != accountId {
+				t.Errorf("parentResourceId = %+v, want the account", p)
+			}
+		})
+	}
+
+	t.Run("a lookup error is returned", func(t *testing.T) {
+		client := principalKindTestClient(t, "sp-1", "error")
+		row := auditLogRow{ActionName: "add", ServiceName: "accounts", RequestParams: map[string]string{"targetUserId": "sp-1"}}
+		if _, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), row, accountId, workspaceLookup); err == nil {
+			t.Fatal("mapAuditRowToResource() error = nil, want the lookup failure")
+		}
+	})
+}
+
+// TestResolvePrincipalTypeServicePrincipalFirst verifies a UUID targetUserName sends the
+// service principal lookup first, and a username keeps the user-first order.
+func TestResolvePrincipalTypeServicePrincipalFirst(t *testing.T) {
+	cases := []struct {
+		name       string
+		targetName string
+		wantPaths  []string
+	}{
+		{
+			name:       "application id tries service principals first",
+			targetName: "8f2e6c1a-3b4d-4e5f-9a0b-1c2d3e4f5a6b",
+			wantPaths:  []string{"/ServicePrincipals/sp-1"},
+		},
+		{
+			name:       "username keeps the user-first order",
+			targetName: "someone@example.com",
+			wantPaths:  []string{"/Users/sp-1", "/Groups/sp-1", "/ServicePrincipals/sp-1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var paths []string
+			client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path[strings.Index(r.URL.Path, "/scim/v2")+len("/scim/v2"):])
+				mu.Unlock()
+				if strings.HasSuffix(r.URL.Path, "/ServicePrincipals/sp-1") {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{}`)
+					return
+				}
+				writeJSONNotFound(w)
+			})
+			row := auditLogRow{
+				ActionName:    "add",
+				ServiceName:   "accounts",
+				RequestParams: map[string]string{"targetUserId": "sp-1", "targetUserName": tc.targetName},
+			}
+			got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), row, "acct-1", nil)
+			if err != nil {
+				t.Fatalf("mapAuditRowToResource() error = %v", err)
+			}
+			if len(got) != 1 || got[0].resourceId.GetResourceType() != servicePrincipalResourceType.Id {
+				t.Fatalf("got %+v, want one service principal", got)
+			}
+			if strings.Join(paths, ",") != strings.Join(tc.wantPaths, ",") {
+				t.Errorf("lookups = %v, want %v", paths, tc.wantPaths)
+			}
+		})
+	}
+}
+
 // TestMapAuditRowToResourceGrantMapping covers the group-membership actions that map to an
 // atomic CREATE_GRANT/CREATE_REVOKE instead of a RESOURCE_CHANGE.
 func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
@@ -615,7 +791,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 				RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1"},
 			}
 
-			got, _, err := mapAuditRowToResource(context.Background(), client, principalTypeCache{}, row, accountId, nil)
+			got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), row, accountId, nil)
 			if err != nil {
 				t.Fatalf("mapAuditRowToResource() error = %v", err)
 			}
@@ -642,7 +818,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), client, principalTypeCache{}, row, accountId, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -656,7 +832,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "g-2"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), groupClient, principalTypeCache{}, row, accountId, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), groupClient, newPrincipalLookups(nil), row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -676,7 +852,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "sp-1"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), spClient, principalTypeCache{}, row, accountId, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), spClient, newPrincipalLookups(nil), row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -695,7 +871,7 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "ghost"},
 		}
-		got, _, err := mapAuditRowToResource(context.Background(), notFoundClient, principalTypeCache{}, row, accountId, nil)
+		got, _, err := mapAuditRowToResource(context.Background(), notFoundClient, newPrincipalLookups(nil), row, accountId, nil)
 		if err != nil {
 			t.Fatalf("mapAuditRowToResource() error = %v", err)
 		}
@@ -709,10 +885,258 @@ func TestMapAuditRowToResourceGrantMapping(t *testing.T) {
 			ServiceName:   auditServiceAccounts,
 			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1"},
 		}
-		if _, _, err := mapAuditRowToResource(context.Background(), errClient, principalTypeCache{}, row, accountId, nil); err == nil {
+		if _, _, err := mapAuditRowToResource(context.Background(), errClient, newPrincipalLookups(nil), row, accountId, nil); err == nil {
 			t.Error("mapAuditRowToResource() error = nil, want a propagated lookup error")
 		}
 	})
+}
+
+// multiPrincipalTestClient returns a client whose account SCIM lookups are served by scimKindsHandler.
+func multiPrincipalTestClient(t *testing.T, kinds map[string]string) (*databricks.Client, func() []string) {
+	t.Helper()
+	handler, lookups := scimKindsHandler(kinds)
+	return newProbeTestClient(t, handler), lookups
+}
+
+// scimKindsHandler serves account SCIM lookups from kinds (native id to "Users", "Groups",
+// "ServicePrincipals", or an HTTP status code as a string), 404s everything else, and records
+// each lookup's path below /scim/v2.
+func scimKindsHandler(kinds map[string]string) (http.HandlerFunc, func() []string) {
+	var mu sync.Mutex
+	var paths []string
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path[strings.Index(r.URL.Path, "/scim/v2")+len("/scim/v2"):]
+		mu.Lock()
+		paths = append(paths, path)
+		mu.Unlock()
+
+		parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+		if len(parts) != 2 {
+			writeJSONNotFound(w)
+			return
+		}
+		kind := kinds[parts[1]]
+		if code, err := strconv.Atoi(kind); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			fmt.Fprint(w, `{"detail":"lookup failed"}`)
+			return
+		}
+		if kind == parts[0] {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		writeJSONNotFound(w)
+	}
+	return handler, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(paths)
+	}
+}
+
+// TestMapAuditRowToResourceMultiMember covers membership rows whose targetUserId lists several
+// comma-separated members.
+func TestMapAuditRowToResourceMultiMember(t *testing.T) {
+	accountId := "acct-1"
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: accountId}
+	wantGroupId := groupResourceId(context.Background(), "g-1", accountParent)
+	nestedGroupId := groupResourceId(context.Background(), "g-2", accountParent)
+
+	type wantGrant struct{ resourceType, resource string }
+	cases := []struct {
+		name        string
+		action      string
+		params      map[string]string
+		kinds       map[string]string
+		wantGrants  []wantGrant
+		wantRevoke  bool
+		wantRefresh bool
+		wantLookups int
+	}{
+		{
+			name:   "three members are each granted",
+			action: "addPrincipalsToGroup",
+			params: map[string]string{"targetUserId": "u-1,u-2,u-3"},
+			kinds:  map[string]string{"u-1": "Users", "u-2": "Users", "u-3": "Users"},
+			wantGrants: []wantGrant{
+				{userResourceType.Id, "u-1"}, {userResourceType.Id, "u-2"}, {userResourceType.Id, "u-3"},
+			},
+			wantLookups: 3,
+		},
+		{
+			name:        "two members are each revoked",
+			action:      "removePrincipalsFromGroup",
+			params:      map[string]string{"targetUserId": "u-1,u-2"},
+			kinds:       map[string]string{"u-1": "Users", "u-2": "Users"},
+			wantGrants:  []wantGrant{{userResourceType.Id, "u-1"}, {userResourceType.Id, "u-2"}},
+			wantRevoke:  true,
+			wantLookups: 2,
+		},
+		{
+			name:   "mixed principal kinds resolve separately",
+			action: "addPrincipalsToGroup",
+			params: map[string]string{"targetUserId": "u-1,sp-1,g-2"},
+			kinds:  map[string]string{"u-1": "Users", "sp-1": "ServicePrincipals", "g-2": "Groups"},
+			wantGrants: []wantGrant{
+				{userResourceType.Id, "u-1"}, {servicePrincipalResourceType.Id, "sp-1"}, {groupResourceType.Id, nestedGroupId},
+			},
+			wantLookups: 1 + 3 + 2,
+		},
+		{
+			name:        "single id on a plural action matches the singular output",
+			action:      "addPrincipalsToGroup",
+			params:      map[string]string{"targetUserId": "u-1"},
+			kinds:       map[string]string{"u-1": "Users"},
+			wantGrants:  []wantGrant{{userResourceType.Id, "u-1"}},
+			wantLookups: 1,
+		},
+		{
+			name:        "an unknown member refreshes the group once",
+			action:      "addPrincipalsToGroup",
+			params:      map[string]string{"targetUserId": "u-1,gone-1,gone-2,u-2"},
+			kinds:       map[string]string{"u-1": "Users", "u-2": "Users"},
+			wantGrants:  []wantGrant{{userResourceType.Id, "u-1"}, {userResourceType.Id, "u-2"}},
+			wantRefresh: true,
+			wantLookups: 1 + 3 + 3 + 1,
+		},
+		{
+			name:        "spaces, blanks and repeats are cleaned up",
+			action:      "addPrincipalsToGroup",
+			params:      map[string]string{"targetUserId": " u-1 , u-2,u-1,, "},
+			kinds:       map[string]string{"u-1": "Users", "u-2": "Users"},
+			wantGrants:  []wantGrant{{userResourceType.Id, "u-1"}, {userResourceType.Id, "u-2"}},
+			wantLookups: 2,
+		},
+		{
+			name:   "aligned application ids look up service principals first",
+			action: "addPrincipalsToGroup",
+			params: map[string]string{
+				"targetUserId":   "sp-1,u-1",
+				"targetUserName": "8f2e6c1a-3b4d-4e5f-9a0b-1c2d3e4f5a6b,someone@example.com",
+			},
+			kinds:       map[string]string{"sp-1": "ServicePrincipals", "u-1": "Users"},
+			wantGrants:  []wantGrant{{servicePrincipalResourceType.Id, "sp-1"}, {userResourceType.Id, "u-1"}},
+			wantLookups: 2,
+		},
+		{
+			name:        "too many members refresh the group without lookups",
+			action:      "addPrincipalsToGroup",
+			params:      map[string]string{"targetUserId": manyIDs(maxAuditMembershipLookups + 1)},
+			wantRefresh: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, lookups := multiPrincipalTestClient(t, tc.kinds)
+			params := map[string]string{"targetGroupId": "g-1"}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			row := auditLogRow{EventID: "evt-1", ActionName: tc.action, ServiceName: auditServiceAccounts, RequestParams: params}
+
+			got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), row, accountId, nil)
+			if err != nil {
+				t.Fatalf("mapAuditRowToResource() error = %v", err)
+			}
+
+			wantLen := len(tc.wantGrants)
+			if tc.wantRefresh {
+				wantLen++
+			}
+			if len(got) != wantLen {
+				t.Fatalf("got %d affected resources, want %d: %+v", len(got), wantLen, got)
+			}
+			for i, w := range tc.wantGrants {
+				g := got[i].grant
+				if g == nil {
+					t.Fatalf("[%d] = %+v, want a grant", i, got[i])
+				}
+				if g.revoke != tc.wantRevoke {
+					t.Errorf("[%d] revoke = %v, want %v", i, g.revoke, tc.wantRevoke)
+				}
+				if g.entitlement.GetResource().GetId().GetResource() != wantGroupId {
+					t.Errorf("[%d] entitlement resource = %q, want %q", i, g.entitlement.GetResource().GetId().GetResource(), wantGroupId)
+				}
+				if p := g.principal.GetId(); p.GetResourceType() != w.resourceType || p.GetResource() != w.resource {
+					t.Errorf("[%d] principal = %+v, want type=%s id=%s", i, p, w.resourceType, w.resource)
+				}
+			}
+			if tc.wantRefresh {
+				assertGroupRefresh(t, got[len(got)-1:], wantGroupId)
+			}
+			if n := len(lookups()); n != tc.wantLookups {
+				t.Errorf("lookups = %d (%v), want %d", n, lookups(), tc.wantLookups)
+			}
+		})
+	}
+
+	t.Run("a retryable error on any member fails the row", func(t *testing.T) {
+		client, _ := multiPrincipalTestClient(t, map[string]string{"u-1": "Users", "u-2": "503"})
+		row := auditLogRow{
+			ActionName: "addPrincipalsToGroup", ServiceName: auditServiceAccounts,
+			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1,u-2,u-3"},
+		}
+		got, _, err := mapAuditRowToResource(context.Background(), client, newPrincipalLookups(nil), row, accountId, nil)
+		if err == nil || !isRetryableLookupError(err) {
+			t.Fatalf("mapAuditRowToResource() error = %v, want a retryable error", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %+v, want nothing", got)
+		}
+	})
+
+	t.Run("a non-retryable error keeps the other members and refreshes the group", func(t *testing.T) {
+		client, _ := multiPrincipalTestClient(t, map[string]string{"u-1": "Users", "u-2": "405", "u-3": "Users"})
+		row := auditLogRow{
+			ActionName: "addPrincipalsToGroup", ServiceName: auditServiceAccounts,
+			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1,u-2,u-3"},
+		}
+		lookups := newPrincipalLookups(nil)
+		got, _, err := mapAuditRowToResource(context.Background(), client, lookups, row, accountId, nil)
+		if err != nil {
+			t.Fatalf("mapAuditRowToResource() error = %v, want the failure absorbed", err)
+		}
+		if len(got) != 3 || got[0].grant.principal.GetId().GetResource() != "u-1" || got[1].grant.principal.GetId().GetResource() != "u-3" {
+			t.Fatalf("got %+v, want grants for u-1 and u-3 plus a group refresh", got)
+		}
+		assertGroupRefresh(t, got[2:], wantGroupId)
+		if lookups.memberFailures != 1 || lookups.failures.Load() != 1 {
+			t.Errorf("memberFailures = %d, failures = %d, want 1 and 1", lookups.memberFailures, lookups.failures.Load())
+		}
+	})
+
+	t.Run("members past the poll budget refresh the group without lookups", func(t *testing.T) {
+		client, calls := multiPrincipalTestClient(t, map[string]string{"u-1": "Users", "u-2": "Users", "u-3": "Users"})
+		lookups := newPrincipalLookups(nil)
+		lookups.types["u-3"] = userResourceType
+		lookups.remainingMemberLookups = 1
+		row := auditLogRow{
+			ActionName: "addPrincipalsToGroup", ServiceName: auditServiceAccounts,
+			RequestParams: map[string]string{"targetGroupId": "g-1", "targetUserId": "u-1,u-2,u-3"},
+		}
+		got, _, err := mapAuditRowToResource(context.Background(), client, lookups, row, accountId, nil)
+		if err != nil {
+			t.Fatalf("mapAuditRowToResource() error = %v", err)
+		}
+		if len(got) != 3 || got[0].grant.principal.GetId().GetResource() != "u-1" || got[1].grant.principal.GetId().GetResource() != "u-3" {
+			t.Fatalf("got %+v, want grants for u-1 and the cached u-3 plus a group refresh", got)
+		}
+		assertGroupRefresh(t, got[2:], wantGroupId)
+		if n := len(calls()); n != 1 || lookups.membersOverBudget != 1 {
+			t.Errorf("lookups = %v, membersOverBudget = %d, want one lookup and one member over budget", calls(), lookups.membersOverBudget)
+		}
+	})
+}
+
+func manyIDs(n int) string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("u-%d", i)
+	}
+	return strings.Join(ids, ",")
 }
 
 func TestParseAuditLogRowsDedupesNothingAndParsesFields(t *testing.T) {
@@ -841,6 +1265,12 @@ func TestListEventsEndToEnd(t *testing.T) {
 			return
 		}
 
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
+			return
+		}
+
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -858,6 +1288,9 @@ func TestListEventsEndToEnd(t *testing.T) {
 		}
 		if !strings.Contains(body.Statement, "'accounts'") {
 			t.Errorf("statement does not filter service_name IN ('accounts', ...): %s", body.Statement)
+		}
+		if !strings.Contains(body.Statement, "response.status_code = 200") {
+			t.Errorf("statement does not filter out failed requests with response.status_code = 200: %s", body.Statement)
 		}
 
 		w.Header().Set("X-Ratelimit-Limit", strconv.Itoa(wantLimit))
@@ -1023,6 +1456,22 @@ func TestListEventsEmitsCreateGrantEvent(t *testing.T) {
 // fails with lookupStatus.
 func newLookupFailureFeed(t *testing.T, lookupStatus int) *auditEventFeed {
 	t.Helper()
+	row := []string{"evt-1", "2026-01-01T00:00:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`}
+	return newSingleRowFeed(t, row, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/Users/u-1") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(lookupStatus)
+			fmt.Fprint(w, `{"detail":"lookup failed"}`)
+			return
+		}
+		writeJSONNotFound(w)
+	})
+}
+
+// newSingleRowFeed returns a feed whose audit query yields row, with account SCIM lookups
+// served by scim.
+func newSingleRowFeed(t *testing.T, row []string, scim http.HandlerFunc) *auditEventFeed {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
 			w.Header().Set("Content-Type", "application/json")
@@ -1034,10 +1483,8 @@ func newLookupFailureFeed(t *testing.T, lookupStatus int) *auditEventFeed {
 			fmt.Fprintf(w, `{"id":"wh-1"}`)
 			return
 		}
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(lookupStatus)
-			fmt.Fprint(w, `{"detail":"lookup failed"}`)
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/") {
+			scim(w, r)
 			return
 		}
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
@@ -1059,9 +1506,7 @@ func newLookupFailureFeed(t *testing.T, lookupStatus int) *auditEventFeed {
 				},
 			},
 			"result": map[string]any{
-				"data_array": [][]string{
-					{"evt-1", "2026-01-01T00:00:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
-				},
+				"data_array": [][]string{row},
 			},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -1098,10 +1543,41 @@ func TestListEventsReturnsErrorOnRetryableLookupFailure(t *testing.T) {
 	}
 }
 
-// TestListEventsSkipsRowOnPermanentLookupFailure verifies that a non-retryable principal lookup
-// failure skips the row instead of blocking the cursor on every poll.
-func TestListEventsSkipsRowOnPermanentLookupFailure(t *testing.T) {
-	feed := newLookupFailureFeed(t, http.StatusForbidden)
+// TestListEventsRefreshesGroupOnPermanentLookupFailure verifies that a non-retryable principal
+// lookup failure on a membership row refreshes the group instead of blocking the cursor.
+func TestListEventsRefreshesGroupOnPermanentLookupFailure(t *testing.T) {
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acct-1"}
+	wantGroupId := groupResourceId(context.Background(), "g-1", accountParent)
+
+	for _, lookupStatus := range []int{http.StatusForbidden, http.StatusMethodNotAllowed} {
+		t.Run(strconv.Itoa(lookupStatus), func(t *testing.T) {
+			feed := newLookupFailureFeed(t, lookupStatus)
+			events, streamState, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+			if err != nil {
+				t.Fatalf("ListEvents() error = %v, want a group refresh", err)
+			}
+			if len(events) != 1 || events[0].GetResourceChangeEvent() == nil {
+				t.Fatalf("events = %+v, want one resource change", events)
+			}
+			if id := events[0].GetResourceChangeEvent().GetResourceId(); id.GetResourceType() != groupResourceType.Id || id.GetResource() != wantGroupId {
+				t.Errorf("resourceId = %+v, want group %s", id, wantGroupId)
+			}
+			if streamState == nil || streamState.Cursor == "" {
+				t.Errorf("streamState = %+v, want an advanced cursor", streamState)
+			}
+		})
+	}
+}
+
+// TestListEventsSkipsNonGrantRowOnPermanentLookupFailure verifies that a non-retryable lookup
+// failure on a row with no group to fall back to is still skipped.
+func TestListEventsSkipsNonGrantRowOnPermanentLookupFailure(t *testing.T) {
+	row := []string{"evt-1", "2026-01-01T00:00:00Z", "0", "add", "accounts", `{"targetUserId":"u-1"}`}
+	feed := newSingleRowFeed(t, row, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"detail":"lookup failed"}`)
+	})
 	events, streamState, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v, want the row skipped", err)
@@ -1111,6 +1587,118 @@ func TestListEventsSkipsRowOnPermanentLookupFailure(t *testing.T) {
 	}
 	if streamState == nil || streamState.Cursor == "" {
 		t.Errorf("streamState = %+v, want an advanced cursor", streamState)
+	}
+}
+
+// TestListEventsEmitsEventPerGroupMember verifies a batched membership row yields one event per
+// member with unique ids.
+func TestListEventsEmitsEventPerGroupMember(t *testing.T) {
+	row := []string{"evt-1", "2026-01-01T00:00:00Z", "0", "addPrincipalsToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1,u-2,u-3"}`}
+	feed := newSingleRowFeed(t, row, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/Users/u-") && !strings.Contains(r.URL.Path, ",") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		writeJSONNotFound(w)
+	})
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("len(events) = %d, want 3: %+v", len(events), events)
+	}
+	for i, e := range events {
+		if e.GetId() != fmt.Sprintf("evt-1/%d", i) {
+			t.Errorf("[%d] id = %q, want evt-1/%d", i, e.GetId(), i)
+		}
+		cg := e.GetCreateGrantEvent()
+		if cg == nil {
+			t.Fatalf("[%d] event = %+v, want a CreateGrantEvent", i, e)
+		}
+		if want := fmt.Sprintf("u-%d", i+1); cg.GetPrincipal().GetId().GetResource() != want {
+			t.Errorf("[%d] principal = %+v, want %s", i, cg.GetPrincipal().GetId(), want)
+		}
+	}
+}
+
+// TestListEventsLiveMultiMemberRows replays the request_params Databricks logged on a live Azure
+// account for batched SCIM PATCHes, where names pair with ids in order.
+func TestListEventsLiveMultiMemberRows(t *testing.T) {
+	const (
+		spId    = "143679241589540"
+		userB   = "143797019507719"
+		userA   = "147934750343750"
+		groupId = "153270043448790"
+	)
+	kinds := map[string]string{spId: "ServicePrincipals", userB: "Users", userA: "Users"}
+
+	type wantEvent struct{ resourceType, resource string }
+	cases := []struct {
+		name        string
+		action      string
+		params      string
+		wantRevoke  bool
+		wantEvents  []wantEvent
+		wantLookups []string
+	}{
+		{
+			name:   "add of a service principal and two users",
+			action: "addPrincipalsToGroup",
+			params: `{"targetGroupId":"153270043448790","targetGroupName":"batch-group",` +
+				`"targetUserName":"8933382e-9e91-4caf-b0ad-b277dd60956d,member-b@example.com,member-a@example.com",` +
+				`"endpoint":"scim","targetUserId":"143679241589540,143797019507719,147934750343750"}`,
+			wantEvents: []wantEvent{
+				{servicePrincipalResourceType.Id, spId}, {userResourceType.Id, userB}, {userResourceType.Id, userA},
+			},
+			wantLookups: []string{"/ServicePrincipals/" + spId, "/Users/" + userB, "/Users/" + userA},
+		},
+		{
+			name:        "remove of two members without names",
+			action:      "removePrincipalsFromGroup",
+			params:      `{"targetGroupId":"153270043448790","targetGroupName":"batch-group","endpoint":"scim","targetUserId":"143679241589540,147934750343750"}`,
+			wantRevoke:  true,
+			wantEvents:  []wantEvent{{servicePrincipalResourceType.Id, spId}, {userResourceType.Id, userA}},
+			wantLookups: []string{"/Users/" + spId, "/Groups/" + spId, "/ServicePrincipals/" + spId, "/Users/" + userA},
+		},
+	}
+
+	accountParent := &v2.ResourceId{ResourceType: accountResourceType.Id, Resource: "acct-1"}
+	wantGroupId := groupResourceId(context.Background(), groupId, accountParent)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, lookups := scimKindsHandler(kinds)
+			row := []string{"627da5dc-47b1-38b3-a4c1-fac2ccfdace5", "2026-01-01T00:00:00Z", "0", tc.action, "accounts", tc.params}
+			feed := newSingleRowFeed(t, row, handler)
+
+			events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+			if err != nil {
+				t.Fatalf("ListEvents() error = %v", err)
+			}
+			if len(events) != len(tc.wantEvents) {
+				t.Fatalf("len(events) = %d, want %d: %+v", len(events), len(tc.wantEvents), events)
+			}
+			for i, w := range tc.wantEvents {
+				var entitlement *v2.Entitlement
+				var principal *v2.Resource
+				if tc.wantRevoke {
+					entitlement, principal = events[i].GetCreateRevokeEvent().GetEntitlement(), events[i].GetCreateRevokeEvent().GetPrincipal()
+				} else {
+					entitlement, principal = events[i].GetCreateGrantEvent().GetEntitlement(), events[i].GetCreateGrantEvent().GetPrincipal()
+				}
+				if entitlement.GetResource().GetId().GetResource() != wantGroupId {
+					t.Errorf("[%d] entitlement resource = %q, want %q", i, entitlement.GetResource().GetId().GetResource(), wantGroupId)
+				}
+				if p := principal.GetId(); p.GetResourceType() != w.resourceType || p.GetResource() != w.resource {
+					t.Errorf("[%d] principal = %+v, want type=%s id=%s", i, p, w.resourceType, w.resource)
+				}
+			}
+			if got := lookups(); strings.Join(got, ",") != strings.Join(tc.wantLookups, ",") {
+				t.Errorf("lookups = %v, want %v", got, tc.wantLookups)
+			}
+		})
 	}
 }
 
@@ -1423,8 +2011,10 @@ func TestListEventsCachesPrincipalTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
 	}
-	if len(events) != 5 {
-		t.Fatalf("len(events) = %d, want 5", len(events))
+	// Three sp-1 grants, plus one g-1 change: both gone-1 rows fall back to the same group
+	// change, and only the last is kept.
+	if len(events) != 4 {
+		t.Fatalf("len(events) = %d, want 4", len(events))
 	}
 	for _, id := range []string{"sp-1", "gone-1"} {
 		for _, kind := range []string{"Users", "Groups", "ServicePrincipals"} {
@@ -1450,11 +2040,11 @@ func TestResolvePrincipalTypeDoesNotCacheErrors(t *testing.T) {
 		fmt.Fprint(w, `{}`)
 	})
 
-	principalTypes := principalTypeCache{}
-	if _, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1"); err == nil {
+	principalTypes := newPrincipalLookups(nil)
+	if _, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1", false); err == nil {
 		t.Fatal("first resolvePrincipalType() error = nil, want the lookup failure")
 	}
-	got, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1")
+	got, _, err := resolvePrincipalType(context.Background(), client, principalTypes, "u-1", false)
 	if err != nil {
 		t.Fatalf("second resolvePrincipalType() error = %v", err)
 	}
@@ -1463,5 +2053,159 @@ func TestResolvePrincipalTypeDoesNotCacheErrors(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("lookup made %d calls, want 2 (the error must not be cached)", n)
+	}
+}
+
+// TestListEventsEmitsServicePrincipalChange verifies an accounts/add row naming a service
+// principal reaches C1 as a service_principal change, resolved once across rows. The two rows'
+// changes to sp-1 collapse into one.
+func TestListEventsEmitsServicePrincipalChange(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]int{}
+	client := newProbeTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1"):
+			fmt.Fprint(w, `{"id":"wh-1"}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/scim/v2/"):
+			mu.Lock()
+			hits[r.URL.Path]++
+			mu.Unlock()
+			if strings.HasSuffix(r.URL.Path, "/ServicePrincipals/sp-1") {
+				fmt.Fprint(w, `{}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"detail":"not found"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statement_id": "stmt-1",
+				"status":       map[string]any{"state": "SUCCEEDED"},
+				"manifest": map[string]any{"schema": map[string]any{"columns": []map[string]any{
+					{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+					{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+				}}},
+				"result": map[string]any{"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "0", "add", "accounts", `{"targetUserId":"sp-1"}`},
+					{"evt-2", "2026-01-01T00:00:01Z", "0", "setAdmin", "accounts", `{"targetUserId":"sp-1"}`},
+				}},
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+
+	feed := newAuditEventFeed(client, nil, "wh-1")
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var spEvents int
+	for _, e := range events {
+		id := e.GetResourceChangeEvent().GetResourceId()
+		if id.GetResourceType() == userResourceType.Id {
+			t.Errorf("event %+v names a user, want the service principal", id)
+		}
+		if id.GetResourceType() == servicePrincipalResourceType.Id && id.GetResource() == "sp-1" {
+			spEvents++
+		}
+	}
+	if spEvents != 1 {
+		t.Errorf("got %d service_principal/sp-1 events, want 1: %+v", spEvents, events)
+	}
+	if got := hits["/api/2.0/accounts/acct-1/scim/v2/ServicePrincipals/sp-1"]; got != 1 {
+		t.Errorf("service principal looked up %d times, want 1", got)
+	}
+}
+
+// TestListEventsDropsDuplicateResourceChanges verifies that when a page names the same resource
+// more than once (the same user, or the same workspace role refreshed by several updateUser rows),
+// only the last change is kept, with its own row's ID, and grant events are never collapsed.
+func TestListEventsDropsDuplicateResourceChanges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/workspaces") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"workspace_id": 1, "workspace_name": "ws1", "deployment_name": "ws1"}})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/2.0/sql/warehouses/wh-1") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"wh-1"}`)
+			return
+		}
+		if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-1") || strings.HasSuffix(r.URL.Path, "/api/2.0/accounts/acct-1/scim/v2/Users/u-2")) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/2.0/sql/statements") {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"statement_id": "stmt-1",
+			"status":       map[string]any{"state": "SUCCEEDED"},
+			"manifest": map[string]any{
+				"schema": map[string]any{
+					"columns": []map[string]any{
+						{"name": "event_id"}, {"name": "event_time"}, {"name": "workspace_id"},
+						{"name": "action_name"}, {"name": "service_name"}, {"name": "request_params"},
+					},
+				},
+			},
+			"result": map[string]any{
+				"data_array": [][]string{
+					{"evt-1", "2026-01-01T00:00:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-1"}`},
+					{"evt-2", "2026-01-01T00:01:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-2"}`},
+					{"evt-3", "2026-01-01T00:02:00Z", "1", "updateUser", "accounts", `{"targetUserId":"u-1"}`},
+					{"evt-4", "2026-01-01T00:03:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+					{"evt-5", "2026-01-01T00:04:00Z", "0", "addPrincipalToGroup", "accounts", `{"targetGroupId":"g-1","targetUserId":"u-1"}`},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("failed to encode mock statement response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+
+	httpClient := &http.Client{Transport: &redirectTransport{target: target}}
+	client, err := databricks.NewClient(context.Background(), httpClient, "example.cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", &databricks.NoAuth{}, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	feed := newAuditEventFeed(client, nil, "wh-1")
+	events, _, _, err := feed.ListEvents(context.Background(), testEarliestEvent(), &pagination.StreamToken{Cursor: ""})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	// evt-1 is fully superseded: evt-3 names u-1 and the same four roles again. evt-2 keeps only
+	// u-2, its roles are superseded by evt-3. evt-4 and evt-5: one grant each.
+	want := []string{"evt-2/0", "evt-3/0", "evt-3/1", "evt-3/2", "evt-3/3", "evt-3/4", "evt-4/0", "evt-5/0"}
+	got := make([]string, 0, len(events))
+	for _, e := range events {
+		got = append(got, e.GetId())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event IDs = %v, want %v", got, want)
+	}
+	for _, e := range events[6:] {
+		if e.GetCreateGrantEvent() == nil {
+			t.Errorf("event %s = %+v, want a CreateGrantEvent", e.GetId(), e)
+		}
 	}
 }

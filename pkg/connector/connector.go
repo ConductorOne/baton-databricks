@@ -14,8 +14,10 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/field"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
 )
 
 type Databricks struct {
@@ -29,18 +31,24 @@ type Databricks struct {
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
 func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.ResourceSyncerV2 {
+	// Both sides read one condition so they agree on which workspaces carry the group.
+	syncWorkspaceAdmins := d.willSyncResourceType(metastoreResourceType.Id) &&
+		d.willSyncResourceType(groupResourceType.Id) &&
+		d.willSyncResourceType(workspaceResourceType.Id)
+
 	workspaces := configuredWorkspaceSet(d.workspaces)
 	principals := syncPrincipals{
 		groups:            d.willSyncResourceType(groupResourceType.Id),
 		servicePrincipals: d.willSyncResourceType(servicePrincipalResourceType.Id),
+		workspaceGroups:   syncWorkspaceAdmins,
 	}
 
 	return []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
-		newGroupBuilder(d.client),
+		newGroupBuilder(d.client, principals),
 		newServicePrincipalBuilder(d.client),
 		newUserBuilder(d.client),
-		newWorkspaceBuilder(d.client, d.workspaces),
+		newWorkspaceBuilder(d.client, d.workspaces, syncWorkspaceAdmins),
 		newRoleBuilder(d.client),
 		newMetastoreBuilder(d.client, d.clientID, workspaces, principals),
 		newCatalogBuilder(d.client, d.clientID, workspaces, principals),
@@ -216,8 +224,25 @@ func New(
 
 // NewConnector returns a new connector builder from a configuration struct.
 func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+	// The auth method decides which fields are required. Validating without it
+	// would check the default group against a configuration built for another.
+	authMethod := ""
+	var tokenSource oauth2.TokenSource
+	if opts != nil {
+		authMethod = opts.SelectedAuthMethod
+		tokenSource = opts.TokenSource
+	}
+	if err := field.Validate(config.Config, cfg, field.WithAuthMethod(authMethod)); err != nil {
+		return nil, nil, err
+	}
+
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(cfg)
+	// Without the runtime's token source there is no JWT to exchange, and falling
+	// through to the client secret would fail later with a misleading error.
+	if authMethod == config.WorkloadIdentityC1AuthMethod && tokenSource == nil {
+		return nil, nil, fmt.Errorf("databricks-connector: auth method %q requires a ConductorOne-hosted runtime", authMethod)
+	}
+	auth := prepareClientAuth(cfg, authMethod, tokenSource)
 
 	cb, err := New(
 		ctx,
@@ -239,16 +264,36 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.Connect
 	return cb, nil, nil
 }
 
-func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
+// prepareClientAuth follows the selected auth method, not whichever field
+// happens to be set: a token file left over from another deployment must not
+// silently replace the credential the operator chose.
+func prepareClientAuth(cfg *config.Databricks, authMethod string, tokenSource oauth2.TokenSource) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
-	databricksClientSecret := cfg.DatabricksClientSecret
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+
+	if authMethod == config.WorkloadIdentityFileAuthMethod {
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			accountHostname,
+			databricks.FileSubjectTokenSource{Path: cfg.DatabricksOidcTokenFile},
+		)
+	}
+
+	if authMethod == config.WorkloadIdentityC1AuthMethod && tokenSource != nil {
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			accountHostname,
+			databricks.OAuth2TokenSubjectTokenSource{Source: tokenSource},
+		)
+	}
 
 	return databricks.NewOAuth2(
 		accountID,
 		databricksClientId,
-		databricksClientSecret,
+		cfg.DatabricksClientSecret,
 		accountHostname,
 	)
 }

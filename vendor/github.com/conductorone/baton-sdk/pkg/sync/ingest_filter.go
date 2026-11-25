@@ -45,6 +45,9 @@ const (
 	ingestQualityReasonExpansionDropped
 	ingestQualityReasonRetainedInvalid
 	ingestQualityReasonUnknownPriorCheckpoint
+	// A connector invalidated an action's page token and the action
+	// restarted; rows from its earlier pages may no longer exist upstream.
+	ingestQualityReasonActionRestarted
 )
 
 func (s *ingestFilterStats) markKnown() {
@@ -343,14 +346,6 @@ func (s *syncer) filterFreshGrantsWithStats(ctx context.Context, grants []*v2.Gr
 		out = append(out, grant)
 	}
 	return out, nil
-}
-
-// filterFreshGrantResource reports whether a grant-discovered resource
-// (InsertResourceGrants) references a scheduled resource type. Uplift skips
-// resources whose type is absent from the sync's resource types, so storing
-// them is dead data even though the resource row itself could be written.
-func (s *syncer) filterFreshGrantResource(ctx context.Context, resource *v2.Resource) (bool, error) {
-	return s.filterFreshGrantResourceWithStats(ctx, resource, &s.ingestFilterStats)
 }
 
 func (s *syncer) filterFreshGrantResourceWithStats(ctx context.Context, resource *v2.Resource, stats *ingestFilterStats) (bool, error) {

@@ -81,6 +81,7 @@ var (
 type syncPrincipals struct {
 	groups            bool
 	servicePrincipals bool
+	workspaceGroups   bool
 }
 
 func emitPrincipal(sync syncPrincipals, resourceType string) bool {
@@ -206,6 +207,13 @@ func unityPrincipalName(ctx context.Context, c *databricks.Client, principal *v2
 	return name, nil
 }
 
+// workspaceIsRunning reports whether a workspace serves its workspace-plane APIs. The
+// account API omits the status unless the workspace is changing state, so empty is
+// RUNNING.
+func workspaceIsRunning(status string) bool {
+	return status == "" || strings.EqualFold(status, workspaceStatusRunning)
+}
+
 // workspaceScope is the set of workspaces this sync may read Unity Catalog
 // through, indexed by numeric id, with the RUNNING ones marked. Both the
 // metastore and the catalog syncer resolve their route through it.
@@ -242,22 +250,26 @@ func scopedWorkspaces(
 				continue
 			}
 		}
-		// A workspace that will not become RUNNING is left out of scope entirely,
-		// so a metastore attached only to one is skipped rather than failing every
-		// sync. Only a status that can still change keeps the metastore waiting.
+		// A workspace that will never serve its APIs is left out of scope, which
+		// lets ConductorOne prune the metastores that routed through it. A status
+		// that can still change keeps the metastore waiting instead, and so does
+		// CANCELLING, because pruning a metastore while its workspace is still
+		// being deleted would delete grants that are still in force.
 		if !workspaceIsUsable(workspace.Status) {
 			continue
 		}
 		scope.byID[id] = workspace
-		scope.running[id] = workspace.Status == "" || strings.EqualFold(workspace.Status, workspaceStatusRunning)
+		scope.running[id] = workspaceIsRunning(workspace.Status)
 	}
 
 	return scope, nil
 }
 
-// workspaceIsUsable reports a status that is RUNNING or can still become it.
-// FAILED and BANNED are terminal, and a status Databricks has not documented
-// takes that path too: treating one as pending would fail the sync on every run.
+// workspaceIsUsable reports a status that still holds a metastore in the sync:
+// RUNNING, one that can become it, or CANCELLING, which must not prune while the
+// deletion runs. FAILED and BANNED are terminal, and a status Databricks has not
+// documented takes that path too: treating one as pending would fail the sync on
+// every run with nothing to wait for.
 func workspaceIsUsable(workspaceStatus string) bool {
 	switch strings.ToUpper(workspaceStatus) {
 	case "", workspaceStatusRunning, workspaceStatusProvisioning, workspaceStatusNotProvisioned, workspaceStatusCancelling:
@@ -271,38 +283,39 @@ func workspaceIsUsable(workspaceStatus string) bool {
 var errMetastoreGone = errors.New("metastore is no longer on the account")
 
 // attached lists the running in-scope workspaces the metastore is assigned to,
-// in assignment order. inScope reports whether any in-scope workspace is
-// attached at all, running or not: that is what tells "outside this sync" apart
-// from "in this sync but not reachable right now".
+// in assignment order. pending names the in-scope workspaces attached to it that
+// are not RUNNING, as "<deployment name> (<STATUS>)": that is what tells
+// "outside this sync" apart from "in this sync but not reachable right now".
 func (s workspaceScope) attached(
 	ctx context.Context,
 	client *databricks.Client,
 	metastoreID string,
 	annos *annotations.Annotations,
-) ([]databricks.Workspace, bool, error) {
+) ([]databricks.Workspace, []string, error) {
 	ids, rateLimit, err := client.ListMetastoreWorkspaces(ctx, metastoreID)
 	noteRateLimit(annos, rateLimit)
 	if err != nil {
 		if databricks.IsSecurableGone(err, errorCodeMetastoreGone) {
-			return nil, false, errMetastoreGone
+			return nil, nil, errMetastoreGone
 		}
-		return nil, false, err
+		return nil, nil, err
 	}
 
 	var usable []databricks.Workspace
-	inScope := false
+	var pending []string
 	for _, id := range ids {
 		workspace, ok := s.byID[id]
 		if !ok {
 			continue
 		}
-		inScope = true
 		if s.running[id] {
 			usable = append(usable, workspace)
+			continue
 		}
+		pending = append(pending, fmt.Sprintf("%s (%s)", workspace.DeploymentName, workspace.Status))
 	}
 
-	return usable, inScope, nil
+	return usable, pending, nil
 }
 
 // pickReadableWorkspace is the first running workspace the connector can read

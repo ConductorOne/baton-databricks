@@ -90,6 +90,8 @@ var metastoreLevel = securableLevel{
 	permissionsName: metastorePermissionsName,
 	trusts:          metastoreGrantsAreTrustworthy,
 	listProvesTrust: true,
+
+	workspaceGroupsReadOnly: true,
 }
 
 // List emits each metastore with the workspace its permissions are read through.
@@ -122,14 +124,15 @@ func (m *metastoreBuilder) List(ctx context.Context, parentResourceID *v2.Resour
 		}
 
 		// A 404 here does not mean the metastore is gone. Skipping it would make ConductorOne delete it.
-		usable, inScope, err := scope.attached(ctx, m.client, metastore.MetastoreID, &annos)
+		usable, pending, err := scope.attached(ctx, m.client, metastore.MetastoreID, &annos)
 		if err != nil {
 			return nil, &rs.SyncOpResults{Annotations: annos}, assignmentListError(metastore.MetastoreID, err)
 		}
 		if len(usable) == 0 {
-			if inScope {
+			if len(pending) > 0 {
 				return nil, &rs.SyncOpResults{Annotations: annos}, status.Errorf(codes.FailedPrecondition,
-					"databricks-connector: metastore %s has no running workspace in sync scope", metastore.MetastoreID)
+					"databricks-connector: metastore %s has no running workspace in sync scope, waiting on %s",
+					metastore.MetastoreID, strings.Join(pending, ", "))
 			}
 			l.Debug("databricks-connector: metastore has no workspace in sync scope; skipping it",
 				zap.String("metastore", metastore.MetastoreID))
@@ -176,7 +179,13 @@ func (m *metastoreBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOp
 }
 
 func (m *metastoreBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	return m.syncGrants(ctx, resource, attr)
+	if !m.sync.workspaceGroups {
+		return m.syncGrants(ctx, resource, attr, nil)
+	}
+
+	return m.syncGrants(ctx, resource, attr, func(annos *annotations.Annotations) localPrincipalResolver {
+		return &workspaceAdminResolver{client: m.client, allowlist: m.workspaces, annos: annos}
+	})
 }
 
 func (m *metastoreBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {
@@ -241,13 +250,18 @@ func (m *metastoreBuilder) entitlementOnLiveRoute(
 	if err != nil {
 		return nil, err
 	}
-	usable, _, err := scope.attached(ctx, m.client, metastoreID, annos)
+	usable, pending, err := scope.attached(ctx, m.client, metastoreID, annos)
 	if err != nil {
 		return nil, assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
+		reason := "no workspace in sync scope is attached to it"
+		if len(pending) > 0 {
+			reason = fmt.Sprintf("no workspace in sync scope attached to it is RUNNING: %s", strings.Join(pending, ", "))
+		}
+
 		return nil, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
+			"databricks-connector: cannot route metastore %s: %s", metastoreID, reason)
 	}
 
 	var workspace *databricks.Workspace

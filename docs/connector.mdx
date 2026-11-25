@@ -1,26 +1,26 @@
 ---
 title: "Set up a Databricks connector"
 og:title: "Set up a Databricks connector"
-description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs) and enable just-in-time access requests."
-og:description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs) and enable just-in-time access requests."
+description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs), enable just-in-time access requests, and automatically provision and deprovision access."
+og:description: "C1 provides identity governance and just-in-time provisioning for Databricks. Integrate your Databricks instance with C1 to run user access reviews (UARs), enable just-in-time access requests, and automatically provision and deprovision access."
 sidebarTitle: "Databricks"
 ---
 
 ## Capabilities
 
-| Resource | Sync | Provision |
-| :--- | :--- | :--- |
-| Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Catalogs | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Schemas | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Service principals | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Tables | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Users | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Volumes | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
-| Workspaces | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Resource | Sync | Provision | Delete |
+| :--- | :--- | :--- | :--- |
+| Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Catalogs | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Schemas | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Service principals | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Tables | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Users | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |
+| Volumes | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
+| Workspaces | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | |
 
 The Databricks connector supports [automatic account provisioning and deprovisioning](/product/admin/account-provisioning).
 
@@ -31,6 +31,27 @@ Revoking the workspace **member** entitlement removes the principal's entire wor
 </Note>
 
 [This connector syncs non-human identities](/product/admin/nhi) and displays them on the **Identities overview** dashboard.
+
+### Connector actions
+
+Connector actions are custom capabilities that extend C1 automations with app-specific operations. Use the [Account lifecycle action](/product/admin/automations-steps-reference#account-lifecycle-action) automation step to run `enable_user` and `disable_user`. The Databricks actions don't appear under **Perform connector action**.
+
+| Automation step | Actions offered | How the target is selected |
+|-----------------|-----------------|----------------------------|
+| Account lifecycle action | `enable_user`, `disable_user` | The step's own target-account selector — either the account in context or a specific account. C1 resolves `user_id` from that account. |
+
+| Action name | Additional fields | Description |
+|-------------|-------------------|-------------|
+| `enable_user` | `user_id` (string, required) | Reactivates a Databricks account user. |
+| `disable_user` | `user_id` (string, required) | Deactivates a Databricks account user. |
+
+<Note>
+These actions act on the account-level user, so disabling a user blocks them in the Databricks account and in every workspace. Only the user's active status changes: their permissions and memberships are kept, so enabling the user restores the same access. Running an action on a user who is already in the target state succeeds. Databricks can take a few minutes to apply the change, so a sync that runs sooner can still show the previous status. Account provisioning doesn't reactivate an inactive user; run `enable_user` instead.
+
+The service principal that runs these actions needs the **Account admin** role. Without it, Databricks rejects the request with "This API is disabled for users without account admin status" and the action fails with a permission error.
+
+The `user_id` value is the user's Databricks account user ID: a string of digits, such as `1234567890123456`. The actions reject usernames, email addresses, and any value that contains a character other than 0-9 with the error "user ID must contain only digits 0-9". An ID that belongs to a group or service principal, or that does not exist, returns a not-found error. Databricks ignores leading zeros, so `0001234567890123456` acts on the same user as `1234567890123456`. Within a C1 automation, C1 fills this value from the target account.
+</Note>
 
 ## Metastore, catalog, schema, table and volume access in C1
 
@@ -44,13 +65,14 @@ group's members as holders. Ownership is shown as a read-only `owner`
 entitlement — it cannot be granted or revoked through C1. Views, materialized views, metric views and streaming tables are tables; `table_type` picks which privileges can be requested. `ALL_PRIVILEGES` on a view, and `MODIFY` on a streaming table, are shown when they already exist and cannot be requested.
 
 <Note>
-The Metastores, Catalogs, Schemas, Tables and Volumes resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Each level syncs under its parent securable, so turn on every level above the one you want; turning on Catalogs alone, or Tables without Schemas, syncs nothing. They all use the same OAuth credentials; no additional configuration fields are needed.
+The Metastores, Catalogs, Schemas, Tables and Volumes resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Each level syncs under its parent securable, so turn on every level above the one you want; a type whose parent type is off syncs nothing. They all use the same OAuth credentials; no additional configuration fields are needed.
 </Note>
 
 <Note>
 **Notes on Unity Catalog access in C1:**
 
-- Ownership is shown but cannot be provisioned. An owner that is not an account identity, such as `System user`, is not shown. A workspace admins group is shown when it resolves as an account group.
+- Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
+- Metastore privileges held by a workspace's built-in admins group, and that group's members, are shown as read-only grants when the workspace is in the sync scope. The group appears as `admins (<workspace name>)`. C1 can't grant or revoke either, and Databricks doesn't allow a revoked privilege to be granted back to this group. Manage both in Databricks.
 - **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
 - A catalog is synced when any running workspace in scope attached to its metastore lists it, and the same catalog name is kept once per metastore. A catalog that only excluded workspaces can reach is not synced.
 - The built-in `system` catalog is never synced, and neither is any other catalog Databricks marks as a system catalog, whoever owns it. Their schemas are not synced either.
@@ -61,11 +83,21 @@ The Metastores, Catalogs, Schemas, Tables and Volumes resource types are turned 
 
 ## Authentication methods
 
-The connector authenticates with **OAuth** — an account-level service principal's client ID and secret. This is the only authentication method the connector supports.
+The connector authenticates as an account-level service principal, named by its client ID. It proves it is that service principal in one of three ways:
+
+- **OAuth client secret** (default): the service principal's client ID and secret.
+- **Workload identity federation**: the connector presents an externally issued JWT that identifies the workload, such as a SPIFFE JWT-SVID or a Kubernetes projected service account token, and Databricks exchanges it for a short-lived token. No long-lived secret is stored, and the Databricks administrator controls access through a service principal federation policy. This fits a deployment where the platform running the connector already issues it a workload identity token.
+- **Workload identity federation (C1-hosted)**: C1 signs a short-lived JWT for this connector, and Databricks exchanges it for a short-lived token. No credential is stored, and the hosted runtime selects this method.
+
+The authentication method selects the credential. There is no personal access token (PAT), workspace token, or username and password option.
+
+<Warning>
+The token file method is for a connector you run yourself, on the command line or in service mode. Select it with `--auth-method workload-identity-file`. A C1-hosted connector uses workload identity too, but C1 issues the JWT and the runtime selects the method.
+</Warning>
 
 ### Optional: faster updates between syncs
 
-By default, the Databricks connector picks up access changes on its regular sync schedule. You can optionally turn on incremental sync, which checks Databricks' activity log between full syncs so that changes like new group members show up in C1 sooner. Full syncs still run as usual and remain the source of truth. Removed group memberships are picked up incrementally too, but deleted users, groups, and service principals are only reflected after the next full sync.
+By default, the Databricks connector picks up access changes on its regular sync schedule. You can optionally turn on incremental sync, which checks Databricks' activity log between full syncs so that changes like new group members, new service principals, and admin role changes on service principals show up in C1 sooner. Full syncs still run as usual and remain the source of truth. Removed group memberships are picked up incrementally too, but deleted users, groups, and service principals are only reflected after the next full sync.
 
 Role assignments that Databricks stores in access-control rule sets are also only reflected after the next full sync. These are group roles such as group manager, service principal roles, and the account `marketplace.admin` role.
 
@@ -127,9 +159,9 @@ The incremental sync setup isn't checked when the connector starts, so a problem
 
 Configuring the connector requires you to pass in credentials generated in Databricks. Gather these credentials before you move on.
 
-<Warning>
+<Note>
 A user with the **Account admin** role in your Databricks account must perform this task. Account admin is an account-level role, managed in the Databricks account console.
-</Warning>
+</Note>
 
 Every step below happens in the Databricks **account console**. On AWS that is [https://accounts.cloud.databricks.com](https://accounts.cloud.databricks.com). Azure Databricks and Google Cloud Platform customers use their own account console host. When they configure the connector they only need their Databricks domain in **Hostname**; Account Hostname is optional.
 
@@ -149,7 +181,7 @@ Every step below happens in the Databricks **account console**. On AWS that is [
 
 ### Create a service principal and an OAuth secret
 
-The Databricks connector authenticates with OAuth, which syncs info from all Databricks workspaces the service principal can access.
+The Databricks connector authenticates as a service principal, which syncs info from all Databricks workspaces that service principal can access.
 
 <Steps>
   <Step>
@@ -216,28 +248,12 @@ If the service principal cannot list catalogs at all through one of those worksp
 
 ### Let the service principal list schemas and read their privileges
 
-Skip this section if you are not syncing schemas, or if the service principal is the **Metastore Admin** or owns the catalog.
+Skip this section if you are not syncing schemas, or if the service principal is the **Metastore Admin**, owns the catalog, or is a direct **Admin** of the workspace whose admins group owns the catalog.
 
-Grant **MANAGE** on each catalog whose schemas you want synced, on top of the **USE CATALOG** from the previous section. **MANAGE** covers both halves: it lists every schema in the catalog and it reads who holds what on each one.
-
-**USE SCHEMA** and **ALL PRIVILEGES** are not substitutes: either one lists every schema, and then the sync fails on their grants.
-
-Workspace **Admin** replaces all of this only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`) and the service principal is a direct Admin of that workspace.
-
-<Steps>
-  <Step>
-  In the workspace, open **Catalog Explorer** and open the catalog.
-  </Step>
-  <Step>
-  Select **Permissions**, then click **Grant**.
-  </Step>
-  <Step>
-  Select the service principal, check **MANAGE**, and confirm.
-  </Step>
-</Steps>
+The **MANAGE** from the previous section is what schemas need too, and it covers both halves: it lists every schema in the catalog and it reads who holds what on each one. **USE SCHEMA** and **ALL PRIVILEGES** are not substitutes: either one lists every schema, and then the sync fails on their grants.
 
 <Warning>
-A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error.
+A catalog whose schemas cannot all be listed fails the sync with `cannot list every schema in catalog <name>`, and a schema whose privileges cannot all be read fails it with `cannot read every privilege on schema <name> through workspace <workspace>`.
 </Warning>
 
 Listing every table or volume needs more than **USE SCHEMA** or **MANAGE**. The service principal must own the metastore, the catalog, or the schema, be a direct Admin when the workspace admins group owns the catalog, or hold **ALL PRIVILEGES** on the catalog. Otherwise the sync fails.
@@ -248,16 +264,44 @@ Listing every table or volume needs more than **USE SCHEMA** or **MANAGE**. The 
 - OAuth client ID
 - OAuth client secret
 
+### Use workload identity federation instead of a secret
+
+You can skip the OAuth secret and have the connector present an externally issued JWT instead. The connector must be able to read that JWT where it runs, so this suits a deployment whose platform injects a workload identity token.
+
+<Steps>
+  <Step>
+  Create the service principal as described above, but do not generate an OAuth secret.
+  </Step>
+  <Step>
+  Follow the [Databricks OAuth token federation documentation](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange) to add a service principal federation policy that trusts the issuer, subject and audience of the JWT your workload receives.
+  </Step>
+  <Step>
+  Make the JWT available to the connector, ideally as a file that your platform rotates.
+  </Step>
+</Steps>
+
+**Done.** In this case the credentials are the account ID, the OAuth client ID, and the JWT, in place of the OAuth client secret.
+
+#### C1-hosted connectors
+
+A C1-hosted connector needs no JWT from you. C1 signs one for the connector, valid for 10 minutes, and your tenant needs the `WORKLOAD_IDENTITY_OIDC_ISSUER` feature flag. Add a federation policy to the service principal with these values:
+
+| Policy value | Value |
+| --- | --- |
+| Issuer | `<tenant endpoint>/auth/v1/workload-identity`. C1 publishes its keys at `<tenant endpoint>/auth/v1/workload-identity/.well-known/openid-configuration`, so Databricks can discover them. |
+| Audience | The service principal's OAuth client ID. |
+| Subject | `c1:tenant/<tenant id>/app/<app id>/connector/<connector id>`. Use it to limit the policy to one connector. |
+
 Next, move on to the instructions for your chosen setup method.
 
 ## Configure the Databricks connector
 
-<Warning>
+<Note>
 To complete this task, you'll need:
 
 - The **Connector Administrator** or **Super Administrator** role in C1
 - Access to the set of Databricks credentials generated by following the instructions above
-</Warning>
+</Note>
 
 <Tabs>
 <Tab title="Cloud-hosted">
@@ -389,6 +433,18 @@ stringData:
   BATON_DATABRICKS_CLIENT_ID: <OAuth client ID>
   BATON_DATABRICKS_CLIENT_SECRET: <OAuth client secret>
 
+  # Alternative to BATON_DATABRICKS_CLIENT_SECRET: workload identity federation.
+  # Both variables below are required together. Without BATON_AUTH_METHOD the
+  # connector validates against the client secret method and fails on the
+  # missing secret.
+  # Point the file at a projected service account token, or any other externally
+  # issued JWT your federation policy trusts. It is read again on every token
+  # refresh, so a rotated token needs no restart.
+  # Nothing creates this file for you: uncomment the matching volume and
+  # volumeMount in the Deployment below, or mount the JWT there yourself.
+  # BATON_AUTH_METHOD: workload-identity-file
+  # BATON_DATABRICKS_OIDC_TOKEN_FILE: /var/run/secrets/databricks/token
+
   # Optional: limit the sync to specific workspaces
   # (workspace name, deployment name, or numeric ID).
   # Also scopes which metastores sync: narrowing it removes metastores that no listed workspace is attached to.
@@ -413,7 +469,7 @@ stringData:
 </Warning>
 
 <Note>
-OAuth requires a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
+Both credential options require a reachable account API. If the account API check fails at startup, the connector fails validation instead of falling back to a workspace-only sync, even when `BATON_WORKSPACES` is set.
 </Note>
 
 See the connector's README or run `--help` to see all available configuration flags and environment variables.
@@ -449,6 +505,21 @@ spec:
         envFrom:
         - secretRef:
             name: baton-databricks-secrets
+        # Only for BATON_DATABRICKS_OIDC_TOKEN_FILE: mount the JWT at the path the
+        # secret points to. Leave this out when you use the client secret.
+        # volumeMounts:
+        # - name: databricks-oidc-token
+        #   mountPath: /var/run/secrets/databricks
+        #   readOnly: true
+      # volumes:
+      # - name: databricks-oidc-token
+      #   projected:
+      #     sources:
+      #     - serviceAccountToken:
+      #         path: token
+      #         # Must match the audience of the Databricks federation policy.
+      #         audience: <federation policy audience>
+      #         expirationSeconds: 3600
 ```
 
 ### Step 3: Deploy the connector

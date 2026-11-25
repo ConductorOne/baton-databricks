@@ -45,9 +45,44 @@ type pageUnit struct {
 
 	work          *c1zstore.LedgerWork
 	childWorkKeys []string
+	restart       *c1zstore.RestartLimits
 	trustedImport bool
 	sealing       bool
 	done          bool
+}
+
+var ErrPageUnitRestart = errors.New("pebble page unit: restart page")
+
+func (u *pageUnit) StageRestart(limits c1zstore.RestartLimits) error {
+	if u.done {
+		return ErrPageUnitCommitted
+	}
+	if limits.PerAction == 0 || limits.PerSync == 0 {
+		return fmt.Errorf("%w: limits must be positive", ErrPageUnitRestart)
+	}
+	u.restart = &limits
+	return nil
+}
+
+// A restart page carries the row and the pending-item transition and
+// nothing else.
+func (u *pageUnit) requireRestartShape(row *v3.LedgerRow) error {
+	if (u.restart != nil) != row.GetRestarted() {
+		return fmt.Errorf("%w: SetRestart and row.Restarted disagree", ErrPageUnitRestart)
+	}
+	if u.restart == nil {
+		return nil
+	}
+	if u.work == nil {
+		return fmt.Errorf("%w: requires pending work", ErrPageUnitRestart)
+	}
+	if u.sealing || len(row.GetChildren()) != 0 || len(u.childWorkKeys) != 0 {
+		return fmt.Errorf("%w: must not carry children, claims, or the terminal mark", ErrPageUnitRestart)
+	}
+	if len(u.resourceTypes)+len(u.resources)+len(u.entitlements)+len(u.grants)+len(u.assets)+len(u.grantDeletes) != 0 {
+		return fmt.Errorf("%w: must not carry records", ErrPageUnitRestart)
+	}
+	return nil
 }
 
 type ledgerFact struct {
@@ -218,7 +253,7 @@ func (u *pageUnit) resourceRecord(ctx context.Context, resourceTypeID, resourceI
 	if i, ok := u.resourceIdx[resourceBufKey{resourceTypeID, resourceID}]; ok {
 		return u.resources[i], nil
 	}
-	return u.l.e.GetResourceRecord(ctx, resourceTypeID, resourceID)
+	return u.l.e.records.GetResourceRecord(ctx, resourceTypeID, resourceID)
 }
 
 // A record whose refs derive no identity could not have been stored, so it
@@ -402,9 +437,9 @@ func (u *pageUnit) entitlementRecord(ctx context.Context, externalID string) (*v
 	}
 	indices := u.entitlementIdx[externalID]
 	if len(indices) == 0 {
-		return u.l.e.GetEntitlementRecord(ctx, externalID)
+		return u.l.e.records.GetEntitlementRecord(ctx, externalID)
 	}
-	stored, err := u.l.e.entitlementIdentitiesForExternalID(ctx, externalID)
+	stored, err := u.l.e.records.entitlementIdentitiesForExternalID(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +465,7 @@ func (u *pageUnit) entitlementRecord(ctx context.Context, externalID string) (*v
 }
 
 func (u *pageUnit) entitlementIdentities(ctx context.Context, externalID string) ([]entitlementIdentity, error) {
-	stored, err := u.l.e.entitlementIdentitiesForExternalID(ctx, externalID)
+	stored, err := u.l.e.records.entitlementIdentitiesForExternalID(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
@@ -477,6 +512,9 @@ func (u *pageUnit) Commit(ctx context.Context, id c1zstore.LedgerActionIdentity,
 			id.SetPageTokenHash(ledgerTokenHash(id.GetPageToken()))
 		}
 	}
+	if err := u.requireRestartShape(row); err != nil {
+		return err
+	}
 	if len(u.grantDeletes) > 0 && len(u.grants) > 0 {
 		doomed := make(map[grantIdentity]struct{}, len(u.grantDeletes))
 		for _, id := range u.grantDeletes {
@@ -513,7 +551,11 @@ func (u *pageUnit) Commit(ctx context.Context, id c1zstore.LedgerActionIdentity,
 			return err
 		}
 		if u.work != nil {
-			if err := l.stageWorkTransition(ctx, batch, *u.work, id, row, u.childWorkKeys); err != nil {
+			var restart *restartTransition
+			if u.restart != nil {
+				restart = &restartTransition{limits: *u.restart, bucketKey: u.bucketKey, bucket: u.bucketValue}
+			}
+			if err := l.stageWorkTransition(ctx, batch, *u.work, id, row, u.childWorkKeys, restart); err != nil {
 				return err
 			}
 			key = encodeWorkHistoryKey(id, u.work.ID, u.work.Revision)
@@ -524,9 +566,9 @@ func (u *pageUnit) Commit(ctx context.Context, id c1zstore.LedgerActionIdentity,
 		if err != nil {
 			return err
 		}
-		stageResources := l.e.stageResourceRecords
-		stageEntitlements := l.e.stageEntitlementRecords
-		stageGrants := l.e.stageGrantRecords
+		stageResources := l.e.records.stageResourceRecords
+		stageEntitlements := l.e.records.stageEntitlementRecords
+		stageGrants := l.e.records.stageGrantRecords
 		if u.trustedImport {
 			stageResources = stageTrustedResourceRecords
 			stageEntitlements = stageTrustedEntitlementRecords
@@ -559,7 +601,7 @@ func (u *pageUnit) Commit(ctx context.Context, id c1zstore.LedgerActionIdentity,
 			}
 		}
 		for _, id := range u.grantDeletes {
-			if _, err := l.e.stageGrantDeleteIfPresentLocked(batch, id); err != nil {
+			if _, err := l.e.records.stageGrantDeleteIfPresentLocked(batch, id); err != nil {
 				return err
 			}
 		}
@@ -602,7 +644,7 @@ func (u *pageUnit) Commit(ctx context.Context, id c1zstore.LedgerActionIdentity,
 		}
 		l.inFlight.Store(true)
 		if len(u.entitlements) > 0 {
-			l.e.noteEntitlementKeyspaceWrite()
+			l.e.records.noteEntitlementKeyspaceWrite()
 		}
 		return nil
 	})
@@ -624,6 +666,7 @@ func (u *pageUnit) release() {
 	u.facts = nil
 	u.bucketKey, u.bucketValue = nil, nil
 	u.work, u.childWorkKeys = nil, nil
+	u.restart = nil
 	u.trustedImport = false
 	u.sealing = false
 }

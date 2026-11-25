@@ -25,6 +25,7 @@ func (s *syncer) actionFromPending(work c1zstore.LedgerWork) (Action, error) {
 	action.WorkPageToken = work.Action.Identity.PageToken
 	action.Spawned = work.Action.Spawned
 	action.TypeScopedPlanned = work.TypeScopedPlanned
+	action.WindowPages = work.WindowPages
 	return action, nil
 }
 
@@ -32,7 +33,8 @@ func (s *syncer) pendingForAction(action *Action) c1zstore.LedgerWork {
 	identity := ledgerIdentity(action)
 	identity.PageToken = action.WorkPageToken
 	return c1zstore.LedgerWork{SyncID: s.syncID, ID: action.WorkID, Revision: action.WorkRevision,
-		Action: c1zstore.LedgerChild{Identity: identity, Spawned: action.Spawned}, TypeScopedPlanned: action.TypeScopedPlanned}
+		Action: c1zstore.LedgerChild{Identity: identity, Spawned: action.Spawned}, TypeScopedPlanned: action.TypeScopedPlanned,
+		WindowPages: action.WindowPages}
 }
 
 func (s *syncer) refreshPendingWindow(ctx context.Context) error {
@@ -123,11 +125,11 @@ func (s *syncer) pendingRefill(ctx context.Context, op ActionOp, after *uint64) 
 	}
 }
 
-func (s *syncer) publishPendingTransition(ctx context.Context, action *Action, next string, warning bool) {
+func (s *syncer) publishPendingTransition(ctx context.Context, action *Action, next string, warning, restart bool) {
 	if warning {
 		return
 	}
-	if next == "" {
+	if next == "" && !restart {
 		s.run.finishAction(ctx, action)
 		s.recordListResourceCompletedThisRun(action)
 		return
@@ -136,6 +138,7 @@ func (s *syncer) publishPendingTransition(ctx context.Context, action *Action, n
 	defer s.run.mu.Unlock()
 	updated := s.run.actions[action.ID]
 	updated.PageToken = next
+	updated.WindowPages = action.WindowPages
 	updated.WorkPageToken = next
 	updated.WorkRevision = action.WorkRevision + 1
 	s.run.actions[action.ID] = updated
@@ -166,9 +169,6 @@ func pendingSeeds(actions []ledgerAction) []c1zstore.LedgerWork {
 }
 
 func (s *syncer) runPendingLocalStep(ctx context.Context, action *Action, handler func() error) error {
-	if !s.ledgered {
-		return handler()
-	}
 	s.run.mu.RLock()
 	beforeTotal := s.run.completedActions
 	beforeCount := s.run.actionCounts[action.Op.String()]

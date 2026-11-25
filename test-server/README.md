@@ -169,7 +169,8 @@ The server doesn't run SQL. It recognizes `SELECT <columns> FROM system.access.a
 - binds the typed `:name` parameters;
 - applies the predicates the connector's query uses, recognized by shape:
   `event_date >= :d`, `(event_time > :t OR (event_time = :t AND event_id > :id))`,
-  `event_time <= :cutoff`, `service_name IN (...)` and `action_name IN (...)`;
+  `event_time <= :cutoff`, `service_name IN (...)`, `action_name IN (...)` and
+  `response.status_code = n` (seed rows are 200 unless they set another status);
 - requires `ORDER BY event_time ASC, event_id ASC` and applies a trailing `LIMIT n`;
 - fails any other statement with `FAILED` and "test-server: unsupported statement".
 
@@ -237,16 +238,22 @@ account, as in full sync.
 | 16 | −11h | 0 | workspace / `updatePermissionAssignment` (no `workspace_id`) | principal_id dave | none |
 | 17 | −10h | ws-beta | workspace / `deletePermissionAssignment` | workspace_id ws-beta | ws-beta changed |
 | 18 | −9h | ws-gamma | accounts / `add` | targetUserId alice | none: eu-west-1 isn't visible from a us-east-1 warehouse |
-| 19 | −8h | ws-alpha | accounts / `updateUser` | targetUserId alice | alice changed; `ws-alpha:allow-cluster-create` and `ws-alpha:allow-instance-pool-create` changed |
-| 20 | −7h | 0 | accounts / `updateGroup` | targetGroupId analysts | analysts changed |
+| 19 | −8h | ws-alpha | accounts / `updateUser` | targetUserId alice | alice changed; `ws-alpha:workspace-access`, `ws-alpha:databricks-sql-access`, `ws-alpha:allow-cluster-create` and `ws-alpha:allow-instance-pool-create` changed |
+| 20 | −7h | ws-beta | accounts / `updateGroup` | targetGroupId analysts | analysts changed; `ws-beta:workspace-access`, `ws-beta:databricks-sql-access`, `ws-beta:allow-cluster-create` and `ws-beta:allow-instance-pool-create` changed |
 | 21 | −6h | 0 | accounts / `removeGroup` | targetGroupId data-engineers | data-engineers changed |
 | 22 | −6h (same time as 21) | 0 | accounts / `deactivateUser` | targetUserId dave | dave changed |
 | 23 | −5h30m | ws-alpha | accounts / `changeDatabricksWorkspaceAcl` | targetUserId carol | ws-alpha changed; `ws-alpha:workspace-access` changed |
 | 24 | −5h | ws-alpha | clusters / `create` | | none: not requested |
 | 25 | −2h | 0 | accounts / `add` | targetUserId bob | none: newer than the 4-hour lag cutoff |
 | 26 | −72h | 0 | accounts / `add` | targetUserId carol | none: older than the feed start |
+| 27 | −18h30m | 0 | accounts / `removePrincipalFromGroup`, `response.status_code` 403 | data-engineers ← alice | none: the request failed, so alice is still a member |
 
-That adds up to 25 events.
+The table lists what each row maps to, 31 events in all. Within one poll, `ListEvents` keeps
+only the last change for each resource (by resource and parent ID), because a resource change
+makes C1 re-read the resource's current state anyway. Grant and revoke events are never
+collapsed. Several resources appear more than once (bob in rows 2, 11 and 12, `account_admin` in
+10 and 11, the ws-alpha roles in 19 and 23, and others), so the poll emits 21 events, each with
+the ID of the last row that named its resource.
 
 ## curl examples
 

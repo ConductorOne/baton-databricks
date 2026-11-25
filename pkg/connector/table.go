@@ -333,7 +333,7 @@ func (b *tableBuilder) Entitlements(ctx context.Context, resource *v2.Resource, 
 func (b *tableBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
 
-	return b.withLevel(tableLevel(privilegesForTable(ctx, resource))).syncGrants(ctx, resource, attr)
+	return b.withLevel(tableLevel(privilegesForTable(ctx, resource))).syncGrants(ctx, resource, attr, nil)
 }
 
 func (b *tableBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {

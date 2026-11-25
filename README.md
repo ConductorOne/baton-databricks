@@ -18,17 +18,19 @@ right top corner that will open a dropdown menu with the account ID along other
 options.
 
 Another requirement is to have valid credentials to run the connector with. The
-connector authenticates with the OAuth client credentials flow, using an
-account-level service principal that works across the account and every
-workspace it has access to.
+connector authenticates as an account-level service principal that works across
+the account and every workspace it has access to. It can prove it is that
+service principal in two ways: with a client secret, which is the default, or
+with workload identity federation. See [Authentication](#authentication).
 
 To set this up, create a service principal and add an OAuth secret (client ID
 and secret) to it. You can do that by going to the user management tab and
 clicking on the Service Principals tab. Then click on the Add Service principal
 button and name it. You then need to add an OAuth secret to it by clicking on
 the Generate secret button. You can use this secret to authenticate across all
-workspaces that service principal has access to. This requires admin access to
-the Databricks account and each workspace you want to sync.
+workspaces that service principal has access to. This requires the service
+principal to have the Account admin role on the Databricks account and the Admin
+role on each workspace you want to sync.
 
 Syncing Unity Catalog needs more than account admin on its own: the service
 principal also has to be able to read the privileges recorded on each metastore.
@@ -109,13 +111,53 @@ example `--sync-resource-types account,user,group,metastore,catalog,schema`.
 
 ## Authentication
 
-OAuth is the only authentication method: an account-level service principal's
-client ID and secret, supplied through `--databricks-client-id` and
-`--databricks-client-secret`. There is no personal access token (PAT) or
+The connector always authenticates as an account-level service principal, named
+by `--databricks-client-id`. There is no personal access token (PAT) or
 workspace-token option, and no username/password option.
 
-OAuth requires a reachable account API. If the account API check fails at
-startup, the connector fails validation rather than falling back to a
+`--auth-method` selects which credential is used. Fields for other methods are
+ignored.
+
+### Client secret (default)
+
+Pass the service principal's OAuth secret to `--databricks-client-secret` (or
+`BATON_DATABRICKS_CLIENT_SECRET`). The connector runs the OAuth client
+credentials flow against the account token endpoint.
+
+### Workload identity federation
+
+Instead of a long-lived secret, the connector can present an externally issued
+JWT that identifies the workload, such as a SPIFFE JWT-SVID or a Kubernetes
+projected service account token, and exchange it for a short-lived Databricks
+OAuth token ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)).
+
+Create a [service principal federation policy](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange)
+on the same service principal, trusting the issuer, subject and audience of that
+JWT. Then select the method and point the connector at the token:
+
+```
+--auth-method workload-identity-file \
+  --databricks-oidc-token-file /var/run/secrets/token
+```
+
+`--auth-method` (or `BATON_AUTH_METHOD`) is required here. Without it the
+connector validates against the default method and asks for a client secret.
+
+The file is read again on every token refresh, so whatever rotates it controls
+the lifetime and the connector needs no restart.
+
+This method runs the connector yourself: on the command line or in service mode.
+A C1-hosted connector uses workload identity too, but C1 issues the JWT and the
+hosted runtime selects the method, so there is no file and no flag to set. The
+federation policy a hosted connector needs is in the connector documentation.
+
+Nothing else changes: the exchange happens at the same account token endpoint,
+and the resulting token is used for both account and workspace APIs.
+
+### Validation
+
+Either method requires a reachable account API. If the account API check fails
+at startup, the connector fails validation rather than falling back to a
 workspace-only sync, even when `--workspaces` is set.
 
 To instead exclude specific workspaces from the sync, pass them to the
@@ -210,7 +252,7 @@ four hours after they happen.
 
 ## Group provisioning
 
-Account groups are provisioned through the OAuth client ID and secret flow.
+Account groups are provisioned as the authenticated service principal.
 [Here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.)
 are the different types of groups in Databricks.
 
@@ -231,6 +273,20 @@ membership from a group removes the group's entire workspace assignment,
 including admin access if the group is a workspace admin, so its members lose
 it.
 
+## Account provisioning
+
+The connector creates account users and deletes them. Account creation requires an
+email address and a display name in the profile.
+
+## Account lifecycle actions
+
+The `enable_user` and `disable_user` actions set an account user's active status.
+Both take a required `user_id` argument: the Databricks account user ID, digits
+only. Only the status changes; the user's permissions and memberships are kept.
+Running an action on a user already in the target state succeeds. Databricks can
+take a few minutes to apply the change. The service principal needs the
+Account admin role.
+
 ## Unity Catalog
 
 A metastore is the top of the Databricks Unity Catalog hierarchy. The resource
@@ -239,7 +295,8 @@ tree the connector syncs is:
 ```
 account
 ├── workspace
-│   └── role
+│   ├── role
+│   └── group (the built-in `admins` group only)
 ├── user
 ├── group
 ├── service principal
@@ -254,6 +311,14 @@ A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
 `READ_METADATA`, `USE_SHARE` and so on) plus a non-grantable `owner`. A
 privilege held by a group is expandable, so ConductorOne resolves the group's
 members as holders.
+
+The built-in workspace admins group is synced under its workspace as
+`admins (<workspace name>)`, when metastores, groups and workspaces are all in the
+sync. Only the members the account holds are synced: a workspace-local identity has
+no account resource to point a grant at. Both the metastore privileges this group
+holds and its own membership are read-only, and a grant or revoke on either fails
+with a `FailedPrecondition` error. Databricks does not allow granting a metastore
+privilege back to this group after revocation.
 
 `MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
 metastore level.
@@ -276,6 +341,9 @@ it. The connector never guesses when the answer is unknown:
 | metastore workspace list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming that list |
 | workspace permission list unreadable (401, 403, 404) | treated as not Admin on that workspace; the sync then fails with the usual missing-standing error, which does not name this list |
 
+A sync that fails on an attached workspace that is not `RUNNING` names that
+workspace and its status.
+
 A metastore is left out of the sync only when the answer is known: every
 attached workspace is out of scope or unusable. Leaving it out is what makes
 ConductorOne remove it and its grants, so an unknown answer must not take that
@@ -296,8 +364,10 @@ or `databricks-exclude-workspaces`.
 ## Unity Catalog provisioning
 
 A privilege on a metastore, catalog, schema, table or volume can be granted to
-and revoked from a user, group or service principal. The `owner` entitlement is
-read-only: granting or revoking it fails with an `InvalidArgument` error.
+and revoked from a user, group or service principal, except a metastore
+privilege held by the built-in workspace admins group, which is read-only. The
+`owner` entitlement is read-only too: granting or revoking it fails with an
+`InvalidArgument` error.
 
 If a securable becomes unreachable, provisioning must distinguish deletion from
 a workspace binding or visibility change. Requests can fail with
@@ -379,6 +449,7 @@ Flags:
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --databricks-oidc-token-file string                required: Path to a file holding an externally issued JWT identifying the workload. The file is read again on every token refresh, so an external rotation is picked up without a restart. ($BATON_DATABRICKS_OIDC_TOKEN_FILE)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)

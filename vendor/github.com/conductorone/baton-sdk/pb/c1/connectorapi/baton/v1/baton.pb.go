@@ -2890,7 +2890,7 @@ type Task_SyncFullTask struct {
 	SyncResourceTypeIds []string `protobuf:"bytes,5,rep,name=sync_resource_type_ids,json=syncResourceTypeIds,proto3" json:"sync_resource_type_ids,omitempty"`
 	// If true, skip syncing grants. Resources and entitlements will still be synced.
 	SkipGrants bool `protobuf:"varint,6,opt,name=skip_grants,json=skipGrants,proto3" json:"skip_grants,omitempty"`
-	// Storage engine to use for the sync. If empty, the default engine will be used (currently Pebble for new c1z files; existing files keep their on-disk format).
+	// Storage engine to use for the sync. If empty, the default engine (Pebble) is used.
 	StorageEngine string `protobuf:"bytes,7,opt,name=storage_engine,json=storageEngine,proto3" json:"storage_engine,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3012,7 +3012,7 @@ type Task_SyncFullTask_builder struct {
 	SyncResourceTypeIds []string
 	// If true, skip syncing grants. Resources and entitlements will still be synced.
 	SkipGrants bool
-	// Storage engine to use for the sync. If empty, the default engine will be used (currently Pebble for new c1z files; existing files keep their on-disk format).
+	// Storage engine to use for the sync. If empty, the default engine (Pebble) is used.
 	StorageEngine string
 }
 
@@ -4250,8 +4250,26 @@ func (b0 Task_BulkGetTicketsTask_builder) Build() *Task_BulkGetTicketsTask {
 }
 
 type Task_ListTicketSchemasTask struct {
-	state         protoimpl.MessageState `protogen:"hybrid.v1"`
-	Annotations   []*anypb.Any           `protobuf:"bytes,1,rep,name=annotations,proto3" json:"annotations,omitempty"`
+	state       protoimpl.MessageState `protogen:"hybrid.v1"`
+	Annotations []*anypb.Any           `protobuf:"bytes,1,rep,name=annotations,proto3" json:"annotations,omitempty"`
+	// When false, the handler unrolls up to 100 schemas into one response,
+	// drops the rest, and ignores page_token and page_size.
+	// When true, the handler returns one bounded batch per task:
+	//   - Every paged response sets TicketsServiceListTicketSchemasResponse.paged.
+	//     A response with paged unset came from an SDK that ignored paginate and may be truncated.
+	//     BuildInfo.sdk_version from Hello is an optional way to decide whether to request paging.
+	//   - A non-empty next_page_token means more may follow, even when the list is empty.
+	//     Paging is complete only when next_page_token is empty.
+	//   - If the connector's schemas change between calls, entries may be skipped or repeated.
+	//     Dedupe by schema ID and do not treat one paged listing as a snapshot.
+	Paginate bool `protobuf:"varint,2,opt,name=paginate,proto3" json:"paginate,omitempty"`
+	// Opaque next_page_token from the previous paged response. Empty requests the first batch.
+	// It wraps the connector's page token, so a connector page token over about 3 KB cannot be
+	// carried and fails the task without retry.
+	PageToken string `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	// Maximum schemas per paged batch: 0 selects 100, otherwise 1 to 1000.
+	// A batch is also bounded to about 2 MiB serialized.
+	PageSize      uint32 `protobuf:"varint,4,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4288,14 +4306,65 @@ func (x *Task_ListTicketSchemasTask) GetAnnotations() []*anypb.Any {
 	return nil
 }
 
+func (x *Task_ListTicketSchemasTask) GetPaginate() bool {
+	if x != nil {
+		return x.Paginate
+	}
+	return false
+}
+
+func (x *Task_ListTicketSchemasTask) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+func (x *Task_ListTicketSchemasTask) GetPageSize() uint32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
 func (x *Task_ListTicketSchemasTask) SetAnnotations(v []*anypb.Any) {
 	x.Annotations = v
+}
+
+func (x *Task_ListTicketSchemasTask) SetPaginate(v bool) {
+	x.Paginate = v
+}
+
+func (x *Task_ListTicketSchemasTask) SetPageToken(v string) {
+	x.PageToken = v
+}
+
+func (x *Task_ListTicketSchemasTask) SetPageSize(v uint32) {
+	x.PageSize = v
 }
 
 type Task_ListTicketSchemasTask_builder struct {
 	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
 
 	Annotations []*anypb.Any
+	// When false, the handler unrolls up to 100 schemas into one response,
+	// drops the rest, and ignores page_token and page_size.
+	// When true, the handler returns one bounded batch per task:
+	//   - Every paged response sets TicketsServiceListTicketSchemasResponse.paged.
+	//     A response with paged unset came from an SDK that ignored paginate and may be truncated.
+	//     BuildInfo.sdk_version from Hello is an optional way to decide whether to request paging.
+	//   - A non-empty next_page_token means more may follow, even when the list is empty.
+	//     Paging is complete only when next_page_token is empty.
+	//   - If the connector's schemas change between calls, entries may be skipped or repeated.
+	//     Dedupe by schema ID and do not treat one paged listing as a snapshot.
+	Paginate bool
+	// Opaque next_page_token from the previous paged response. Empty requests the first batch.
+	// It wraps the connector's page token, so a connector page token over about 3 KB cannot be
+	// carried and fails the task without retry.
+	PageToken string
+	// Maximum schemas per paged batch: 0 selects 100, otherwise 1 to 1000.
+	// A batch is also bounded to about 2 MiB serialized.
+	PageSize uint32
 }
 
 func (b0 Task_ListTicketSchemasTask_builder) Build() *Task_ListTicketSchemasTask {
@@ -4303,6 +4372,9 @@ func (b0 Task_ListTicketSchemasTask_builder) Build() *Task_ListTicketSchemasTask
 	b, x := &b0, m0
 	_, _ = b, x
 	x.Annotations = b.Annotations
+	x.Paginate = b.Paginate
+	x.PageToken = b.PageToken
+	x.PageSize = b.PageSize
 	return m0
 }
 
@@ -4972,6 +5044,7 @@ type BatonServiceHelloRequest_BuildInfo struct {
 	LangVersion    string                 `protobuf:"bytes,1,opt,name=lang_version,json=langVersion,proto3" json:"lang_version,omitempty"`
 	Package        string                 `protobuf:"bytes,2,opt,name=package,proto3" json:"package,omitempty"`
 	PackageVersion string                 `protobuf:"bytes,3,opt,name=package_version,json=packageVersion,proto3" json:"package_version,omitempty"`
+	SdkVersion     string                 `protobuf:"bytes,4,opt,name=sdk_version,json=sdkVersion,proto3" json:"sdk_version,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -5022,6 +5095,13 @@ func (x *BatonServiceHelloRequest_BuildInfo) GetPackageVersion() string {
 	return ""
 }
 
+func (x *BatonServiceHelloRequest_BuildInfo) GetSdkVersion() string {
+	if x != nil {
+		return x.SdkVersion
+	}
+	return ""
+}
+
 func (x *BatonServiceHelloRequest_BuildInfo) SetLangVersion(v string) {
 	x.LangVersion = v
 }
@@ -5034,12 +5114,17 @@ func (x *BatonServiceHelloRequest_BuildInfo) SetPackageVersion(v string) {
 	x.PackageVersion = v
 }
 
+func (x *BatonServiceHelloRequest_BuildInfo) SetSdkVersion(v string) {
+	x.SdkVersion = v
+}
+
 type BatonServiceHelloRequest_BuildInfo_builder struct {
 	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
 
 	LangVersion    string
 	Package        string
 	PackageVersion string
+	SdkVersion     string
 }
 
 func (b0 BatonServiceHelloRequest_BuildInfo_builder) Build() *BatonServiceHelloRequest_BuildInfo {
@@ -5049,6 +5134,7 @@ func (b0 BatonServiceHelloRequest_BuildInfo_builder) Build() *BatonServiceHelloR
 	x.LangVersion = b.LangVersion
 	x.Package = b.Package
 	x.PackageVersion = b.PackageVersion
+	x.SdkVersion = b.SdkVersion
 	return m0
 }
 
@@ -5614,7 +5700,7 @@ var File_c1_connectorapi_baton_v1_baton_proto protoreflect.FileDescriptor
 
 const file_c1_connectorapi_baton_v1_baton_proto_rawDesc = "" +
 	"\n" +
-	"$c1/connectorapi/baton/v1/baton.proto\x12\x18c1.connectorapi.baton.v1\x1a\x1fc1/connector/v2/connector.proto\x1a!c1/connector/v2/entitlement.proto\x1a\x1bc1/connector/v2/grant.proto\x1a\x1ec1/connector/v2/resource.proto\x1a\x1cc1/connector/v2/ticket.proto\x1a\x19google/protobuf/any.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x17google/rpc/status.proto\x1a\x17validate/validate.proto\"\xe41\n" +
+	"$c1/connectorapi/baton/v1/baton.proto\x12\x18c1.connectorapi.baton.v1\x1a\x1fc1/connector/v2/connector.proto\x1a!c1/connector/v2/entitlement.proto\x1a\x1bc1/connector/v2/grant.proto\x1a\x1ec1/connector/v2/resource.proto\x1a\x1cc1/connector/v2/ticket.proto\x1a\x19google/protobuf/any.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x17google/rpc/status.proto\x1a\x17validate/validate.proto\"\xd02\n" +
 	"\x04Task\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12=\n" +
 	"\x06status\x18\x02 \x01(\x0e2%.c1.connectorapi.baton.v1.Task.StatusR\x06status\x12=\n" +
@@ -5648,7 +5734,7 @@ const file_c1_connectorapi_baton_v1_baton_proto_rawDesc = "" +
 	"\bNoneTask\x126\n" +
 	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x1aC\n" +
 	"\tHelloTask\x126\n" +
-	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x1a\x9f\x03\n" +
+	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x1a\x97\x03\n" +
 	"\fSyncFullTask\x126\n" +
 	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x12,\n" +
 	"\x12skip_expand_grants\x18\x02 \x01(\bR\x10skipExpandGrants\x12?\n" +
@@ -5656,8 +5742,8 @@ const file_c1_connectorapi_baton_v1_baton_proto_rawDesc = "" +
 	"\x17targeted_sync_resources\x18\x04 \x03(\v2\x19.c1.connector.v2.ResourceR\x15targetedSyncResources\x123\n" +
 	"\x16sync_resource_type_ids\x18\x05 \x03(\tR\x13syncResourceTypeIds\x12\x1f\n" +
 	"\vskip_grants\x18\x06 \x01(\bR\n" +
-	"skipGrants\x12?\n" +
-	"\x0estorage_engine\x18\a \x01(\tB\x18\xfaB\x15r\x13R\x06pebbleR\x06sqlite\xd0\x01\x01R\rstorageEngine\x1a~\n" +
+	"skipGrants\x127\n" +
+	"\x0estorage_engine\x18\a \x01(\tB\x10\xfaB\rr\vR\x06pebble\xd0\x01\x01R\rstorageEngine\x1a~\n" +
 	"\rEventFeedTask\x126\n" +
 	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x125\n" +
 	"\bstart_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\astartAt\x1a\xe7\x01\n" +
@@ -5710,9 +5796,13 @@ const file_c1_connectorapi_baton_v1_baton_proto_rawDesc = "" +
 	"\x15BulkCreateTicketsTask\x12X\n" +
 	"\x0fticket_requests\x18\x01 \x03(\v2/.c1.connectorapi.baton.v1.Task.CreateTicketTaskR\x0eticketRequests\x1ak\n" +
 	"\x12BulkGetTicketsTask\x12U\n" +
-	"\x0fticket_requests\x18\x01 \x03(\v2,.c1.connectorapi.baton.v1.Task.GetTicketTaskR\x0eticketRequests\x1aO\n" +
+	"\x0fticket_requests\x18\x01 \x03(\v2,.c1.connectorapi.baton.v1.Task.GetTicketTaskR\x0eticketRequests\x1a\xc2\x01\n" +
 	"\x15ListTicketSchemasTask\x126\n" +
-	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x1ad\n" +
+	"\vannotations\x18\x01 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x12\x1a\n" +
+	"\bpaginate\x18\x02 \x01(\bR\bpaginate\x12*\n" +
+	"\n" +
+	"page_token\x18\x03 \x01(\tB\v\xfaB\br\x06(\x80 \xd0\x01\x01R\tpageToken\x12)\n" +
+	"\tpage_size\x18\x04 \x01(\rB\f\xfaB\t*\a\x18\xe8\a(\x01@\x01R\bpageSize\x1ad\n" +
 	"\rGetTicketTask\x12\x1b\n" +
 	"\tticket_id\x18\x01 \x01(\tR\bticketId\x126\n" +
 	"\vannotations\x18\x02 \x03(\v2\x14.google.protobuf.AnyR\vannotations\x1ay\n" +
@@ -5749,7 +5839,7 @@ const file_c1_connectorapi_baton_v1_baton_proto_rawDesc = "" +
 	"\x10STATUS_SCHEDULED\x10\x02\x12\x12\n" +
 	"\x0eSTATUS_RUNNING\x10\x03\x12\x13\n" +
 	"\x0fSTATUS_FINISHED\x10\x04B\v\n" +
-	"\ttask_typeJ\x04\bw\x10xR\x10create_sync_diff\"\xc9\a\n" +
+	"\ttask_typeJ\x04\bw\x10xR\x10create_sync_diff\"\xf4\a\n" +
 	"\x18BatonServiceHelloRequest\x12#\n" +
 	"\ahost_id\x18\x01 \x01(\tB\n" +
 	"\xfaB\ar\x05\x10\x01\x18\x80\x02R\x06hostId\x122\n" +
@@ -5758,11 +5848,13 @@ const file_c1_connectorapi_baton_v1_baton_proto_rawDesc = "" +
 	"build_info\x18\x03 \x01(\v2<.c1.connectorapi.baton.v1.BatonServiceHelloRequest.BuildInfoR\tbuildInfo\x12R\n" +
 	"\aos_info\x18\x04 \x01(\v29.c1.connectorapi.baton.v1.BatonServiceHelloRequest.OSInfoR\x06osInfo\x12[\n" +
 	"\x12connector_metadata\x18\x05 \x01(\v2\".c1.connector.v2.ConnectorMetadataB\b\xfaB\x05\x8a\x01\x02\x10\x01R\x11connectorMetadata\x12@\n" +
-	"\vannotations\x18\x06 \x03(\v2\x14.google.protobuf.AnyB\b\xfaB\x05\x92\x01\x02\x10\x10R\vannotations\x1a\x8f\x01\n" +
+	"\vannotations\x18\x06 \x03(\v2\x14.google.protobuf.AnyB\b\xfaB\x05\x92\x01\x02\x10\x10R\vannotations\x1a\xba\x01\n" +
 	"\tBuildInfo\x12+\n" +
 	"\flang_version\x18\x01 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\vlangVersion\x12\"\n" +
 	"\apackage\x18\x02 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\apackage\x121\n" +
-	"\x0fpackage_version\x18\x03 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\x0epackageVersion\x1a\xf1\x02\n" +
+	"\x0fpackage_version\x18\x03 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\x0epackageVersion\x12)\n" +
+	"\vsdk_version\x18\x04 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\n" +
+	"sdkVersion\x1a\xf1\x02\n" +
 	"\x06OSInfo\x12$\n" +
 	"\bhostname\x18\x01 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\bhostname\x12\x18\n" +
 	"\x02os\x18\x02 \x01(\tB\b\xfaB\x05r\x03\x18\x80\x02R\x02os\x12$\n" +

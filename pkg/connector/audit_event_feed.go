@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -46,6 +48,11 @@ const (
 
 	auditServiceAccounts  = "accounts"
 	auditServiceWorkspace = "workspace"
+
+	// Each member costs up to three Account SCIM GETs, which Databricks rate limits, so rows and
+	// polls past these caps refresh the group instead of looking members up.
+	maxAuditMembershipLookups    = 50
+	maxAuditMemberLookupsPerPoll = 300
 )
 
 // auditActionMapping describes what an audit log action_name affects: an optional primary
@@ -61,6 +68,9 @@ type auditActionMapping struct {
 	accountRole      string
 	roleNames        []string
 	grant            *auditGrantMapping
+	// resolvePrincipal means idParam names a user, group or service principal; resourceType
+	// is only the fallback when the id matches none of them.
+	resolvePrincipal bool
 }
 
 // auditGrantMapping names the principal and direction of a grant-mapped action. The
@@ -82,8 +92,8 @@ type auditActionKey struct {
 // https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
 var auditLogActions = map[auditActionKey]auditActionMapping{
 	{auditServiceAccounts, "createGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
-	// Databricks documents targetUserId as the added/removed member's id on all four of these
-	// actions, singular and plural alike: https://docs.databricks.com/aws/en/admin/account-settings/audit-logs.
+	// targetUserId holds the added/removed member's id. The plural actions can carry several ids
+	// separated by commas, a format the audit log reference doesn't document but Databricks logs.
 	{auditServiceAccounts, "addPrincipalToGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
 		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalParam: "targetUserId"},
@@ -101,36 +111,34 @@ var auditLogActions = map[auditActionKey]auditActionMapping{
 		grant: &auditGrantMapping{entitlement: groupMemberEntitlement, principalParam: "targetUserId", revoke: true},
 	},
 	{auditServiceAccounts, "removeGroup"}: {resourceType: groupResourceType, idParam: "targetGroupId"},
+	// Workspace entitlements change through two paths that log different rows. The admin UI's
+	// access toggles log changeDatabricksWorkspaceAcl / changeDatabricksSqlAcl (mapped below to their
+	// single role). Workspace SCIM writes log only updateUser/updateGroup, with no ACL row and no
+	// detail about which entitlement changed, so those actions refresh every workspace entitlement role.
+	// Keep both mappings: each covers a path the other doesn't.
 	{auditServiceAccounts, "updateGroup"}: {
 		resourceType: groupResourceType, idParam: "targetGroupId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+		roleNames: entitlements,
 	},
-	// "add"/"delete" are the real user-lifecycle events; deleteUser is a parameterless PII purge.
-	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId"},
+	// "add" is the real principal-lifecycle event; deleteUser is a parameterless PII purge.
+	// "delete" isn't mapped: a deleted principal can't be fetched, so full sync handles it.
+	// Databricks logs service principal lifecycle and admin changes under these user action
+	// names with targetUserId, so the principal type is resolved when the row is mapped.
+	{auditServiceAccounts, "add"}: {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "updateUser"}: {
-		resourceType: userResourceType, idParam: "targetUserId",
-		roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
+		resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true,
+		roleNames: entitlements,
 	},
-	{auditServiceAccounts, "delete"}:         {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "activateUser"}:   {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "deactivateUser"}: {resourceType: userResourceType, idParam: "targetUserId"},
-	// createServicePrincipal/updateServicePrincipal/deleteServicePrincipal: commented out, not
-	// real action_name values. Not found anywhere in the official audit log reference (AWS/GCP/
-	// Azure) — the only documented service-principal action is changeServicePrincipalAcls.
-	// {auditServiceAccounts, "createServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
-	// {auditServiceAccounts, "updateServicePrincipal"}: {
-	// 	resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId",
-	// 	roleNames: []string{ClusterCreateRole, InstancePoolCreateRole},
-	// },
-	// {auditServiceAccounts, "deleteServicePrincipal"}: {resourceType: servicePrincipalResourceType, idParam: "targetServicePrincipalId"},
+	{auditServiceAccounts, "activateUser"}:                 {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
+	{auditServiceAccounts, "deactivateUser"}:               {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
 	{auditServiceAccounts, "changeDatabricksWorkspaceAcl"}: {resourceType: workspaceResourceType, roleNames: []string{WorkspaceAccessRole}},
 	{auditServiceAccounts, "changeDatabricksSqlAcl"}:       {roleNames: []string{SQLAccessRole}},
 	// The reference describes setAdmin as account admin but lists it with the workspace-level
 	// events, so the account-admin role is refreshed too in case it is.
-	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	{auditServiceAccounts, "removeAdmin"}:        {resourceType: userResourceType, idParam: "targetUserId"},
-	{auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
-	{auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", accountRole: AccountAdminRole},
+	{auditServiceAccounts, "setAdmin"}:           {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true, accountRole: AccountAdminRole},
+	{auditServiceAccounts, "removeAdmin"}:        {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true},
+	{auditServiceAccounts, "setAccountAdmin"}:    {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true, accountRole: AccountAdminRole},
+	{auditServiceAccounts, "removeAccountAdmin"}: {resourceType: userResourceType, idParam: "targetUserId", resolvePrincipal: true, accountRole: AccountAdminRole},
 	// Workspace membership (permission assignments). The GCP reference only lists
 	// updatePermissionAssignment; AWS and Azure list all three.
 	{auditServiceWorkspace, "addPermissionAssignment"}:    {resourceType: workspaceResourceType, workspaceIdParam: "workspace_id"},
@@ -232,7 +240,7 @@ type auditEventFeed struct {
 	queryWorkspaceMu sync.Mutex
 	queryWorkspaceID string
 
-	skippedLookupFailures atomic.Int64
+	lookupFailures atomic.Int64
 }
 
 func newAuditEventFeed(
@@ -393,11 +401,14 @@ func (f *auditEventFeed) ListEvents(
 	}
 
 	var events []*v2.Event
-	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents int
-	principalTypes := principalTypeCache{}
+	var unmappedRows, skippedLookupRows, resourceChangeEvents, grantEvents, revokeEvents, duplicateResourceChanges int
+	lookups := newPrincipalLookups(&f.lookupFailures)
+	// Keep only the last resource change per resource in a page: each one triggers a full refetch
+	// (costly for workspace roles). Grant and revoke events are never collapsed.
+	lastResourceChange := map[string]int{}
 	for _, row := range rows {
-		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, principalTypes, row, f.client.GetAccountId(), workspaceLookup)
-		if rowRateLimit != nil {
+		affected, rowRateLimit, err := mapAuditRowToResource(ctx, f.client, lookups, row, f.client.GetAccountId(), workspaceLookup)
+		if hasRateLimitData(rowRateLimit) {
 			annos.WithRateLimiting(rowRateLimit)
 		}
 		// Unmappable rows come back as no error, so this is a real lookup failure. Transient
@@ -407,14 +418,7 @@ func (f *auditEventFeed) ListEvents(
 			if isRetryableLookupError(err) {
 				return nil, nil, annos, fmt.Errorf("databricks-connector: failed to map audit row %s (%s): %w", row.EventID, row.ActionName, err)
 			}
-			if count := f.skippedLookupFailures.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
-				l.Warn("databricks-connector: skipping audit row, principal lookup failed",
-					zap.String("action_name", row.ActionName),
-					zap.String("event_id", row.EventID),
-					zap.Int64("total_occurrences", count),
-					zap.Error(err),
-				)
-			}
+			lookups.warnLookupFailure(ctx, row, err, false)
 			skippedLookupRows++
 			continue
 		}
@@ -450,7 +454,14 @@ func (f *auditEventFeed) ListEvents(
 					CreateGrantEvent: &v2.CreateGrantEvent{Entitlement: a.grant.entitlement, Principal: a.grant.principal},
 				}
 			default:
-				resourceChangeEvents++
+				key := resourceChangeKey(a.resourceId, a.parentResourceId)
+				if prev, seen := lastResourceChange[key]; seen {
+					events[prev] = nil
+					duplicateResourceChanges++
+				} else {
+					resourceChangeEvents++
+				}
+				lastResourceChange[key] = len(events)
 				event.Event = &v2.Event_ResourceChangeEvent{
 					ResourceChangeEvent: &v2.ResourceChangeEvent{ResourceId: a.resourceId, ParentResourceId: a.parentResourceId},
 				}
@@ -458,6 +469,8 @@ func (f *auditEventFeed) ListEvents(
 			events = append(events, event)
 		}
 	}
+
+	events = slices.DeleteFunc(events, func(e *v2.Event) bool { return e == nil })
 
 	hasMore := rawRowCount >= auditLogPageLimit
 	nextCursor, advanced := advanceEventCursor(cursor, rows, lastRawBoundary, hasMore, lagCutoff)
@@ -475,8 +488,11 @@ func (f *auditEventFeed) ListEvents(
 		zap.Int("audit_rows_parsed", len(rows)),
 		zap.Int("audit_rows_unmapped", unmappedRows),
 		zap.Int("audit_rows_skipped_lookup_failure", skippedLookupRows),
+		zap.Int("audit_members_lookup_failure", lookups.memberFailures),
+		zap.Int("audit_members_over_lookup_budget", lookups.membersOverBudget),
 		zap.Int("events_total", len(events)),
 		zap.Int("events_resource_change", resourceChangeEvents),
+		zap.Int("events_resource_change_duplicates_dropped", duplicateResourceChanges),
 		zap.Int("events_create_grant", grantEvents),
 		zap.Int("events_create_revoke", revokeEvents),
 		zap.Bool("has_more", hasMore),
@@ -484,6 +500,20 @@ func (f *auditEventFeed) ListEvents(
 		zap.String("next_window_start_after_event_id", nextCursor.StartAfterEventID),
 	)
 	return events, &pagination.StreamState{Cursor: encoded, HasMore: hasMore}, annos, nil
+}
+
+// hasRateLimitData reports whether rl was parsed from rate-limit headers, so an empty one
+// doesn't overwrite a real one in the annotations.
+func hasRateLimitData(rl *v2.RateLimitDescription) bool {
+	return rl.GetLimit() > 0 || rl.GetRemaining() > 0 || rl.GetStatus() != v2.RateLimitDescription_STATUS_UNSPECIFIED
+}
+
+// resourceChangeKey identifies a resource change by its resource and parent, for dropping
+// duplicates within one ListEvents page.
+func resourceChangeKey(resourceId, parentResourceId *v2.ResourceId) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s",
+		resourceId.GetResourceType(), resourceId.GetResource(),
+		parentResourceId.GetResourceType(), parentResourceId.GetResource())
 }
 
 func isRetryableLookupError(err error) bool {
@@ -535,7 +565,7 @@ type affectedGrant struct {
 func mapAuditRowToResource(
 	ctx context.Context,
 	client *databricks.Client,
-	principalTypes principalTypeCache,
+	lookups *principalLookups,
 	row auditLogRow,
 	accountId string,
 	workspaceLookup map[int64]string,
@@ -565,6 +595,7 @@ func mapAuditRowToResource(
 	}
 
 	var affected []affectedResource
+	var rateLimit *v2.RateLimitDescription
 
 	switch {
 	case mapping.resourceType == workspaceResourceType:
@@ -578,21 +609,30 @@ func mapAuditRowToResource(
 			return nil, nil, nil
 		}
 
-		resourceId := &v2.ResourceId{ResourceType: mapping.resourceType.Id, Resource: nativeId}
-		if mapping.resourceType == groupResourceType {
+		resourceType := mapping.resourceType
+		if mapping.resolvePrincipal {
+			resolved, rl, err := resolvePrincipalType(ctx, client, lookups, nativeId, prefersServicePrincipal(row))
+			rateLimit = rl
+			if err != nil {
+				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve principal for event %s: %w", row.EventID, err)
+			}
+			// No match is expected for a deleted principal; keep the fallback so role refreshes still fire.
+			if resolved != nil {
+				resourceType = resolved
+			}
+		}
+
+		resourceId := &v2.ResourceId{ResourceType: resourceType.Id, Resource: nativeId}
+		if resourceType == groupResourceType {
 			resourceId.Resource = groupResourceId(ctx, nativeId, accountParent)
 		}
 
 		if mapping.grant != nil {
-			g, rateLimit, err := buildAffectedGrant(ctx, client, principalTypes, row, mapping.grant, resourceId, accountParent)
+			grants, rateLimit, err := buildAffectedGrants(ctx, client, lookups, row, mapping.grant, resourceId, accountParent)
 			if err != nil {
 				return nil, rateLimit, fmt.Errorf("databricks-connector: failed to resolve grant principal for event %s: %w", row.EventID, err)
 			}
-			if g == nil {
-				// No resolvable principal: still refresh the group's grants.
-				return []affectedResource{{resourceId: resourceId, parentResourceId: accountParent}}, rateLimit, nil
-			}
-			return []affectedResource{{grant: g}}, rateLimit, nil
+			return grants, rateLimit, nil
 		}
 
 		affected = append(affected, affectedResource{resourceId: resourceId, parentResourceId: accountParent})
@@ -614,56 +654,176 @@ func mapAuditRowToResource(
 		}
 	}
 
-	return affected, nil, nil
+	return affected, rateLimit, nil
 }
 
-// buildAffectedGrant builds the entitlement (on entitlementResourceId/parent) and principal a
-// grant-mapped row names, skipping rows missing the principal's native id.
-func buildAffectedGrant(
+// buildAffectedGrants returns a grant or revoke on the entitlement (on entitlementResourceId/parent)
+// for each member the row names, plus one refresh of that resource when any member is unmatched,
+// fails a non-retryable lookup, or is over the poll's lookup budget. Only retryable errors are returned.
+func buildAffectedGrants(
 	ctx context.Context,
 	client *databricks.Client,
-	principalTypes principalTypeCache,
+	lookups *principalLookups,
 	row auditLogRow,
 	gm *auditGrantMapping,
 	entitlementResourceId, parent *v2.ResourceId,
-) (*affectedGrant, *v2.RateLimitDescription, error) {
-	principalNativeId, ok := row.RequestParams[gm.principalParam]
-	if !ok || principalNativeId == "" {
-		return nil, nil, nil
+) ([]affectedResource, *v2.RateLimitDescription, error) {
+	refresh := affectedResource{resourceId: entitlementResourceId, parentResourceId: parent}
+	members := auditGrantMembers(row, gm.principalParam)
+
+	l := ctxzap.Extract(ctx)
+	if len(members) > 1 {
+		l.Debug("databricks-connector: buildAffectedGrants: audit row names several members",
+			zap.String("event_id", row.EventID),
+			zap.String("action_name", row.ActionName),
+			zap.Int("member_count", len(members)),
+			zap.Bool("capped", len(members) > maxAuditMembershipLookups),
+		)
+	}
+	if len(members) == 0 || len(members) > maxAuditMembershipLookups {
+		return []affectedResource{refresh}, nil, nil
 	}
 
-	principalType, rateLimit, err := resolvePrincipalType(ctx, client, principalTypes, principalNativeId)
-	if err != nil {
-		return nil, rateLimit, err
-	}
-	if principalType == nil {
-		return nil, rateLimit, nil
+	entitlement := ent.NewAssignmentEntitlement(&v2.Resource{Id: entitlementResourceId, ParentResourceId: parent}, gm.entitlement)
+
+	var rateLimit *v2.RateLimitDescription
+	affected := make([]affectedResource, 0, len(members)+1)
+	unresolved := 0
+	for _, m := range members {
+		if _, cached := lookups.types[m.id]; !cached {
+			if lookups.remainingMemberLookups <= 0 {
+				lookups.membersOverBudget++
+				unresolved++
+				continue
+			}
+			lookups.remainingMemberLookups--
+		}
+
+		principalType, rl, err := resolvePrincipalType(ctx, client, lookups, m.id, m.servicePrincipalFirst)
+		if rl != nil {
+			rateLimit = rl
+		}
+		if err != nil {
+			if isRetryableLookupError(err) {
+				return nil, rateLimit, err
+			}
+			lookups.warnLookupFailure(ctx, row, err, true)
+			lookups.memberFailures++
+			unresolved++
+			continue
+		}
+		if principalType == nil {
+			unresolved++
+			continue
+		}
+
+		principalResourceId := m.id
+		if principalType == groupResourceType {
+			principalResourceId = groupResourceId(ctx, m.id, parent)
+		}
+		affected = append(affected, affectedResource{grant: &affectedGrant{
+			entitlement: entitlement,
+			principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: principalType.Id, Resource: principalResourceId}},
+			revoke:      gm.revoke,
+		}})
 	}
 
-	principalResourceId := principalNativeId
-	if principalType == groupResourceType {
-		principalResourceId = groupResourceId(ctx, principalNativeId, parent)
+	if unresolved > 0 {
+		l.Debug("databricks-connector: buildAffectedGrants: refreshing group for unresolved members",
+			zap.String("event_id", row.EventID),
+			zap.String("action_name", row.ActionName),
+			zap.Int("unresolved_member_count", unresolved),
+		)
+		affected = append(affected, refresh)
 	}
-
-	entitlementResource := &v2.Resource{Id: entitlementResourceId, ParentResourceId: parent}
-	return &affectedGrant{
-		entitlement: ent.NewAssignmentEntitlement(entitlementResource, gm.entitlement),
-		principal:   &v2.Resource{Id: &v2.ResourceId{ResourceType: principalType.Id, Resource: principalResourceId}},
-		revoke:      gm.revoke,
-	}, rateLimit, nil
+	return affected, rateLimit, nil
 }
 
-// principalTypeCache memoizes resolvePrincipalType for one ListEvents call, so a principal
-// named on many rows is looked up once. A nil value means the id matched no principal.
-type principalTypeCache map[string]*v2.ResourceType
+type auditGrantMember struct {
+	id                    string
+	servicePrincipalFirst bool
+}
+
+// auditGrantMembers splits the row's comma-separated principal ids, dropping blanks and repeats.
+// targetUserName only steers the lookup order when it lists one name per id.
+func auditGrantMembers(row auditLogRow, principalParam string) []auditGrantMember {
+	rawIDs := splitAuditList(row.RequestParams[principalParam])
+	rawNames := splitAuditList(row.RequestParams["targetUserName"])
+	namesAligned := len(rawNames) == len(rawIDs)
+
+	seen := make(map[string]struct{}, len(rawIDs))
+	members := make([]auditGrantMember, 0, len(rawIDs))
+	for i, id := range rawIDs {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		members = append(members, auditGrantMember{
+			id:                    id,
+			servicePrincipalFirst: namesAligned && isApplicationId(rawNames[i]),
+		})
+	}
+	return members
+}
+
+func splitAuditList(v string) []string {
+	parts := strings.Split(v, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
+}
+
+// principalLookups is the principal lookup state for one ListEvents call. types memoizes
+// resolvePrincipalType, where a nil value means the id matched no principal.
+type principalLookups struct {
+	types                  map[string]*v2.ResourceType
+	remainingMemberLookups int
+	memberFailures         int
+	membersOverBudget      int
+	// failures is the feed's process-wide count, which samples the lookup-failure warning.
+	failures *atomic.Int64
+}
+
+func newPrincipalLookups(failures *atomic.Int64) *principalLookups {
+	if failures == nil {
+		failures = &atomic.Int64{}
+	}
+	return &principalLookups{
+		types:                  map[string]*v2.ResourceType{},
+		remainingMemberLookups: maxAuditMemberLookupsPerPoll,
+		failures:               failures,
+	}
+}
+
+func (p *principalLookups) warnLookupFailure(ctx context.Context, row auditLogRow, err error, groupRefresh bool) {
+	if count := p.failures.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
+		ctxzap.Extract(ctx).Warn("databricks-connector: principal lookup failed for audit row",
+			zap.String("action_name", row.ActionName),
+			zap.String("event_id", row.EventID),
+			zap.Bool("fallback_to_group_refresh", groupRefresh),
+			zap.Int64("total_occurrences", count),
+			zap.Error(err),
+		)
+	}
+}
 
 // resolvePrincipalType finds which resource type nativeId belongs to, trying user, group, then
 // service principal in that order via the Account API and stopping at the first match: the audit log's
 // targetUserId doesn't record which kind of principal it actually is. Returns a nil type (no
 // error) if nativeId doesn't match any of the three. Results, including no match, are cached
-// in principalTypes; errors aren't.
-func resolvePrincipalType(ctx context.Context, client *databricks.Client, principalTypes principalTypeCache, nativeId string) (*v2.ResourceType, *v2.RateLimitDescription, error) {
-	if resourceType, ok := principalTypes[nativeId]; ok {
+// in lookups; errors aren't. servicePrincipalFirst only reorders the lookups.
+func resolvePrincipalType(
+	ctx context.Context,
+	client *databricks.Client,
+	lookups *principalLookups,
+	nativeId string,
+	servicePrincipalFirst bool,
+) (*v2.ResourceType, *v2.RateLimitDescription, error) {
+	if resourceType, ok := lookups.types[nativeId]; ok {
 		return resourceType, nil, nil
 	}
 
@@ -681,6 +841,9 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, princi
 			return principalExists(client.GetServicePrincipal(ctx, "", nativeId))
 		}},
 	}
+	if servicePrincipalFirst {
+		candidates[0], candidates[2] = candidates[2], candidates[0]
+	}
 
 	var rateLimit *v2.RateLimitDescription
 	for _, candidate := range candidates {
@@ -696,7 +859,7 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, princi
 				zap.String("principal_id", nativeId),
 				zap.String("resource_type", candidate.resourceType.Id),
 			)
-			principalTypes[nativeId] = candidate.resourceType
+			lookups.types[nativeId] = candidate.resourceType
 			return candidate.resourceType, rateLimit, nil
 		}
 	}
@@ -704,8 +867,20 @@ func resolvePrincipalType(ctx context.Context, client *databricks.Client, princi
 	ctxzap.Extract(ctx).Debug("databricks-connector: resolvePrincipalType: audit principal matched no user, group or service principal",
 		zap.String("principal_id", nativeId),
 	)
-	principalTypes[nativeId] = nil
+	lookups.types[nativeId] = nil
 	return nil, rateLimit, nil
+}
+
+// prefersServicePrincipal reports whether the row's targetUserName looks like a service
+// principal: Databricks logs a service principal's application ID (a UUID) there, and a
+// user's username for users.
+func prefersServicePrincipal(row auditLogRow) bool {
+	return isApplicationId(row.RequestParams["targetUserName"])
+}
+
+func isApplicationId(name string) bool {
+	_, err := uuid.Parse(name)
+	return err == nil
 }
 
 // principalExists adapts a client Get* call into a found/not-found result: a 404 means not
@@ -802,6 +977,8 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 	// with a composite > predicate, so progress never stalls even if many rows share one
 	// event_time (see advanceEventCursor); this holds as long as event_id compares consistently
 	// under Databricks SQL's ">"/ORDER BY, which is true for this table's opaque IDs.
+	// The table also logs requests Databricks rejected (e.g. a 403 on removePrincipalFromGroup),
+	// so only successful ones are read; a failed one would otherwise become a false grant or revoke.
 	statement := fmt.Sprintf(`
 		SELECT event_id, event_time, workspace_id, action_name, service_name, request_params
 		FROM system.access.audit
@@ -810,6 +987,7 @@ func (f *auditEventFeed) queryAuditLog(ctx context.Context, workspaceId string, 
 		  AND event_time <= :lag_cutoff
 		  AND service_name IN (%s)
 		  AND action_name IN (%s)
+		  AND response.status_code = 200
 		ORDER BY event_time ASC, event_id ASC
 		LIMIT %d
 	`, quotedInClause(auditLogServiceNames()), quotedInClause(auditLogActionNames()), auditLogPageLimit)

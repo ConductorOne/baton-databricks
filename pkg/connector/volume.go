@@ -197,7 +197,7 @@ func (b *volumeBuilder) Entitlements(context.Context, *v2.Resource, rs.SyncOpAtt
 func (b *volumeBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	ctx = context.WithValue(ctx, syncSessionKey{}, attr.Session)
 
-	return b.syncGrants(ctx, resource, attr)
+	return b.syncGrants(ctx, resource, attr, nil)
 }
 
 func (b *volumeBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {

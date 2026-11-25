@@ -51,7 +51,8 @@ type LedgerRow struct {
 	WorkRevision uint64
 	Collection   *LedgerCollectionStats
 	Identity     LedgerActionIdentity
-	// Empty when the action finished, and after a scrub (Scrubbed).
+	// Empty when the action finished, and after a scrub (Scrubbed). On a
+	// Restarted row it is the token the action restarts at.
 	NextPageToken string
 	Children      []LedgerChild
 	Attempt       string
@@ -64,11 +65,15 @@ type LedgerRow struct {
 
 	Replayed          bool
 	TypeScopedPlanned bool
+	WindowPages       uint32 `json:"window_pages,omitempty"`
 	// Scrubbed: tokens replaced by hashes at seal; Identity.PageToken,
 	// NextPageToken and the children's tokens are empty.
 	Scrubbed bool
 	// Spawned: the page's own action was a spawned cursor (see LedgerChild).
 	Spawned bool
+	// Restarted: the connector invalidated the page's token; the work item
+	// continues at NextPageToken (SetRestart). Not a finished action.
+	Restarted bool
 
 	ObservationsRecorded     bool
 	ConnectorAttempts        uint64
@@ -171,6 +176,7 @@ type RunStats struct {
 	StepDurationsMs    map[string]int64
 	ConnectorCallStats map[string]CallStat
 	SessionStoreStats  map[string]CallStat
+	Counters           map[string]uint64
 	CompletedActions   uint64
 }
 
@@ -199,6 +205,16 @@ type PageWriter interface {
 	// childKeys align with row.Children; nonempty keys claim unique scheduling
 	// relations in that batch, independently of pagination request identity.
 	SetPendingWork(work LedgerWork, childKeys ...string) error
+	// Declares the page a restart of its pending work: Commit requires
+	// row.Restarted, refuses staged records, children, or claims, and under
+	// the write lock refuses with RestartLimitError when the item's
+	// restart list has reached limits.PerAction or the summed
+	// LedgerActionRestarts counter (this page's bucket included) would
+	// exceed limits.PerSync. On commit the item moves to revision + 1 at
+	// row.NextPageToken with the expired revision appended to Restarts
+	// and every other field unchanged; a "" token is a restart, not a
+	// finish.
+	SetRestart(limits RestartLimits) error
 
 	PutResourceTypes(ctx context.Context, resourceTypes ...*v2.ResourceType) error
 	PutResources(ctx context.Context, resources ...*v2.Resource) error
