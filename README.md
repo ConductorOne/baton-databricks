@@ -256,7 +256,7 @@ The `enable_user` and `disable_user` actions set an account user's active status
 Both take a required `user_id` argument: the Databricks account user ID, digits
 only. Only the status changes; the user's permissions and memberships are kept.
 Running an action on a user already in the target state succeeds. Databricks can
-take up to about three minutes to apply the change. The service principal needs the
+take a few minutes to apply the change. The service principal needs the
 Account admin role.
 
 # Contributing, Support and Issues
