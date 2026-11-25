@@ -11,6 +11,7 @@ sidebarTitle: "Databricks"
 | Resource | Sync | Provision | Delete |
 | :--- | :--- | :--- | :--- |
 | Accounts | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |  |
+| Catalogs | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |  |
 | Groups | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |  |
 | Metastores | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |  |
 | Roles | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> | <Icon icon="square-check" iconType="solid"  color="#c937ae"/> |  |
@@ -49,25 +50,29 @@ The service principal that runs these actions needs the **Account admin** role. 
 The `user_id` value is the user's Databricks account user ID: a string of digits, such as `1234567890123456`. The actions reject usernames, email addresses, and any value that contains a character other than 0-9 with the error "user ID must contain only digits 0-9". An ID that belongs to a group or service principal, or that does not exist, returns a not-found error. Databricks ignores leading zeros, so `0001234567890123456` acts on the same user as `1234567890123456`. Within a C1 automation, C1 fills this value from the target account.
 </Note>
 
-## Metastore access in C1
+## Metastore and catalog access in C1
 
-The connector syncs the Databricks [Unity Catalog](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges)
-metastore as a C1 resource. Each privilege Databricks records on it
-(`CREATE_CATALOG`, `READ_METADATA`, `USE_SHARE` and so on) becomes an
-entitlement in C1, so you can review who holds it, request it, and revoke it
-for users, groups and service principals. A grant held by a group is expandable
-so C1 can resolve the group's members as holders. Ownership is shown as a
-read-only `owner` entitlement — it cannot be granted or revoked through C1.
+The connector syncs Databricks [Unity Catalog](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges)
+metastores and the catalogs in them as C1 resources. Each privilege Databricks
+records on one of them (`CREATE_CATALOG` on a metastore, `USE_CATALOG` or
+`SELECT` on a catalog, and so on) becomes an entitlement in C1, so you can
+review who holds it, request it, and revoke it for users, groups and service
+principals. A grant held by a group is expandable so C1 can resolve the
+group's members as holders. Ownership is shown as a read-only `owner`
+entitlement — it cannot be granted or revoked through C1.
 
 <Note>
-The Metastores resource type is turned off by default. Turn it on from the connector's configuration page in C1.
+The Metastores and Catalogs resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Catalogs sync under their metastore, so turn on Metastores as well as Catalogs; turning on Catalogs alone syncs nothing. Both use the same OAuth credentials; no additional configuration fields are needed.
 </Note>
 
 <Note>
 **Notes on Unity Catalog access in C1:**
 
 - Ownership is shown but cannot be provisioned. An owner that is not a Databricks account identity, such as a system account or a workspace admins group, is not shown at all.
-- **MANAGE** and **ALL_PRIVILEGES** are not offered as entitlements, because Databricks rejects both at the metastore level.
+- **MANAGE** and **ALL_PRIVILEGES** are not offered on a metastore, because Databricks rejects both at that level.
+- A catalog is synced when any running workspace in scope attached to its metastore lists it, and the same catalog name is kept once per metastore. A catalog that only excluded workspaces can reach is not synced.
+- The built-in `system` catalog is never synced, and neither is any other catalog Databricks marks as a system catalog, whoever owns it.
+- If a catalog becomes unreachable, access requests can fail until the connector can distinguish deletion from a binding or visibility change. Catalog ownership or **MANAGE** alone cannot prove deletion; that check requires the **Metastore Admin**.
 - Unity Catalog tags are not synced.
 </Note>
 
@@ -207,7 +212,33 @@ There is no scope to pick in the console. The connector requests the `all-apis` 
 </Steps>
 
 <Warning>
-Without this, the metastore sync fails with a permission error naming the metastore. Databricks returns a partial privilege list rather than an error, and C1 would treat the missing grants as revoked.
+Without workspace **Admin** or **Metastore Admin**, the metastore sync fails with a permission error naming the metastore. Databricks shows a caller only the grants it is allowed to see, so reporting that shorter list would make C1 treat the rest as revoked.
+</Warning>
+
+### Let the service principal read catalog privileges
+
+Skip this section if you are not syncing catalogs, or if the service principal is already the **Metastore Admin**. Databricks shows a catalog's full privilege list only to the metastore admin, the service principal that owns the catalog itself, or a holder of **MANAGE** on it. The connector matches ownership against the service principal itself, so a catalog owned by a group it belongs to does not count. **Admin** assigned directly to the service principal on a workspace is enough only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`).
+
+Otherwise, grant **MANAGE** and **USE CATALOG** on each catalog you want synced. **MANAGE** alone is not enough: Databricks does not return a catalog at all unless the caller is the metastore admin, owns it, or holds **USE CATALOG** on it, and a catalog it does not return is one C1 removes.
+
+<Steps>
+  <Step>
+  In the workspace, open **Catalog Explorer** and open the catalog.
+  </Step>
+  <Step>
+  Select **Permissions**, then click **Grant**.
+  </Step>
+  <Step>
+  Select the service principal, check **MANAGE** and **USE CATALOG**, and confirm.
+  </Step>
+</Steps>
+
+<Warning>
+For a discovered catalog that is not excluded by the system-catalog rule above, missing these permissions fails the sync naming that catalog. Databricks would otherwise return only the privileges the caller can see, and reporting that short list would make C1 delete the grants it cannot read. Failing keeps what C1 already has.
+
+The connector asks every running workspace in scope attached to the metastore, so a catalog bound to one of those workspaces is included. A catalog the service principal cannot see on any of them is not, and C1 removes it and its grants.
+
+If the service principal cannot list catalogs at all through one of those workspaces, the connector cannot tell which catalogs are there, so the sync fails naming the metastore and that workspace instead of removing the catalogs it could not list. Give the service principal **Admin** on that workspace, or leave that workspace out with **Workspaces** or **Exclude Workspaces**.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
@@ -293,8 +324,8 @@ To complete this task, you'll need:
   <Step>
   Optionally, narrow what the connector syncs:
 
-    - **Workspaces**: limit the sync to these workspaces, by workspace name, deployment name, or numeric workspace ID. This also scopes which metastores sync: only a metastore attached to one of these workspaces is synced, so narrowing the list removes the other metastores and their grants from C1.
-    - **Exclude Workspaces**: workspaces to leave out of the sync, by workspace name, deployment name, or numeric workspace ID. A metastore attached only to excluded workspaces is not synced either, and C1 removes it and its grants.
+    - **Workspaces**: limit the sync to these workspaces, by workspace name, deployment name, or numeric workspace ID. This also scopes which metastores and catalogs sync: only those a listed workspace reaches are synced, so narrowing the list removes the others and their grants from C1.
+    - **Exclude Workspaces**: workspaces to leave out of the sync, by workspace name, deployment name, or numeric workspace ID. A metastore or catalog that only excluded workspaces reach is not synced either, and C1 removes it and its grants.
 
   Fill in **Workspaces** or **Exclude Workspaces**, not both.
   </Step>

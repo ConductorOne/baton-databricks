@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/uhttp"
@@ -72,6 +73,25 @@ func (e *APIError) Unwrap() error {
 	return e.Err
 }
 
+// HasErrorCode reports a 404 whose body named one of the given error codes.
+func (e *APIError) HasErrorCode(errorCodes ...string) bool {
+	if e == nil || e.StatusCode != http.StatusNotFound || e.ErrorCode == "" {
+		return false
+	}
+
+	return slices.Contains(errorCodes, e.ErrorCode)
+}
+
+// IsSecurableGone reports a 404 for a named securable that no longer exists.
+// A 404 with any other error_code, or with none, is a routing or permission
+// miss: Databricks answers an unbound workspace with an error too, so only the
+// code proves the securable is gone.
+func IsSecurableGone(err error, errorCodes ...string) bool {
+	var apiErr *APIError
+
+	return errors.As(err, &apiErr) && apiErr.HasErrorCode(errorCodes...)
+}
+
 // nameWorkspace403Remedy enriches a 403 from a workspace-scoped call with the
 // fix: excluding the workspace scopes it out of the sync. workspaceId is empty
 // for account-scoped calls, where a 403 is not a per-workspace access problem,
@@ -129,8 +149,9 @@ func (c *Client) Get(
 // The cache holds a GET 200 for an hour and a PATCH does not invalidate it, so a
 // read that decides whether a write still has to happen must not be served from
 // it: the write would be skipped against a page that predates the last change.
-// uhttp still records the fresh response, so the entry a later reader sees is the
-// one this call just observed.
+// Cache-Control is part of the cache key, so the entry this call writes is not
+// the one a normal read looks up: the shared sync entry is left as it was
+// rather than refreshed.
 func (c *Client) GetUncached(
 	ctx context.Context,
 	urlAddress *url.URL,
