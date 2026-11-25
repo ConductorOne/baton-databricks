@@ -416,6 +416,25 @@ func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string,
 	)
 }
 
+// FindGroupByName resolves a single group by displayName via a filtered list
+// (filter=displayName eq '<name>', count=1). Vendor semantics: on the CI tenant the
+// id-filtered read came back projection-stripped while the displayName-filtered read
+// with NO attributes param returned meta twice (actions runs 45719189560/45720792196),
+// making this the only read shape proven to carry meta for account groups. Same empty
+// result semantics as FindGroupByID. Mirrors FindGroupID's filter construction.
+func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName string, vars ...Vars) (
+	[]Group,
+	*uint,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return c.ListGroups(
+		ctx,
+		workspaceId,
+		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName))}, vars...)...,
+	)
+}
+
 func (c *Client) getGroup(
 	ctx context.Context,
 	get func(context.Context, *url.URL, interface{}, ...Vars) (*v2.RateLimitDescription, error),

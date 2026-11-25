@@ -3,13 +3,13 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
-	"fmt"
 	"testing"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -454,47 +454,84 @@ func TestGrantsEmitsGrantForAccountGroupWithRole(t *testing.T) {
 }
 
 // Stripped multi-group list responses ({"id","displayName"} only) must be classified via
-// a filtered single-group list fallback instead of failing the sync or silently dropping
-// grants. The vendor strips the explicit attributes=roles,entitlements,meta projection
-// from account-plane multi-group lists, filtered lists AND single-group GETs (observed on
-// the CI tenant, runs 45719189560/45720792196), while a filtered list sent WITHOUT an
-// attributes param (default projection) returns meta.
-func TestGrantsClassifiesStrippedListViaFilteredReadFallback(t *testing.T) {
+// the fallback read chain instead of failing the sync or silently dropping grants.
+// Vendor evidence (CI tenant runs 45719189560/45720792196): the account plane strips the
+// explicit attributes projection from lists/filtered lists/GETs, and even an id-filtered
+// default-projection read came back stripped — but a displayName-filtered default-
+// projection read returned meta twice, and the id,displayName projection is honored.
+func TestGrantsClassifiesStrippedListViaFallbackChain(t *testing.T) {
+	roleWithAdmin := `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}`
+	roleWithout := `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`
+	workspaceGroup := `{"id":"g1","displayName":"ws-group","meta":{"resourceType":"WorkspaceGroup"}}`
+	noMeta := `{"id":"g1","displayName":""}`
+
 	tests := []struct {
-		name          string
-		filteredBody  string
-		filteredTotal int
-		wantGrants    int
-		wantErrCode   codes.Code
+		name           string
+		idDefaultBody  string
+		idDefaultTotal int
+		namedBody      string
+		nameBody       string
+		nameTotal      int
+		wantGrants     int
+		wantFallback   int
+		wantErr        bool
 	}{
 		{
-			name:          "filtered read returns account group with the role",
-			filteredBody:  `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}`,
-			filteredTotal: 1,
-			wantGrants:    1,
+			name:           "id-filtered default read carries meta and the role",
+			idDefaultBody:  roleWithAdmin,
+			idDefaultTotal: 1,
+			wantGrants:     1,
+			wantFallback:   1,
 		},
 		{
-			name:          "filtered read returns account group without the role",
-			filteredBody:  `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
-			filteredTotal: 1,
-			wantGrants:    0,
+			name:           "id-filtered default read carries meta, workspace group",
+			idDefaultBody:  workspaceGroup,
+			idDefaultTotal: 1,
+			wantGrants:     0,
+			wantFallback:   1,
 		},
 		{
-			name:          "filtered read returns workspace group",
-			filteredBody:  `{"id":"g1","displayName":"ws-group","meta":{"resourceType":"WorkspaceGroup"}}`,
-			filteredTotal: 1,
-			wantGrants:    0,
+			name:           "id-filtered default read carries meta, no role",
+			idDefaultBody:  roleWithout,
+			idDefaultTotal: 1,
+			wantGrants:     0,
+			wantFallback:   1,
 		},
 		{
-			name:          "filtered read still returns no meta",
-			filteredBody:  `{"id":"g1","displayName":"no-meta"}`,
-			filteredTotal: 1,
-			wantErrCode:   codes.Internal,
+			name:           "id-filtered stripped, name-filtered default read carries meta with role",
+			idDefaultBody:  noMeta,
+			idDefaultTotal: 1,
+			namedBody:      `{"id":"g1","displayName":"admins"}`,
+			nameBody:       roleWithAdmin,
+			nameTotal:      1,
+			wantGrants:     1,
+			wantFallback:   3,
 		},
 		{
-			name:          "filtered read is empty, group vanished mid-sync",
-			filteredTotal: 0,
-			wantGrants:    0,
+			name:           "id-filtered stripped, name-filtered carries meta without role",
+			idDefaultBody:  noMeta,
+			idDefaultTotal: 1,
+			namedBody:      `{"id":"g1","displayName":"admins"}`,
+			nameBody:       roleWithout,
+			nameTotal:      1,
+			wantGrants:     0,
+			wantFallback:   3,
+		},
+		{
+			name:           "id-filtered stripped and name-filtered still no meta: fail closed",
+			idDefaultBody:  noMeta,
+			idDefaultTotal: 1,
+			namedBody:      `{"id":"g1","displayName":"admins"}`,
+			nameBody:       noMeta,
+			nameTotal:      1,
+			wantFallback:   3,
+			wantErr:        true,
+		},
+		{
+			name:           "id-filtered empty, group vanished mid-sync: skip",
+			idDefaultTotal: 0,
+			wantGrants:     0,
+			wantFallback:   1,
 		},
 	}
 
@@ -503,28 +540,35 @@ func TestGrantsClassifiesStrippedListViaFilteredReadFallback(t *testing.T) {
 			var fallbackReads int
 			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				if req.URL.Query().Get("filter") == "id eq 'g1'" {
+				filter := req.URL.Query().Get("filter")
+				attrs := req.URL.Query().Get("attributes")
+				switch {
+				case filter == "id eq 'g1'" && attrs == "":
 					fallbackReads++
-					// The fallback must NOT send an attributes param: an explicit projection
-					// is exactly what this tenant's account-plane API strips.
-					if attrs := req.URL.Query().Get("attributes"); attrs != "" {
-						t.Errorf("fallback read sent attributes=%q, want none (default projection)", attrs)
+					if attrs2 := req.URL.Query().Get("attributes"); attrs2 != "" {
+						t.Errorf("default-projection read sent attributes=%q, want none", attrs2)
 					}
-					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":%d}`, tt.filteredBody, tt.filteredTotal)
-					return
+					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":%d}`, tt.idDefaultBody, tt.idDefaultTotal)
+				case filter == "id eq 'g1'" && attrs == "id,displayName":
+					fallbackReads++
+					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":1}`, tt.namedBody)
+				case filter == "displayName eq 'admins'" && attrs == "":
+					fallbackReads++
+					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":%d}`, tt.nameBody, tt.nameTotal)
+				default:
+					// Every group list page is stripped: id and displayName only.
+					_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":""}],"totalResults":1}`))
 				}
-				// Every group list page is stripped: id and displayName only.
-				_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":""}],"totalResults":1}`))
 			})
 
 			role := testRoleEntitlement(t, false).Resource
 			grants, err := collectGrants(t, r, role)
-			if tt.wantErrCode != 0 {
+			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Grants returned nil error, want fail-closed on still-unknown meta")
 				}
-				if code := status.Code(err); code != tt.wantErrCode {
-					t.Errorf("error code = %s, want %s", code, tt.wantErrCode)
+				if code := status.Code(err); code != codes.Internal {
+					t.Errorf("error code = %s, want %s", code, codes.Internal)
 				}
 				if !strings.Contains(err.Error(), "missing meta.resourceType") {
 					t.Errorf("error %q does not explain the missing meta.resourceType", err)
@@ -543,10 +587,8 @@ func TestGrantsClassifiesStrippedListViaFilteredReadFallback(t *testing.T) {
 			if groupGrants != tt.wantGrants {
 				t.Errorf("Grants returned %d group-principal grants, want %d", groupGrants, tt.wantGrants)
 			}
-			// Only meta-less list entries trigger fallback reads: one per group in the
-			// stripped page.
-			if fallbackReads != 1 {
-				t.Errorf("filtered single-group read count = %d, want 1", fallbackReads)
+			if fallbackReads != tt.wantFallback {
+				t.Errorf("fallback read count = %d, want %d", fallbackReads, tt.wantFallback)
 			}
 		})
 	}

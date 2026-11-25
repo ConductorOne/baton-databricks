@@ -229,16 +229,17 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		// check if group has the role
 		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
-			// Classify the group. Groups without meta in the list object get one fallback
-			// filtered single-group read. Vendor evidence (CI tenant, runs 45715149358 /
-			// 45719189560 / 45720792196): the account-plane SCIM API strips an explicit
-			// attributes=roles,entitlements,meta projection from multi-group lists, filtered
-			// lists AND direct single-group GETs, but returns meta when no attributes param
-			// is sent (default projection) — so a meta-less list entry is not proof the
-			// group is unclassifiable. The fallback deliberately requests no attributes; the
-			// role check uses whatever roles/entitlements the default projection carries.
-			// Only meta-less entries trigger the fallback read, and results are not cached
-			// across calls.
+			// Classify the group. Groups without meta in the list object get a fallback
+			// read chain. Vendor evidence (CI tenant, runs 45715149358 / 45719189560 /
+			// 45720792196): the account-plane SCIM API strips an explicit
+			// attributes=roles,entitlements,meta projection from multi-group lists,
+			// filtered lists AND single-group GETs; a filtered read with NO attributes
+			// param filtered by id also came back stripped; but a displayName-filtered
+			// read with no attributes param returned meta twice. So: read by id with the
+			// default projection; if that still carries no meta, resolve the group's
+			// displayName via the honored id,displayName projection and re-read by
+			// displayName. Only meta-less entries trigger fallback reads, and results
+			// are not cached across calls.
 			if g.GroupClass() == databricks.UnknownGroupClass {
 				l.Debug("databricks-connector: list entry missing meta; classifying via filtered single-group read",
 					zap.String("group_id", g.ID))
@@ -253,6 +254,29 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 					continue
 				}
 				g = found[0]
+				if g.GroupClass() == databricks.UnknownGroupClass {
+					// The default-projection id-filtered read was stripped too. Resolve the
+					// display name (the id,displayName projection IS honored) and read by
+					// name, the one shape proven to carry meta on this tenant.
+					named, _, _, err := r.client.FindGroupByID(ctx, workspaceId, g.ID, databricks.NewGroupAttrVars())
+					if err != nil {
+						return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s display name to classify it: %w", g.ID, err)
+					}
+					if len(named) == 0 {
+						// Vanished between reads.
+						l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
+						continue
+					}
+					byName, _, _, err := r.client.FindGroupByName(ctx, workspaceId, named[0].DisplayName)
+					if err != nil {
+						return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, named[0].DisplayName, err)
+					}
+					if len(byName) != 0 {
+						g = byName[0]
+					}
+					// byName empty or still meta-less: g keeps no meta and the switch below
+					// fails closed.
+				}
 			}
 
 			switch g.GroupClass() {
