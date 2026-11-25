@@ -418,9 +418,58 @@ func TestGrantsFailsOnUnknownMeta(t *testing.T) {
 	if err == nil {
 		t.Fatal("Grants returned nil error, want failure on missing meta")
 	}
+	if status.Code(err) != codes.Internal {
+		t.Errorf("error code = %s, want %s", status.Code(err), codes.Internal)
+	}
 	if !strings.Contains(err.Error(), "databricks-connector:") || !strings.Contains(err.Error(), "missing meta.resourceType") {
 		t.Errorf("error %q does not explain the missing meta.resourceType", err)
 	}
+}
+
+// An account group (meta.resourceType "Group") that holds the role must emit a
+// grant from Grants; a regression in the AccountGroup branch would otherwise go
+// unnoticed because workspace groups are skipped.
+func TestGrantsEmitsGrantForAccountGroupWithRole(t *testing.T) {
+	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}],"totalResults":1}`))
+	})
+
+	role := testRoleEntitlement(t, false).Resource
+	grants, err := collectGrants(t, r, role)
+	if err != nil {
+		t.Fatalf("Grants returned error: %v", err)
+	}
+	// The same JSON doubles as the user/sp pages, so filter to group principals.
+	var groupGrants int
+	for _, g := range grants {
+		if g.Principal.Id.ResourceType == groupResourceType.Id {
+			groupGrants++
+		}
+	}
+	if groupGrants != 1 {
+		t.Errorf("Grants returned %d group-principal grants for an account group with the role, want 1", groupGrants)
+	}
+}
+
+// collectGrants drives Grants to completion, following next-page tokens, and
+// returns every grant emitted.
+func collectGrants(t *testing.T, r *roleBuilder, role *v2.Resource) ([]*v2.Grant, error) {
+	t.Helper()
+	token := ""
+	var all []*v2.Grant
+	for range 10 {
+		grants, res, err := r.Grants(context.Background(), role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, grants...)
+		token = res.NextPageToken
+		if token == "" {
+			break
+		}
+	}
+	return all, nil
 }
 
 // Known workspace-scoped groups are skipped with a Debug log, and the sync succeeds.

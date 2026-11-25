@@ -206,7 +206,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token := prepareNextToken(page, len(users), total)
+		token, err := prepareNextToken(page, len(users), total)
 		err = bag.Next(token)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -230,7 +230,9 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			switch g.GroupClass() {
 			case databricks.UnknownGroupClass:
 				return nil, nil, uhttp.WrapErrors(codes.Internal,
-					fmt.Sprintf("databricks-connector: group %s (%s) missing meta.resourceType in SCIM response despite attributes=roles,entitlements,meta; cannot classify account vs workspace group; failing sync so existing grants are preserved", g.ID, g.DisplayName))
+					fmt.Sprintf("databricks-connector: group %s (%s) missing meta.resourceType in SCIM response "+
+						"despite attributes=roles,entitlements,meta; cannot classify account vs workspace group; "+
+						"failing sync so existing grants are preserved", g.ID, g.DisplayName))
 			case databricks.WorkspaceGroup:
 				l.Debug("databricks-connector: skipping workspace-scoped group", zap.String("group_id", g.ID))
 				continue
@@ -252,7 +254,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token := prepareNextToken(page, len(groups), total)
+		token, err := prepareNextToken(page, len(groups), total)
 		err = bag.Next(token)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -288,7 +290,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token := prepareNextToken(page, len(servicePrincipals), total)
+		token, err := prepareNextToken(page, len(servicePrincipals), total)
 		err = bag.Next(token)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)

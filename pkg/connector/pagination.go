@@ -53,25 +53,33 @@ func convertPageToken(token string) (uint, error) {
 }
 
 // prepareNextToken prepares the next page token.
-// It calculates the next page number and returns it as a string.
-func prepareNextToken(page uint, pageTotal int, total *uint) string {
+// It calculates the next page number and returns it as a string, or an error
+// when an empty page arrives while totalResults says more items remain: ending
+// the sync there would make C1 treat the missing items as deleted, so we fail
+// closed instead.
+func prepareNextToken(page uint, pageTotal int, total *uint) (string, error) {
 	if pageTotal == 0 {
-		return "" // empty page is terminal evidence; kills the same-token non-termination
+		// empty page is terminal evidence only when totalResults is absent or
+		// already reached; otherwise the server dropped items mid-list
+		if total != nil && page < *total+1 {
+			return "", fmt.Errorf("databricks-connector: empty page at offset %d but totalResults=%d; failing sync so missing items are not treated as deleted", page, *total)
+		}
+		return "", nil // kills the same-token non-termination
 	}
 	if total == nil {
 		// absent totalResults: continue while the page is at least as full as
 		// the page we asked for (>=, not ==, so a server that clamps or ignores
 		// pageSize still advances by its own page size instead of truncating)
 		if pageTotal >= int(ResourcesPageSize) {
-			return strconv.FormatUint(uint64(page+uint(pageTotal)), 10) // #nosec G115
+			return strconv.FormatUint(uint64(page+uint(pageTotal)), 10), nil // #nosec G115
 		}
-		return ""
+		return "", nil
 	}
 	next := page + uint(pageTotal) // #nosec G115
 	if next < *total+1 {
-		return strconv.FormatUint(uint64(next), 10)
+		return strconv.FormatUint(uint64(next), 10), nil
 	}
-	return ""
+	return "", nil
 }
 
 // parseCursorToken returns the pagination bag and the cursor stored in its current page token,
