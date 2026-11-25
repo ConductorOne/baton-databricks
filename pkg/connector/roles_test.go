@@ -16,6 +16,10 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/pagination"
 	ent "github.com/conductorone/baton-sdk/pkg/types/entitlement"
 	rs "github.com/conductorone/baton-sdk/pkg/types/resource"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -386,5 +390,62 @@ func TestRoleGrantsSyncRequestsOnlyRoleAttributes(t *testing.T) {
 		t.Errorf("group list attributes = %v, want a single attributes key", groupListAttrs)
 	} else if parts := strings.Split(groupListAttrs[0][0], ","); !slices.Equal(parts, want) {
 		t.Errorf("group list attributes = %v, want %v", groupListAttrs, want)
+	}
+}
+
+// A group page whose JSON carries no meta key must fail the sync (fail-closed),
+// not silently complete with zero grants.
+func TestGrantsFailsOnUnknownMeta(t *testing.T) {
+	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":"no-meta-group"}],"totalResults":1}`))
+	})
+
+	role := testRoleEntitlement(t, false).Resource
+	token := ""
+	var err error
+	for range 10 {
+		var res *rs.SyncOpResults
+		_, res, err = r.Grants(context.Background(), role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		if err != nil {
+			break
+		}
+		token = res.NextPageToken
+		if token == "" {
+			break
+		}
+	}
+	if err == nil {
+		t.Fatal("Grants returned nil error, want failure on missing meta")
+	}
+	if !strings.Contains(err.Error(), "databricks-connector:") || !strings.Contains(err.Error(), "missing meta.resourceType") {
+		t.Errorf("error %q does not explain the missing meta.resourceType", err)
+	}
+}
+
+// Known workspace-scoped groups are skipped with a Debug log, and the sync succeeds.
+func TestGrantsSkipsWorkspaceGroups(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	ctx := ctxzap.ToContext(context.Background(), zap.New(core))
+
+	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":"admins","meta":{"resourceType":"WorkspaceGroup"}}],"totalResults":1}`))
+	})
+
+	role := testRoleEntitlement(t, false).Resource
+	token := ""
+	for range 10 {
+		_, res, err := r.Grants(ctx, role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		if err != nil {
+			t.Fatalf("Grants returned error: %v", err)
+		}
+		token = res.NextPageToken
+		if token == "" {
+			break
+		}
+	}
+	if logs.FilterMessage("databricks-connector: skipping workspace-scoped group").Len() != 1 {
+		t.Errorf("want exactly one skip Debug log, got %d", logs.FilterMessage("databricks-connector: skipping workspace-scoped group").Len())
 	}
 }

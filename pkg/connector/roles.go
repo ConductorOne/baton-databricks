@@ -225,9 +225,16 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 
 		// check if group has the role
 		for _, g := range groups {
-			// skip workspace specific groups (admins and users)
-			if !g.IsAccountGroup() {
+			// classify the group: fail the sync when meta is missing, skip workspace groups
+			l := ctxzap.Extract(ctx)
+			switch g.GroupClass() {
+			case databricks.UnknownGroupClass:
+				return nil, nil, uhttp.WrapErrors(codes.Internal,
+					fmt.Sprintf("databricks-connector: group %s (%s) missing meta.resourceType in SCIM response despite attributes=roles,entitlements,meta; cannot classify account vs workspace group; failing sync so existing grants are preserved", g.ID, g.DisplayName))
+			case databricks.WorkspaceGroup:
+				l.Debug("databricks-connector: skipping workspace-scoped group", zap.String("group_id", g.ID))
 				continue
+			case databricks.AccountGroup:
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
