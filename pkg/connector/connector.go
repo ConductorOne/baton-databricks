@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/conductorone/baton-databricks/pkg/config"
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -11,15 +12,21 @@ import (
 	"github.com/conductorone/baton-sdk/pkg/annotations"
 	"github.com/conductorone/baton-sdk/pkg/cli"
 	"github.com/conductorone/baton-sdk/pkg/connectorbuilder"
+	"github.com/conductorone/baton-sdk/pkg/field"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	"go.uber.org/zap"
+	"golang.org/x/oauth2"
 )
 
 type Databricks struct {
 	client     *databricks.Client
 	workspaces []string
+	// sqlWarehouseID enables incremental sync when non-empty.
+	sqlWarehouseID string
 }
 
 // ResourceSyncers returns a ResourceSyncerV2 for each resource type that should be synced from the upstream service.
-func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.ResourceSyncerV2 {
+func (d *Databricks) ResourceSyncers(_ context.Context) []connectorbuilder.ResourceSyncerV2 {
 	syncers := []connectorbuilder.ResourceSyncerV2{
 		newAccountBuilder(d.client),
 		newGroupBuilder(d.client),
@@ -32,14 +39,22 @@ func (d *Databricks) ResourceSyncers(ctx context.Context) []connectorbuilder.Res
 	return syncers
 }
 
+// EventFeeds registers the audit-log event feed unconditionally; whether sql-warehouse-id
+// is set gates its behavior inside ListEvents instead.
+func (d *Databricks) EventFeeds(_ context.Context) []connectorbuilder.EventFeed {
+	return []connectorbuilder.EventFeed{
+		newAuditEventFeed(d.client, d.workspaces, d.sqlWarehouseID),
+	}
+}
+
 // Asset takes an input AssetRef and attempts to fetch it using the connector's authenticated http client
 // It streams a response, always starting with a metadata object, following by chunked payloads for the asset.
-func (d *Databricks) Asset(ctx context.Context, asset *v2.AssetRef) (string, io.ReadCloser, error) {
+func (d *Databricks) Asset(_ context.Context, _ *v2.AssetRef) (string, io.ReadCloser, error) {
 	return "", nil, nil
 }
 
 // Metadata returns metadata about the connector.
-func (d *Databricks) Metadata(ctx context.Context) (*v2.ConnectorMetadata, error) {
+func (d *Databricks) Metadata(_ context.Context) (*v2.ConnectorMetadata, error) {
 	return &v2.ConnectorMetadata{
 		DisplayName: "Databricks",
 		Description: "Connector syncing Databricks workspaces, users, groups, service principals and roles to Baton",
@@ -112,11 +127,23 @@ func (d *Databricks) Validate(ctx context.Context) (annotations.Annotations, err
 	// Workspace enumeration is the other account-plane call every sync depends on.
 	// Per-workspace probing is deliberately not done here: a workspace the service
 	// principal can't reach is skipped during sync rather than failing validation.
-	if _, _, err := d.client.ListWorkspaces(ctx); err != nil {
-		return nil, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
+	annos := annotations.Annotations{}
+	_, rateLimit, err := d.client.ListWorkspaces(ctx)
+	if rateLimit != nil {
+		annos.WithRateLimiting(rateLimit)
+	}
+	if err != nil {
+		return annos, fmt.Errorf("databricks-connector: failed to list workspaces: %w", err)
 	}
 
-	return nil, nil
+	l := ctxzap.Extract(ctx)
+	if d.sqlWarehouseID == "" {
+		l.Info("databricks-connector: incremental sync disabled (sql-warehouse-id not set)")
+		return annos, nil
+	}
+
+	l.Info("databricks-connector: incremental sync enabled", zap.String("sql_warehouse_id", d.sqlWarehouseID))
+	return annos, nil
 }
 
 // New returns a new instance of the connector.
@@ -129,6 +156,7 @@ func New(
 	auth databricks.Auth,
 	excludeWorkspaces []string,
 	workspaces []string,
+	sqlWarehouseID string,
 ) (*Databricks, error) {
 	httpClient, err := auth.GetClient(ctx)
 	if err != nil {
@@ -143,13 +171,32 @@ func New(
 	return &Databricks{
 		client:     client,
 		workspaces: workspaces,
+		// Trimmed so a whitespace-only value counts as unset (incremental sync off).
+		sqlWarehouseID: strings.TrimSpace(sqlWarehouseID),
 	}, nil
 }
 
 // NewConnector returns a new connector builder from a configuration struct.
-func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+func NewConnector(ctx context.Context, cfg *config.Databricks, opts *cli.ConnectorOpts) (connectorbuilder.ConnectorBuilderV2, []connectorbuilder.Opt, error) {
+	// The auth method decides which fields are required. Validating without it
+	// would check the default group against a configuration built for another.
+	authMethod := ""
+	var tokenSource oauth2.TokenSource
+	if opts != nil {
+		authMethod = opts.SelectedAuthMethod
+		tokenSource = opts.TokenSource
+	}
+	if err := field.Validate(config.Config, cfg, field.WithAuthMethod(authMethod)); err != nil {
+		return nil, nil, err
+	}
+
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
-	auth := prepareClientAuth(cfg)
+	// Without the runtime's token source there is no JWT to exchange, and falling
+	// through to the client secret would fail later with a misleading error.
+	if authMethod == config.WorkloadIdentityC1AuthMethod && tokenSource == nil {
+		return nil, nil, fmt.Errorf("databricks-connector: auth method %q requires a ConductorOne-hosted runtime", authMethod)
+	}
+	auth := prepareClientAuth(cfg, authMethod, tokenSource)
 
 	cb, err := New(
 		ctx,
@@ -160,6 +207,7 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 		auth,
 		cfg.DatabricksExcludeWorkspaces,
 		cfg.Workspaces,
+		cfg.SqlWarehouseId,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -168,16 +216,36 @@ func NewConnector(ctx context.Context, cfg *config.Databricks, _ *cli.ConnectorO
 	return cb, nil, nil
 }
 
-func prepareClientAuth(cfg *config.Databricks) databricks.Auth {
+// prepareClientAuth follows the selected auth method, not whichever field
+// happens to be set: a token file left over from another deployment must not
+// silently replace the credential the operator chose.
+func prepareClientAuth(cfg *config.Databricks, authMethod string, tokenSource oauth2.TokenSource) databricks.Auth {
 	accountID := cfg.AccountId
 	databricksClientId := cfg.DatabricksClientId
-	databricksClientSecret := cfg.DatabricksClientSecret
 	accountHostname := getAccountHostname(cfg, cfg.Hostname)
+
+	if authMethod == config.WorkloadIdentityFileAuthMethod {
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			accountHostname,
+			databricks.FileSubjectTokenSource{Path: cfg.DatabricksOidcTokenFile},
+		)
+	}
+
+	if authMethod == config.WorkloadIdentityC1AuthMethod && tokenSource != nil {
+		return databricks.NewTokenFederation(
+			accountID,
+			databricksClientId,
+			accountHostname,
+			databricks.OAuth2TokenSubjectTokenSource{Source: tokenSource},
+		)
+	}
 
 	return databricks.NewOAuth2(
 		accountID,
 		databricksClientId,
-		databricksClientSecret,
+		cfg.DatabricksClientSecret,
 		accountHostname,
 	)
 }

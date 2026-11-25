@@ -8,10 +8,13 @@ type Databricks struct {
 	AccountId string `mapstructure:"account-id"`
 	DatabricksClientId string `mapstructure:"databricks-client-id"`
 	DatabricksClientSecret string `mapstructure:"databricks-client-secret"`
+	DatabricksC1Token string `mapstructure:"databricks-c1-token"`
+	DatabricksOidcTokenFile string `mapstructure:"databricks-oidc-token-file"`
 	Hostname string `mapstructure:"hostname"`
 	Workspaces []string `mapstructure:"workspaces"`
 	BaseUrl string `mapstructure:"base-url"`
 	DatabricksExcludeWorkspaces []string `mapstructure:"databricks-exclude-workspaces"`
+	SqlWarehouseId string `mapstructure:"sql-warehouse-id"`
 }
 
 func (c *Databricks) findFieldByTag(tagValue string) (any, bool) {

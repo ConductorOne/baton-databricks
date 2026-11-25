@@ -18,9 +18,10 @@ right top corner that will open a dropdown menu with the account ID along other
 options.
 
 Another requirement is to have valid credentials to run the connector with. The
-connector authenticates with the OAuth client credentials flow, using an
-account-level service principal that works across the account and every
-workspace it has access to.
+connector authenticates as an account-level service principal that works across
+the account and every workspace it has access to. It can prove it is that
+service principal in two ways: with a client secret, which is the default, or
+with workload identity federation. See [Authentication](#authentication).
 
 To set this up, create a service principal and add an OAuth secret (client ID
 and secret) to it. You can do that by going to the user management tab and
@@ -85,13 +86,53 @@ deployment name, or numeric workspace ID, matched case-insensitively.
 
 ## Authentication
 
-OAuth is the only authentication method: an account-level service principal's
-client ID and secret, supplied through `--databricks-client-id` and
-`--databricks-client-secret`. There is no personal access token (PAT) or
+The connector always authenticates as an account-level service principal, named
+by `--databricks-client-id`. There is no personal access token (PAT) or
 workspace-token option, and no username/password option.
 
-OAuth requires a reachable account API. If the account API check fails at
-startup, the connector fails validation rather than falling back to a
+`--auth-method` selects which credential is used. Fields for other methods are
+ignored.
+
+### Client secret (default)
+
+Pass the service principal's OAuth secret to `--databricks-client-secret` (or
+`BATON_DATABRICKS_CLIENT_SECRET`). The connector runs the OAuth client
+credentials flow against the account token endpoint.
+
+### Workload identity federation
+
+Instead of a long-lived secret, the connector can present an externally issued
+JWT that identifies the workload, such as a SPIFFE JWT-SVID or a Kubernetes
+projected service account token, and exchange it for a short-lived Databricks
+OAuth token ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)).
+
+Create a [service principal federation policy](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-federation-exchange)
+on the same service principal, trusting the issuer, subject and audience of that
+JWT. Then select the method and point the connector at the token:
+
+```
+--auth-method workload-identity-file \
+  --databricks-oidc-token-file /var/run/secrets/token
+```
+
+`--auth-method` (or `BATON_AUTH_METHOD`) is required here. Without it the
+connector validates against the default method and asks for a client secret.
+
+The file is read again on every token refresh, so whatever rotates it controls
+the lifetime and the connector needs no restart.
+
+This method runs the connector yourself: on the command line or in service mode.
+A C1-hosted connector uses workload identity too, but C1 issues the JWT and the
+hosted runtime selects the method, so there is no file and no flag to set. The
+federation policy a hosted connector needs is in the connector documentation.
+
+Nothing else changes: the exchange happens at the same account token endpoint,
+and the resulting token is used for both account and workspace APIs.
+
+### Validation
+
+Either method requires a reachable account API. If the account API check fails
+at startup, the connector fails validation rather than falling back to a
 workspace-only sync, even when `--workspaces` is set.
 
 To instead exclude specific workspaces from the sync, pass them to the
@@ -100,9 +141,90 @@ To instead exclude specific workspaces from the sync, pass them to the
 list. Each entry can be a workspace name, deployment name, or numeric workspace
 ID. Excluded workspaces and their roles are skipped entirely.
 
+## Incremental sync
+
+By default, `baton-databricks` does a full resync of every resource on every run.
+You can opt into an additional, cheap pathway that polls a Databricks audit log
+between full syncs to pick up access changes early. Full syncs still run as the
+correctness backstop. Incremental sync picks up added and removed group
+memberships, but deleted users, groups and service principals are only caught
+by the next full sync.
+
+Role assignments that Databricks stores in access-control rule sets (group roles
+such as `roles/group.manager`, service principal roles, and the account
+`marketplace.admin` role) are also only caught by the next full sync: the
+connector does not read the audit events Databricks writes for rule-set
+changes. A `roles/group.manager` change, for example, is logged as
+`updateRuleSet` under the `accountsAccessControl` audit service, which the
+connector does not query.
+
+**Incremental sync is enabled by setting `--sql-warehouse-id` (or
+`BATON_SQL_WAREHOUSE_ID`) and disabled by leaving it unset or empty.** There is
+no separate on/off flag. The incremental-sync setup (warehouse found,
+`system.access.audit` queryable, at least one workspace in sync scope) is not
+checked at startup, so a misconfiguration never blocks full syncs or
+provisioning. Instead, each event-feed poll fails with an error naming the
+problem until it is fixed.
+
+Incremental sync requires a reachable Account API to resolve audit events back
+to synced resources, same as the rest of the connector. Audit events are only
+resolved for workspaces in sync scope, so `--workspaces` and
+`--databricks-exclude-workspaces` apply to incremental sync the same way they
+apply to full syncs.
+
+### Requirements
+
+Incremental sync works only when all of the following are true:
+
+- **Unity Catalog.** The SQL warehouse is in a workspace enabled for Unity
+  Catalog, and the metastore is on Unity Catalog Privilege Model Version 1.0
+  ([system tables
+  requirements](https://docs.databricks.com/aws/en/admin/system-tables/)).
+- **System tables.** The connector queries the `system.access.audit` system
+  table, which Databricks currently offers as a Public Preview.
+- **A SQL warehouse, preferably serverless.** Pass its ID with
+  `--sql-warehouse-id`. Any warehouse works, including the **Starter
+  Warehouse** Databricks creates in each workspace, so you don't need to create
+  one.
+- **Grants for the service principal** the connector authenticates as, on top of
+  the Account admin role it already needs:
+  - `USE CATALOG` on the `system` catalog
+  - `USE SCHEMA` and `SELECT` on the `system.access` schema
+  - `CAN USE` on the SQL warehouse
+
+  For example, run as a metastore admin, replacing `<application-id>` with the
+  service principal's application (client) ID:
+
+  ```sql
+  GRANT USE CATALOG ON CATALOG system TO `<application-id>`;
+  GRANT USE SCHEMA, SELECT ON SCHEMA system.access TO `<application-id>`;
+  ```
+
+**We recommend a serverless SQL warehouse.** It starts in seconds, while a pro
+or classic warehouse can take several minutes. Each statement gets up to 30
+seconds on the initial request, including warehouse startup, then up to 5 more
+minutes of polling. A statement still unfinished after that is cancelled, so a
+poll can take close to 6 minutes before it fails with a `DeadlineExceeded`
+error and is retried on the next poll. Serverless SQL warehouses require the
+Premium plan or above.
+
+**Incremental sync covers one cloud region.** `system.access.audit` holds
+workspace-level events only for workspaces in the same cloud region as the
+workspace that queries it; account-level events are global ([system tables
+reference](https://docs.databricks.com/aws/en/admin/system-tables/)). The
+connector finds the warehouse's workspace automatically by checking each
+workspace the service principal can access, except those excluded with
+`--databricks-exclude-workspaces`; the `--workspaces` allowlist does not limit
+this search. It receives
+incremental updates only for workspaces in that region. Workspaces in other
+regions are still covered by full syncs.
+
+Audit log entries are delivered with a delay, so the connector reads them about
+four hours after they happen.
+
 ## Group provisioning
 
-Account groups are provisioned through the OAuth client ID and secret flow.
+Account groups are provisioned as the authenticated service principal.
 [Here](https://docs.databricks.com/aws/en/admin/users-groups/groups#:~:text=Types%20of%20groups%20in%20Databricks,permissions%20to%20identity%20federated%20workspaces.)
 are the different types of groups in Databricks.
 
@@ -171,6 +293,7 @@ Flags:
       --databricks-client-id string                      required: The Databricks service principal's client ID used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_ID)
       --databricks-client-secret string                  required: The Databricks service principal's client secret used to connect to the Databricks Account and Workspace API ($BATON_DATABRICKS_CLIENT_SECRET)
       --databricks-exclude-workspaces strings            Workspaces to exclude from sync, identified by workspace name, deployment name, or numeric workspace ID. Mutually exclusive with workspaces. ($BATON_DATABRICKS_EXCLUDE_WORKSPACES)
+      --databricks-oidc-token-file string                required: Path to a file holding an externally issued JWT identifying the workload. The file is read again on every token refresh, so an external rotation is picked up without a restart. ($BATON_DATABRICKS_OIDC_TOKEN_FILE)
       --external-resource-c1z string                     The path to the c1z file to sync external baton resources with ($BATON_EXTERNAL_RESOURCE_C1Z)
       --external-resource-entitlement-id-filter string   The entitlement that external users, groups must have access to sync external baton resources ($BATON_EXTERNAL_RESOURCE_ENTITLEMENT_ID_FILTER)
       --external-resource-traits strings                 Resource type traits (e.g. "user", "group", "app") to sync and match from the external resource c1z. When unset the matcher falls back to user and group; passing this flag replaces the full set rather than adding to it. ($BATON_EXTERNAL_RESOURCE_TRAITS)
@@ -190,6 +313,7 @@ Flags:
   -p, --provisioning                                     This must be set in order for provisioning actions to be enabled ($BATON_PROVISIONING)
       --skip-entitlements-and-grants                     This must be set to skip syncing of entitlements and grants ($BATON_SKIP_ENTITLEMENTS_AND_GRANTS)
       --skip-full-sync                                   This must be set to skip a full sync ($BATON_SKIP_FULL_SYNC)
+      --sql-warehouse-id string                          Setting this enables incremental sync; leaving it empty disables it. ID of the Databricks SQL warehouse used to query the system.access.audit log between full syncs, so access changes show up before the next full sync (deleted users, groups and service principals are still only caught by full syncs). The warehouse can be in any workspace not excluded by databricks-exclude-workspaces, in the same cloud region as the workspaces to update incrementally; Databricks only exposes workspace-level audit events for that region. The connector discovers the warehouse's workspace automatically. ($BATON_SQL_WAREHOUSE_ID)
       --storage-engine string                            The storage engine to use when opening the sync c1z file: sqlite or pebble. Defaults to pebble when unset. ($BATON_STORAGE_ENGINE)
       --sync-resource-types strings                      The resource type IDs to sync ($BATON_SYNC_RESOURCE_TYPES)
       --sync-resources strings                           The resource IDs to sync ($BATON_SYNC_RESOURCES)
