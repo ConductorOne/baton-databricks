@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -134,7 +135,7 @@ func testUserPrincipal(t *testing.T, id string) *v2.Resource {
 
 // TestGroupRuleSetCompoundGroupPrincipal covers the CXH-2347 rule-set path: granting or
 // revoking a group's manager role to a group principal must look the principal up by its
-// native id (the filter "id eq 'account/...'" matches nothing) and write it to the rule set
+// native id (the filter id eq "account/..." matches nothing) and write it to the rule set
 // as "groups/<display name>".
 func TestGroupRuleSetCompoundGroupPrincipal(t *testing.T) {
 	const wantPrincipal = "groups/Member Group"
@@ -176,7 +177,7 @@ func TestGroupRuleSetCompoundGroupPrincipal(t *testing.T) {
 					filter := req.URL.Query().Get("filter")
 					filters = append(filters, filter)
 					w.Header().Set("Content-Type", "application/json")
-					if filter == "id eq 'g-member-native'" {
+					if filter == "id eq "+strconv.Quote("g-member-native") {
 						_, _ = w.Write([]byte(`{"Resources":[{"id":"g-member-native","displayName":"Member Group"}],"totalResults":1}`))
 						return
 					}
@@ -215,7 +216,7 @@ func TestGroupRuleSetCompoundGroupPrincipal(t *testing.T) {
 				t.Fatalf("%s returned error: %v", tc.name, err)
 			}
 
-			if !slices.Equal(filters, []string{"id eq 'g-member-native'"}) {
+			if !slices.Equal(filters, []string{"id eq " + strconv.Quote("g-member-native")}) {
 				t.Errorf("group lookup filters = %q, want a single lookup by the native id (never %q)", filters, compoundPrincipalID)
 			}
 
@@ -314,7 +315,7 @@ func TestGroupRuleSetPrincipalLookup(t *testing.T) {
 					switch {
 					case req.Method == http.MethodGet && req.URL.Path == tc.scimPath:
 						w.Header().Set("Content-Type", "application/json")
-						if exists && req.URL.Query().Get("filter") == "id eq '"+tc.nativeID+"'" {
+						if exists && req.URL.Query().Get("filter") == "id eq "+strconv.Quote(tc.nativeID) {
 							_, _ = w.Write([]byte(`{"Resources":[` + tc.found + `],"totalResults":1}`))
 							return
 						}

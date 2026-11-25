@@ -110,15 +110,16 @@ func TestValidateWithoutWarehouseIDDisablesIncrementalSync(t *testing.T) {
 	}
 }
 
-// Incremental sync misconfiguration (unknown warehouse, no workspace in scope) must not
-// block full syncs, so Validate succeeds without probing the warehouse.
+// Incremental sync misconfiguration (an unknown warehouse) must not block full syncs,
+// so Validate succeeds without probing the warehouse. A workspace allowlist that names
+// no workspace on the account is a different failure, covered by its own test.
 func TestValidateWithWarehouseIDDoesNotProbeIncrementalSync(t *testing.T) {
 	cases := []struct {
 		name       string
 		workspaces []string
 	}{
 		{name: "unknown warehouse"},
-		{name: "no workspace in scope", workspaces: []string{"not-a-workspace"}},
+		{name: "one workspace in scope", workspaces: []string{"ws1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,7 +140,8 @@ func TestValidateWithWarehouseIDDoesNotProbeIncrementalSync(t *testing.T) {
 
 // A whitespace-only sql-warehouse-id counts as unset, so incremental sync stays off.
 func TestNewTreatsBlankWarehouseIDAsDisabled(t *testing.T) {
-	d, err := New(context.Background(), "cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", &databricks.NoAuth{}, nil, nil, "   ")
+	d, err := New(context.Background(), "cloud.databricks.com", "accounts.cloud.databricks.com", "acct-1", "", "",
+		&databricks.NoAuth{}, nil, nil, "   ", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
