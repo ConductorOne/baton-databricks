@@ -54,15 +54,22 @@ func convertPageToken(token string) (uint, error) {
 
 // prepareNextToken prepares the next page token.
 // It calculates the next page number and returns it as a string.
-func prepareNextToken(page uint, pageTotal int, total uint) string {
-	var token string
-
-	next := page + uint(pageTotal) // #nosec G115
-	if next < total+1 {
-		token = strconv.FormatUint(uint64(next), 10)
+func prepareNextToken(page uint, pageTotal int, total *uint) string {
+	if pageTotal == 0 {
+		return "" // empty page is terminal evidence; kills the same-token non-termination
 	}
-
-	return token
+	if total == nil {
+		// absent totalResults: continue only while the page is exactly full
+		if pageTotal == int(ResourcesPageSize) {
+			return strconv.FormatUint(uint64(page+uint(pageTotal)), 10) // #nosec G115
+		}
+		return ""
+	}
+	next := page + uint(pageTotal) // #nosec G115
+	if next < *total+1 {
+		return strconv.FormatUint(uint64(next), 10)
+	}
+	return ""
 }
 
 // parseCursorToken returns the pagination bag and the cursor stored in its current page token,

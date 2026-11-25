@@ -172,7 +172,7 @@ func (c *Client) GetAccountId() string {
 
 type ListResponse[T any] struct {
 	Resources []T  `json:"Resources"`
-	Total     uint `json:"totalResults"`
+	Total     *uint `json:"totalResults"`
 }
 
 func (c *Client) ListUsers(
@@ -181,7 +181,7 @@ func (c *Client) ListUsers(
 	vars ...Vars,
 ) (
 	[]User,
-	uint,
+	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
@@ -195,7 +195,7 @@ func (c *Client) ListUsers(
 	var res ListResponse[User]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
+		return nil, nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -347,7 +347,7 @@ func (c *Client) ListGroups(
 	vars ...Vars,
 ) (
 	[]Group,
-	uint,
+	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
@@ -361,7 +361,7 @@ func (c *Client) ListGroups(
 	var res ListResponse[Group]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
+		return nil, nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -489,7 +489,7 @@ func (c *Client) ListServicePrincipals(
 	vars ...Vars,
 ) (
 	[]ServicePrincipal,
-	uint,
+	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
@@ -503,7 +503,7 @@ func (c *Client) ListServicePrincipals(
 	var res ListResponse[ServicePrincipal]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
+		return nil, nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil

@@ -23,7 +23,7 @@ func TestAttrVarsApplySingleJoinedKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			v := url.Values{}
-			tt.vars.Apply(v)
+			tt.vars.Apply(&v)
 			got := v["attributes"]
 			if len(got) != 1 {
 				t.Fatalf("expected exactly one attributes key, got %d: %v", len(got), got)
