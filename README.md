@@ -294,6 +294,7 @@ account
 ├── service principal
 └── metastore
     └── catalog
+        └── schema
 ```
 
 A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
@@ -352,10 +353,10 @@ or `databricks-exclude-workspaces`.
 
 ## Unity Catalog provisioning
 
-A metastore or catalog privilege can be granted to and revoked from a user,
-group or service principal, except a metastore privilege held by the built-in
-workspace admins group, which is read-only. The `owner` entitlement is read-only
-too: granting or revoking it fails with an `InvalidArgument` error.
+A metastore, catalog or schema privilege can be granted to and revoked from a
+user, group or service principal, except a metastore privilege held by the
+built-in workspace admins group, which is read-only. The `owner` entitlement is
+read-only too: granting or revoking it fails with an `InvalidArgument` error.
 
 If a catalog becomes unreachable, provisioning must distinguish deletion from
 a workspace binding or visibility change. Requests can fail with
@@ -378,6 +379,15 @@ by a group it belongs to does not count. Workspace Admin alone does not
 cover other catalogs. A non-owner using `MANAGE` also needs `USE_CATALOG` for
 catalog discovery. An incomplete grants list fails the sync rather than
 removing grants the connector cannot see.
+
+For a schema's full grants list, and to grant or revoke a schema privilege, the
+service principal must own the metastore, the catalog or the schema, hold
+`MANAGE` on the schema or on the catalog above it, or have Admin assigned
+directly on the workspace whose admins group owns the catalog. Listing the
+schemas is a weaker requirement: `USE_SCHEMA` and `ALL_PRIVILEGES` on the
+catalog each return every schema, and neither reads their privileges. A service
+principal holding only one of them syncs its schemas and then fails on their
+grants.
 
 The connector requests the `all-apis` OAuth scope. Each resource type declares
 the scopes, roles and privileges it needs, so `./baton-databricks capabilities`

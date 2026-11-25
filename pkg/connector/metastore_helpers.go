@@ -480,6 +480,126 @@ func ownPrincipalScimID(
 	return id, nil
 }
 
+// managePrivilege is what a trust rule looks for when ownership did not settle
+// it. ALL_PRIVILEGES is deliberately not here: Databricks leaves MANAGE out of
+// it, so its holder still reads a partial privilege list.
+// https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+var managePrivilege = []string{privilegeManage}
+
+// errSecurableGone reports that the securable a trust read addressed no longer
+// exists. Only a level that names its gone codes can raise it.
+var errSecurableGone = errors.New("securable no longer exists")
+
+// holdsPrivilegeOn reports whether the connector holds one of wanted. A refusal leaves it unproven. The read is not cached.
+//
+// goneCodes are the error_code values that prove the securable is gone. A level
+// that names them can tell an absence from a routing miss, so a 404 carrying one
+// reports errSecurableGone and any other 404 refuses the read instead of passing
+// as unproven. A level that names none keeps every 404 unproven, because it has
+// no way to tell the two apart.
+func holdsPrivilegeOn(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	securableType, fullName string,
+	wanted []string,
+	goneCodes []string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if trust.ownPrincipal == "" || trust.workspace == "" {
+		return false, nil
+	}
+
+	var holds bool
+	rateLimit, err := client.ForEachUncachedPermissionsPage(ctx, trust.workspace, securableType, fullName, trust.ownPrincipal,
+		func(page []databricks.PrivilegeAssignment) (bool, error) {
+			for _, assignment := range page {
+				for _, privilege := range assignment.Privileges {
+					if slices.Contains(wanted, privilege) {
+						holds = true
+
+						return true, nil
+					}
+				}
+			}
+
+			return false, nil
+		})
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if databricks.IsSecurableGone(err, goneCodes...) {
+			return false, errSecurableGone
+		}
+		if len(goneCodes) > 0 && apiStatus(err) == http.StatusNotFound {
+			return false, refuseUnreadable(fmt.Sprintf(
+				"databricks-connector: failed to read the connector's own privileges on %s %s", securableType, fullName), err)
+		}
+		if !deniesTrust(err) {
+			return false, fmt.Errorf("databricks-connector: failed to read the connector's own privileges on %s %s: %w", securableType, fullName, err)
+		}
+		ctxzap.Extract(ctx).Debug("databricks-connector: the connector's own privileges on the securable cannot be read, so they stay unproven",
+			zap.String("securable_type", securableType),
+			zap.String("securable", fullName),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return holds, nil
+}
+
+// errTrustRead404 marks a trust read that answered 404 and still has to be
+// classified by the level, which is the only holder of the codes that prove
+// the securable is gone.
+var errTrustRead404 = errors.New("trust read answered 404")
+
+// holdsEffectivePrivilegeOn reports whether the connector holds one of wanted on
+// the securable or any parent, which one uncached read answers. A refusal leaves
+// it unproven, and a 404 is left to the level, which owns the gone codes.
+func holdsEffectivePrivilegeOn(
+	ctx context.Context,
+	client *databricks.Client,
+	trust securableTrust,
+	securableType, fullName string,
+	wanted []string,
+	annos *annotations.Annotations,
+) (bool, error) {
+	if trust.ownPrincipal == "" || trust.workspace == "" {
+		return false, nil
+	}
+
+	var holds bool
+	rateLimit, err := client.ForEachUncachedEffectivePermissionsPage(ctx, trust.workspace, securableType, fullName, trust.ownPrincipal,
+		func(page []databricks.EffectivePrivilegeAssignment) (bool, error) {
+			// The walk stops on the first page that holds one, so this never
+			// overwrites a hit with a later miss.
+			holds = slices.ContainsFunc(page, func(assignment databricks.EffectivePrivilegeAssignment) bool {
+				return assignment.HoldsAny(wanted)
+			})
+
+			return holds, nil
+		})
+	noteRateLimit(annos, rateLimit)
+	if err != nil {
+		if apiStatus(err) == http.StatusNotFound {
+			return false, fmt.Errorf("%w: %w", errTrustRead404, err)
+		}
+		if !deniesTrust(err) {
+			return false, fmt.Errorf(
+				"databricks-connector: failed to read the connector's own effective privileges on %s %s: %w", securableType, fullName, err)
+		}
+		ctxzap.Extract(ctx).Debug(
+			"databricks-connector: the connector's own effective privileges on the securable cannot be read, so they stay unproven",
+			zap.String("securable_type", securableType),
+			zap.String("securable", fullName),
+			zap.Error(err))
+
+		return false, nil
+	}
+
+	return holds, nil
+}
+
 // assignmentListError explains a failed read of the workspaces a metastore is
 // assigned to, which decides which workspaces its securables are read through.
 // A 404 is not an empty assignment list: the SDK would skip the child List and
@@ -494,17 +614,32 @@ func assignmentListError(metastoreID string, err error) error {
 		fmt.Sprintf("databricks-connector: failed to list the workspaces assigned to metastore %s", metastoreID), err)
 }
 
-// workspaceForCatalog returns the first in-scope workspace whose catalog listing
-// contains catalogName. None listing it is an error, never an absence: a catalog
-// bound to a workspace outside the sync, or one the connector lost USE_CATALOG
-// on, is not listed either and still exists. Reporting it as gone would delete
-// its subtree on a sync, and confirm a revoke that never happened.
+// catalogAccept decides whether a workspace that serves the catalog is the one
+// to route through. It runs only after catalogThrough answered, so a gone answer
+// from it is the catalog disappearing between two reads rather than a workspace
+// the catalog is not bound to. A nil predicate accepts the first workspace that
+// serves the catalog.
+type catalogAccept func(ctx context.Context, workspace databricks.Workspace, catalog *databricks.Catalog) (bool, error)
+
+// errCatalogNotAccepted reports that the catalog was served but no workspace
+// passed the caller's acceptance check.
+var errCatalogNotAccepted = errors.New("no workspace serving the catalog passed the acceptance check")
+
+// workspaceForCatalog returns the workspace to route the catalog through and the
+// catalog as that workspace read it. No workspace serving it is an error, never
+// an absence: a catalog bound to a workspace outside the sync, or one the
+// connector lost USE_CATALOG on, is not served either and still exists, so
+// reporting it as gone would delete its subtree and confirm a revoke that never
+// happened. It reports errCatalogGone only when every answer said gone and none
+// refused, and errCatalogNotAccepted when the catalog was served but accept
+// turned every workspace down.
 func workspaceForCatalog(
 	ctx context.Context,
 	client *databricks.Client,
 	metastoreID, catalogName string,
 	usable []databricks.Workspace,
 	probe catalogProbe,
+	accept catalogAccept,
 	annos *annotations.Annotations,
 ) (*databricks.Workspace, *databricks.Catalog, error) {
 	lastDeny := probe.deny
@@ -515,6 +650,7 @@ func workspaceForCatalog(
 	if probe.workspace != "" && !probe.gone {
 		allGone = false
 	}
+	var served, namedGone bool
 	for _, workspace := range usable {
 		if workspace.DeploymentName == probe.workspace {
 			continue
@@ -531,13 +667,35 @@ func workspaceForCatalog(
 			}
 			return nil, nil, err
 		}
-		if catalog != nil {
+		if catalog == nil {
+			allGone = false
+			continue
+		}
+		if accept == nil {
 			return &workspace, catalog, nil
 		}
+		// The reads run in order, so a workspace serving the catalog now supersedes
+		// a gone answer an earlier acceptance check gave.
+		namedGone = false
+		ok, err := accept(ctx, workspace, catalog)
+		if err != nil {
+			if errors.Is(err, errCatalogGone) {
+				namedGone = true
+				continue
+			}
+			return nil, nil, err
+		}
 		allGone = false
+		served = true
+		if ok {
+			return &workspace, catalog, nil
+		}
 	}
-	if allGone {
+	if allGone || (namedGone && lastDeny == nil) {
 		return nil, nil, errCatalogGone
+	}
+	if served {
+		return nil, nil, errCatalogNotAccepted
 	}
 
 	msg := fmt.Sprintf("databricks-connector: no workspace in sync scope lists catalog %s of metastore %s, so whether it still exists is unknown",
