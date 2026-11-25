@@ -59,8 +59,10 @@ func prepareNextToken(page uint, pageTotal int, total *uint) string {
 		return "" // empty page is terminal evidence; kills the same-token non-termination
 	}
 	if total == nil {
-		// absent totalResults: continue only while the page is exactly full
-		if pageTotal == int(ResourcesPageSize) {
+		// absent totalResults: continue while the page is at least as full as
+		// the page we asked for (>=, not ==, so a server that clamps or ignores
+		// pageSize still advances by its own page size instead of truncating)
+		if pageTotal >= int(ResourcesPageSize) {
 			return strconv.FormatUint(uint64(page+uint(pageTotal)), 10) // #nosec G115
 		}
 		return ""

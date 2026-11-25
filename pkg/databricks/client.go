@@ -171,7 +171,7 @@ func (c *Client) GetAccountId() string {
 }
 
 type ListResponse[T any] struct {
-	Resources []T  `json:"Resources"`
+	Resources []T   `json:"Resources"`
 	Total     *uint `json:"totalResults"`
 }
 

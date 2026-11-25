@@ -224,9 +224,9 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		}
 
 		// check if group has the role
+		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
 			// classify the group: fail the sync when meta is missing, skip workspace groups
-			l := ctxzap.Extract(ctx)
 			switch g.GroupClass() {
 			case databricks.UnknownGroupClass:
 				return nil, nil, uhttp.WrapErrors(codes.Internal,

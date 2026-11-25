@@ -14,6 +14,7 @@ func TestPrepareNextTokenAbsentTotal(t *testing.T) {
 	}{
 		{"absent total, full page keeps paginating", 1, 50, nil, "51"},
 		{"absent total, short page terminates", 1, 17, nil, ""},
+		{"absent total, oversized server page keeps paginating", 1, 60, nil, "61"},
 		{"absent total, empty page terminates", 1, 0, nil, ""},
 		{"present total, empty page terminates", 1, 0, uintPtr(96), ""},
 		{"present total, full page continues", 1, 50, uintPtr(96), "51"},

@@ -436,9 +436,12 @@ func TestGrantsSkipsWorkspaceGroups(t *testing.T) {
 	role := testRoleEntitlement(t, false).Resource
 	token := ""
 	for range 10 {
-		_, res, err := r.Grants(ctx, role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		grants, res, err := r.Grants(ctx, role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
 		if err != nil {
 			t.Fatalf("Grants returned error: %v", err)
+		}
+		if len(grants) != 0 {
+			t.Errorf("Grants returned %d grants for a workspace group, want 0", len(grants))
 		}
 		token = res.NextPageToken
 		if token == "" {
