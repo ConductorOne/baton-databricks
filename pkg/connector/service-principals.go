@@ -104,7 +104,10 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		rv = append(rv, gr)
 	}
 
-	token, err := prepareNextToken(page, len(servicePrincipals), total)
+	token, tokErr := prepareNextToken(page, len(servicePrincipals), total)
+	if tokErr != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
+	}
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
