@@ -77,7 +77,7 @@ func newWorkspaceBuilderWithMock(t *testing.T, m *workspaceAssignmentsServer) *w
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	return newWorkspaceBuilder(c, nil)
+	return newWorkspaceBuilder(c, nil, false)
 }
 
 func existingUserAssignment() []map[string]any {
@@ -92,6 +92,7 @@ func testWorkspaceMemberEntitlement(t *testing.T) *v2.Entitlement {
 	r, err := workspaceResource(context.Background(),
 		&databricks.Workspace{ID: testProvisioningWorkspaceID, Name: "ws", DeploymentName: "ws-deploy"},
 		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+		false,
 	)
 	if err != nil {
 		t.Fatalf("workspaceResource: %v", err)
@@ -114,6 +115,7 @@ func testProvisioningGroup(t *testing.T) *v2.Resource {
 	r, err := groupResource(context.Background(),
 		&databricks.Group{ID: testProvisioningPrincipalID, DisplayName: "admins"},
 		&v2.ResourceId{ResourceType: accountResourceType.Id, Resource: testAccountId},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("groupResource: %v", err)

@@ -324,7 +324,7 @@ func (b *catalogBuilder) resolveCatalogRoutes(ctx context.Context, metastoreID s
 	if err != nil {
 		return nil, err
 	}
-	usable, inScope, err := scope.attached(ctx, b.client, metastoreID, annos)
+	usable, pending, err := scope.attached(ctx, b.client, metastoreID, annos)
 	if errors.Is(err, errMetastoreGone) {
 		return nil, nil
 	}
@@ -332,7 +332,7 @@ func (b *catalogBuilder) resolveCatalogRoutes(ctx context.Context, metastoreID s
 		return nil, assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
-		if inScope {
+		if len(pending) > 0 {
 			return nil, status.Errorf(codes.FailedPrecondition, "databricks-connector: metastore %s has no running workspace in sync scope", metastoreID)
 		}
 		return nil, nil
@@ -548,7 +548,7 @@ func holdsCatalogManage(
 }
 
 func (b *catalogBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs.SyncOpAttrs) ([]*v2.Grant, *rs.SyncOpResults, error) {
-	return b.syncGrants(ctx, resource, attr)
+	return b.syncGrants(ctx, resource, attr, nil)
 }
 
 func (b *catalogBuilder) Grant(ctx context.Context, principal *v2.Resource, entitlement *v2.Entitlement) (annotations.Annotations, error) {

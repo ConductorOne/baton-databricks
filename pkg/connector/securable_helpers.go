@@ -74,6 +74,16 @@ type securableLevel struct {
 	// privilege list is partial, so Grants does not prove it again. False is
 	// the safe default: the check runs on the first page of Grants.
 	listProvesTrust bool
+
+	// workspaceGroupsReadOnly refuses a Grant or Revoke for a workspace-local
+	// group: Databricks does not let a revoked privilege be granted back to it.
+	workspaceGroupsReadOnly bool
+}
+
+// localPrincipalResolver maps a privilege row to a principal the account plane
+// does not know. A nil id with no error leaves the row to the account resolver.
+type localPrincipalResolver interface {
+	resolve(ctx context.Context, assignment databricks.PrivilegeAssignment) (*v2.ResourceId, error)
 }
 
 // securableTrust is what the per-level rules read to settle a privilege list:
@@ -133,11 +143,13 @@ func ensureGrantsAreTrustworthy(
 // syncGrants emits the privileges held on one securable, plus its owner.
 // The workspace comes off the profile the last List wrote: every Unity Catalog
 // read is addressed to a workspace host, and resolving one here would be an
-// account-plane round trip per securable.
+// account-plane round trip per securable. newLocal, when set, builds a resolver
+// for the workspace admins alias rows of this page; their grants are immutable.
 func (o securableOps) syncGrants(
 	ctx context.Context,
 	resource *v2.Resource,
 	attr rs.SyncOpAttrs,
+	newLocal func(annos *annotations.Annotations) localPrincipalResolver,
 ) ([]*v2.Grant, *rs.SyncOpResults, error) {
 	client, clientID, sync, level := o.client, o.clientID, o.sync, o.level
 	l := ctxzap.Extract(ctx)
@@ -176,11 +188,31 @@ func (o securableOps) syncGrants(
 	}
 
 	resolver := newPrincipalResolver(client, &annos)
+	var local localPrincipalResolver
+	if newLocal != nil {
+		local = newLocal(&annos)
+	}
 	var rv []*v2.Grant
 	for _, assignment := range assignments {
-		principalId, err := resolver.resolve(ctx, assignment.PrincipalID.String(), assignment.Principal)
-		if err != nil {
-			return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: %w", err)
+		// The alias names its own workspace, so resolving it first answers without the
+		// three account lookups that would always miss. It answers nothing when the
+		// workspace is out of scope or CANCELLING, has no admins group or carries another
+		// name, and the account resolver still runs for those rows. A workspace that can
+		// still become RUNNING fails the page.
+		var principalId *v2.ResourceId
+		workspaceAdmin := false
+		if local != nil && strings.HasPrefix(assignment.Principal, workspaceAdminsPrefix) {
+			principalId, err = local.resolve(ctx, assignment)
+			if err != nil {
+				return nil, &rs.SyncOpResults{Annotations: annos}, err
+			}
+			workspaceAdmin = principalId != nil
+		}
+		if principalId == nil {
+			principalId, err = resolver.resolve(ctx, assignment.PrincipalID.String(), assignment.Principal)
+			if err != nil {
+				return nil, &rs.SyncOpResults{Annotations: annos}, fmt.Errorf("databricks-connector: %w", err)
+			}
 		}
 		if principalId == nil {
 			l.Debug("databricks-connector: skipping a grant whose principal does not resolve",
@@ -195,6 +227,9 @@ func (o securableOps) syncGrants(
 		}
 
 		options := groupSecurableGrantOptions(principalId)
+		if workspaceAdmin {
+			options = append(options, grant.WithAnnotation(&v2.GrantImmutable{}))
+		}
 		for _, privilege := range assignment.Privileges {
 			if !slices.Contains(level.privileges, privilege) {
 				// A privilege Databricks added after this connector shipped is not
@@ -255,6 +290,16 @@ func resolveChange(
 		return change{}, status.Errorf(codes.InvalidArgument,
 			"databricks-connector: only users, groups and service principals can hold a %s privilege, got %s",
 			level.noun, principalID.GetResourceType())
+	}
+	if level.workspaceGroupsReadOnly && principalID.GetResourceType() == groupResourceType.Id {
+		parent, _, err := parseResourceId(principalID.GetResource())
+		if err != nil {
+			return change{}, fmt.Errorf("databricks-connector: failed to parse group resource id: %w", err)
+		}
+		if parent.GetResourceType() == workspaceResourceType.Id {
+			return change{}, status.Errorf(codes.FailedPrecondition,
+				"databricks-connector: %s privileges held by workspace-local groups are read-only; manage them in Databricks", level.noun)
+		}
 	}
 
 	resource := entitlement.GetResource()

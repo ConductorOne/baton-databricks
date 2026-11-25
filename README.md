@@ -287,7 +287,8 @@ tree the connector syncs is:
 ```
 account
 ├── workspace
-│   └── role
+│   ├── role
+│   └── group (the built-in `admins` group only)
 ├── user
 ├── group
 ├── service principal
@@ -299,6 +300,14 @@ A metastore exposes its privileges as entitlements (`CREATE_CATALOG`,
 `READ_METADATA`, `USE_SHARE` and so on) plus a non-grantable `owner`. A
 privilege held by a group is expandable, so ConductorOne resolves the group's
 members as holders.
+
+The built-in workspace admins group is synced under its workspace as
+`admins (<workspace name>)`, when metastores, groups and workspaces are all in the
+sync. Only the members the account holds are synced: a workspace-local identity has
+no account resource to point a grant at. Both the metastore privileges this group
+holds and its own membership are read-only, and a grant or revoke on either fails
+with a `FailedPrecondition` error. Databricks does not allow granting a metastore
+privilege back to this group after revocation.
 
 `MANAGE` and `ALL_PRIVILEGES` are not offered: Databricks rejects both at the
 metastore level.
@@ -321,6 +330,9 @@ it. The connector never guesses when the answer is unknown:
 | metastore workspace list unreadable (401, 403, 404) | unknown, so the metastore is kept and the sync fails naming that list |
 | workspace permission list unreadable (401, 403, 404) | treated as not Admin on that workspace; the sync then fails with the usual missing-standing error, which does not name this list |
 
+A sync that fails on an attached workspace that is not `RUNNING` names that
+workspace and its status.
+
 A metastore is left out of the sync only when the answer is known: every
 attached workspace is out of scope or unusable. Leaving it out is what makes
 ConductorOne remove it and its grants, so an unknown answer must not take that
@@ -341,8 +353,9 @@ or `databricks-exclude-workspaces`.
 ## Unity Catalog provisioning
 
 A metastore or catalog privilege can be granted to and revoked from a user,
-group or service principal. The `owner` entitlement is read-only: granting or
-revoking it fails with an `InvalidArgument` error.
+group or service principal, except a metastore privilege held by the built-in
+workspace admins group, which is read-only. The `owner` entitlement is read-only
+too: granting or revoking it fails with an `InvalidArgument` error.
 
 If a catalog becomes unreachable, provisioning must distinguish deletion from
 a workspace binding or visibility change. Requests can fail with
