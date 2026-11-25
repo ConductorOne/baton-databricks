@@ -23,15 +23,24 @@ const (
 	// https://docs.databricks.com/api/workspace/catalogs/list
 	unityCatalogCatalogsEndpoint = "/api/2.1/unity-catalog/catalogs"
 
+	// https://docs.databricks.com/api/workspace/schemas/list
+	unityCatalogSchemasEndpoint = "/api/2.1/unity-catalog/schemas"
+
 	// GET https://docs.databricks.com/api/workspace/grants/get
 	// PATCH https://docs.databricks.com/api/workspace/grants/update
 	unityCatalogPermissionsEndpoint = "/api/2.1/unity-catalog/permissions"
+
+	// GET https://docs.databricks.com/api/workspace/grants/geteffective
+	// Same securable paths and same error codes as the permissions endpoint,
+	// plus the privileges a parent grants, naming where each comes from.
+	unityCatalogEffectivePermissionsEndpoint = "/api/2.1/unity-catalog/effective-permissions"
 
 	// Path segments for the permissions endpoint, not interchangeable with the
 	// uppercase securable_type a listed securable carries. A metastore is
 	// addressed by its UUID: its name is rejected.
 	SecurableMetastore = "metastore"
 	SecurableCatalog   = "catalog"
+	SecurableSchema    = "schema"
 
 	// The permissions endpoint rejects any max_results from 1 to 149 with a 400.
 	// Zero selects the paginated response that replaces the unpaginated form.
@@ -154,6 +163,35 @@ func (c *Client) GetCatalog(
 	return &res, ratelimitData, nil
 }
 
+// ListSchemas (GET /api/2.1/unity-catalog/schemas?catalog_name=) reads one page of
+// the schemas of catalogName, through workspaceId, which is a deployment name.
+// Unlike the catalogs listing, this one pages, so the cursor is passed through.
+func (c *Client) ListSchemas(
+	ctx context.Context,
+	workspaceId, catalogName, pageToken string,
+	maxResults uint,
+) (
+	[]Schema,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	var res schemasResponse
+
+	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogSchemasEndpoint)
+	ratelimitData, err := c.Get(ctx, u, &res, &unityCatalogVars{
+		catalogName: catalogName,
+		maxResults:  &maxResults,
+		pageToken:   pageToken,
+	})
+	if err != nil {
+		return nil, "", ratelimitData, nameWorkspace403Remedy(workspaceId,
+			fmt.Errorf("failed to list schemas in catalog %s: %w", catalogName, err))
+	}
+
+	return res.Schemas, res.NextPageToken, ratelimitData, nil
+}
+
 // ListPermissions (GET /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).
 // The principal query filters effectively, not literally: an inherited assignment
 // comes back naming the group it is inherited through, so a caller must read every
@@ -180,7 +218,7 @@ func (c *Client) listPermissions(
 	*v2.RateLimitDescription,
 	error,
 ) {
-	u, err := c.permissionsUrl(workspaceId, securableType, fullName)
+	u, err := c.permissionsUrl(unityCatalogPermissionsEndpoint, workspaceId, securableType, fullName)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -238,6 +276,56 @@ func (c *Client) ForEachUncachedPermissionsPage(
 	}, visit)
 }
 
+// ForEachUncachedEffectivePermissionsPage walks the effective-permissions
+// endpoint past the cache, without retaining the pages. One read covers the
+// securable and every parent, so a caller does not walk the hierarchy itself.
+func (c *Client) ForEachUncachedEffectivePermissionsPage(
+	ctx context.Context,
+	workspaceId, securableType, fullName, principal string,
+	visit func([]EffectivePrivilegeAssignment) (bool, error),
+) (*v2.RateLimitDescription, error) {
+	return forEachPageFrom(ctx, "", func(pageToken string) ([]EffectivePrivilegeAssignment, string, *v2.RateLimitDescription, error) {
+		return c.listEffectivePermissions(ctx, workspaceId, securableType, fullName, principal, pageToken)
+	}, visit)
+}
+
+// listEffectivePermissions (GET /api/2.1/unity-catalog/effective-permissions/{type}/{full_name}).
+// The principal query filters effectively, not literally, so a caller reads every
+// row's privileges. Never cached: a stale page would answer for a changed grant.
+func (c *Client) listEffectivePermissions(
+	ctx context.Context,
+	workspaceId, securableType, fullName, principal, pageToken string,
+) (
+	[]EffectivePrivilegeAssignment,
+	string,
+	*v2.RateLimitDescription,
+	error,
+) {
+	u, err := c.permissionsUrl(unityCatalogEffectivePermissionsEndpoint, workspaceId, securableType, fullName)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	var res effectivePermissionsResponse
+
+	maxResults := permissionsMaxResults
+	ratelimitData, err := c.GetUncached(ctx, u, &res, &unityCatalogVars{
+		principal:  principal,
+		maxResults: &maxResults,
+		pageToken:  pageToken,
+	})
+	if err != nil {
+		if principal != "" {
+			return nil, "", ratelimitData, fmt.Errorf("failed to list effective permissions for principal %s on %s %s: %w",
+				principal, securableType, fullName, err)
+		}
+
+		return nil, "", ratelimitData, fmt.Errorf("failed to list effective permissions on %s %s: %w", securableType, fullName, err)
+	}
+
+	return res.PrivilegeAssignments, res.NextPageToken, ratelimitData, nil
+}
+
 // UpdatePermissions (PATCH /api/2.1/unity-catalog/permissions/{securable_type}/{full_name}).
 // Databricks no-ops a privilege already held or already absent, so the echoed
 // assignments are the only confirmation the change landed — and that echo is
@@ -290,7 +378,7 @@ func (c *Client) updatePermissions(
 		}
 	}
 
-	u, err := c.permissionsUrl(workspaceId, securableType, fullName)
+	u, err := c.permissionsUrl(unityCatalogPermissionsEndpoint, workspaceId, securableType, fullName)
 	if err != nil {
 		return nil, err
 	}
@@ -349,12 +437,12 @@ func (c *Client) updatePermissions(
 
 // A name that does not survive URL assembly addresses a different securable,
 // which on a PATCH writes someone else's permissions.
-func (c *Client) permissionsUrl(workspaceId, securableType, fullName string) (*url.URL, error) {
+func (c *Client) permissionsUrl(endpoint, workspaceId, securableType, fullName string) (*url.URL, error) {
 	if securableType == "" || fullName == "" {
 		return nil, invalidArgument("securable type and full name are required, got %q and %q", securableType, fullName)
 	}
 
-	u := c.workspaceUrl(workspaceId).JoinPath(unityCatalogPermissionsEndpoint, securableType, fullName)
+	u := c.workspaceUrl(workspaceId).JoinPath(endpoint, securableType, fullName)
 	if !addressesSecurable(u, "/"+securableType+"/"+fullName) {
 		return nil, invalidArgument("cannot address %s %q: the name does not survive URL assembly", securableType, fullName)
 	}

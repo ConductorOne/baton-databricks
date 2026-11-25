@@ -17,6 +17,7 @@ const (
 	permissionAccountAdmin   = "Account admin"
 	permissionWorkspaceAdmin = "Workspace admin"
 	permissionUseCatalog     = "USE_CATALOG"
+	permissionUseSchema      = "USE_SCHEMA"
 )
 
 var securableScopes = []string{
@@ -92,5 +93,12 @@ var (
 		DisplayName: "Catalog",
 		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
 		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog)...),
+	}
+
+	schemaResourceType = &v2.ResourceType{
+		Id:          "schema",
+		DisplayName: "Schema",
+		Traits:      []v2.ResourceType_Trait{v2.ResourceType_TRAIT_APP},
+		Annotations: annotationsForStaticSecurableResourceType(securablePermissions(permissionUseCatalog, permissionUseSchema)...),
 	}
 )

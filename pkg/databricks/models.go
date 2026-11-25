@@ -1,6 +1,9 @@
 package databricks
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 type BaseResponse struct {
 	ID string `json:"id"`
@@ -182,6 +185,11 @@ type Catalog struct {
 	IsolationMode string `json:"isolation_mode"`
 }
 
+type Schema struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
 type PrivilegeAssignment struct {
 	Principal   string      `json:"principal"`
 	PrincipalID json.Number `json:"principal_id"`
@@ -223,7 +231,42 @@ type catalogsResponse struct {
 	NextPageToken string    `json:"next_page_token"`
 }
 
+type schemasResponse struct {
+	Schemas       []Schema `json:"schemas"`
+	NextPageToken string   `json:"next_page_token"`
+}
+
 type permissionsResponse struct {
 	PrivilegeAssignments []PrivilegeAssignment `json:"privilege_assignments"`
 	NextPageToken        string                `json:"next_page_token"`
+}
+
+// EffectivePrivilege is one privilege an effective-permissions answer reports.
+// The inherited fields are empty when it is held on the securable itself, and
+// otherwise name the parent that grants it.
+type EffectivePrivilege struct {
+	Privilege         string `json:"privilege"`
+	InheritedFromType string `json:"inherited_from_type,omitempty"`
+	InheritedFromName string `json:"inherited_from_name,omitempty"`
+}
+
+// EffectivePrivilegeAssignment is what one principal holds on a securable once
+// inheritance is applied. It carries no principal_id: this endpoint names a
+// principal only.
+type EffectivePrivilegeAssignment struct {
+	Principal  string               `json:"principal"`
+	Privileges []EffectivePrivilege `json:"privileges"`
+}
+
+// HoldsAny reports whether the assignment carries one of wanted, counting a
+// privilege a parent grants the same as one held directly.
+func (a EffectivePrivilegeAssignment) HoldsAny(wanted []string) bool {
+	return slices.ContainsFunc(a.Privileges, func(held EffectivePrivilege) bool {
+		return slices.Contains(wanted, held.Privilege)
+	})
+}
+
+type effectivePermissionsResponse struct {
+	PrivilegeAssignments []EffectivePrivilegeAssignment `json:"privilege_assignments"`
+	NextPageToken        string                         `json:"next_page_token"`
 }

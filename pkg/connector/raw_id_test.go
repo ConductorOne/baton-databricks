@@ -77,6 +77,13 @@ func TestResourcesHaveRawId(t *testing.T) {
 				&v2.ResourceId{ResourceType: metastoreResourceType.Id, Resource: "ms1"}, catalogRoute{})),
 			"ms1::cat",
 		},
+		{
+			// The schema extends its catalog's id with the dotted full name.
+			"schema",
+			build(schemaResource(&databricks.Schema{Name: "sch"}, "ms1", "cat",
+				&v2.ResourceId{ResourceType: catalogResourceType.Id, Resource: "ms1::cat"}, schemaRoute{})),
+			"ms1::cat.sch",
+		},
 	}
 
 	for _, tc := range cases {
