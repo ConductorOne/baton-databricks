@@ -536,12 +536,7 @@ func (b *catalogBuilder) Revoke(ctx context.Context, revoked *v2.Grant) (annotat
 	return b.revoke(ctx, revoked.GetPrincipal().GetId(), routed)
 }
 
-// entitlementOnLiveRoute returns the entitlement addressed at a workspace. The
-// workspace an earlier sync wrote on the profile is tried first, with one catalog
-// read and no account listing: that read answers what the two listings were asked
-// for, since a workspace that returns this metastore's catalog is by construction
-// running and still serving it. The listings run only when the profile names no
-// workspace, this sync no longer admits it, or it no longer serves the catalog.
+// entitlementOnLiveRoute returns the entitlement addressed at a workspace.
 func (b *catalogBuilder) entitlementOnLiveRoute(
 	ctx context.Context,
 	entitlement *v2.Entitlement,
@@ -560,9 +555,37 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 		return nil, err
 	}
 
+	route, catalog, err := liveCatalogRoute(ctx, b.client, b.clientID, b.workspaces, resource, metastoreID, catalogName, owner,
+		fmt.Sprintf("to prove whether catalog %s was deleted", catalogName), annos)
+	if err != nil {
+		return nil, err
+	}
+
+	return routedEntitlement(entitlement, catalog, metastoreID, route)
+}
+
+// liveCatalogRoute picks the workspace a write to a catalog, or to anything under
+// it, goes through. The workspace an earlier sync wrote on the profile is tried
+// first, with one catalog read and no account listing: that read answers what the
+// two listings were asked for, since a workspace that returns this metastore's
+// catalog is by construction running and still serving it. The listings run only
+// when the profile names no workspace, this sync no longer admits it, or it no
+// longer serves the catalog. A catalog no workspace serves is not proof of
+// deletion, so that case is settled against the metastore's unbound listing.
+// noRoute completes the error when no workspace in scope serves the catalog: the
+// levels word it differently, so the caller says what it wanted the route for.
+func liveCatalogRoute(
+	ctx context.Context,
+	client *databricks.Client,
+	clientID string,
+	workspaces map[string]struct{},
+	resource *v2.Resource,
+	metastoreID, catalogName, metastoreOwner, noRoute string,
+	annos *annotations.Annotations,
+) (catalogRoute, *databricks.Catalog, error) {
 	var probe catalogProbe
-	if route, ok := profileCatalogRoute(b.client, b.workspaces, resource, owner); ok {
-		catalog, err := catalogThrough(ctx, b.client, route.Workspace, metastoreID, catalogName, annos)
+	if route, ok := profileCatalogRoute(client, workspaces, resource, metastoreOwner); ok {
+		catalog, err := catalogThrough(ctx, client, route.Workspace, metastoreID, catalogName, annos)
 		// This read is an optimization, so no answer it gives is fatal: a catalog
 		// absent from this one workspace is not absent from the metastore, a refusal
 		// here is not a refusal everywhere, and a workspace that has stopped serving
@@ -581,44 +604,44 @@ func (b *catalogBuilder) entitlementOnLiveRoute(
 		// that owns it. An answer that omits the id proves nothing, so it falls
 		// through to the walk and is read again there, where the listings ran.
 		case catalog != nil && catalog.MetastoreID == metastoreID:
-			return routedEntitlement(entitlement, catalog, metastoreID, route)
+			return route, catalog, nil
 		case catalog != nil:
 		case err == nil:
 			probe = catalogProbe{workspace: route.Workspace}
 		}
 	}
 
-	scope, err := scopedWorkspaces(ctx, b.client, b.workspaces, annos)
+	scope, err := scopedWorkspaces(ctx, client, workspaces, annos)
 	if err != nil {
-		return nil, err
+		return catalogRoute{}, nil, err
 	}
-	usable, _, err := scope.attached(ctx, b.client, metastoreID, annos)
+	usable, _, err := scope.attached(ctx, client, metastoreID, annos)
 	if err != nil {
-		return nil, assignmentListError(metastoreID, err)
+		return catalogRoute{}, nil, assignmentListError(metastoreID, err)
 	}
 	if len(usable) == 0 {
-		return nil, status.Errorf(codes.FailedPrecondition,
-			"databricks-connector: metastore %s has no running workspace in sync scope to prove whether catalog %s was deleted",
-			metastoreID, catalogName)
+		return catalogRoute{}, nil, status.Errorf(codes.FailedPrecondition,
+			"databricks-connector: metastore %s has no running workspace in sync scope %s", metastoreID, noRoute)
 	}
 
-	workspace, catalog, err := workspaceForCatalog(ctx, b.client, metastoreID, catalogName, usable, probe, nil, annos)
+	workspace, catalog, err := workspaceForCatalog(ctx, client, metastoreID, catalogName, usable, probe, nil, annos)
 	if err != nil {
 		if errors.Is(err, errCatalogGone) {
-			return nil, confirmCatalogGone(ctx, b.client, b.clientID, metastoreID, catalogName, usable[0].DeploymentName, owner, annos)
+			return catalogRoute{}, nil, confirmCatalogGone(ctx, client, clientID, metastoreID, catalogName, usable[0].DeploymentName, metastoreOwner, annos)
 		}
-		return nil, err
+
+		return catalogRoute{}, nil, err
 	}
 
-	return routedEntitlement(entitlement, catalog, metastoreID, catalogRoute{
+	return catalogRoute{
 		Workspace:      workspace.DeploymentName,
 		WorkspaceID:    strconv.Itoa(workspace.ID),
 		WorkspaceName:  workspace.Name,
-		MetastoreOwner: owner,
-	})
+		MetastoreOwner: metastoreOwner,
+	}, catalog, nil
 }
 
-// catalogProbe is the outcome of the one read entitlementOnLiveRoute makes
+// catalogProbe is the outcome of the one read liveCatalogRoute makes
 // through the profile workspace. The walk carries it so that workspace is not
 // read a second time and its answer still counts toward "gone everywhere".
 // A zero value means nothing was read and the walk reads every workspace.
