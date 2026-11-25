@@ -63,7 +63,7 @@ group's members as holders. Ownership is shown as a read-only `owner`
 entitlement — it cannot be granted or revoked through C1.
 
 <Note>
-The Metastores, Catalogs and Schemas resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Catalogs sync under their metastore and schemas under their catalog, so turn on every level above the one you want; turning on Catalogs alone, or Schemas without Catalogs, syncs nothing. They all use the same OAuth credentials; no additional configuration fields are needed.
+The Metastores, Catalogs and Schemas resource types are turned off by default. Turn on the ones you want from the connector's configuration page in C1. Catalogs sync under their metastore and schemas under their catalog, so turn on every level above the one you want; a type whose parent type is off syncs nothing. They all use the same OAuth credentials; no additional configuration fields are needed.
 </Note>
 
 <Note>
@@ -246,28 +246,12 @@ If the service principal cannot list catalogs at all through one of those worksp
 
 ### Let the service principal list schemas and read their privileges
 
-Skip this section if you are not syncing schemas, or if the service principal is the **Metastore Admin** or owns the catalog.
+Skip this section if you are not syncing schemas, or if the service principal is the **Metastore Admin**, owns the catalog, or is a direct **Admin** of the workspace whose admins group owns the catalog.
 
-Grant **MANAGE** on each catalog whose schemas you want synced, on top of the **USE CATALOG** from the previous section. **MANAGE** covers both halves: it lists every schema in the catalog and it reads who holds what on each one.
-
-**USE SCHEMA** and **ALL PRIVILEGES** are not substitutes: either one lists every schema, and then the sync fails on their grants.
-
-Workspace **Admin** replaces all of this only when the catalog is owned by that workspace's admins group (`_workspace_admins_<workspace>_<workspace id>`) and the service principal is a direct Admin of that workspace.
-
-<Steps>
-  <Step>
-  In the workspace, open **Catalog Explorer** and open the catalog.
-  </Step>
-  <Step>
-  Select **Permissions**, then click **Grant**.
-  </Step>
-  <Step>
-  Select the service principal, check **MANAGE**, and confirm.
-  </Step>
-</Steps>
+The **MANAGE** from the previous section is what schemas need too, and it covers both halves: it lists every schema in the catalog and it reads who holds what on each one. **USE SCHEMA** and **ALL PRIVILEGES** are not substitutes: either one lists every schema, and then the sync fails on their grants.
 
 <Warning>
-A catalog whose schemas cannot all be listed fails the sync, and so does a schema whose privilege list cannot be proved complete, named in the error.
+A catalog whose schemas cannot all be listed fails the sync with `cannot list every schema in catalog <name>`, and a schema whose privileges cannot all be read fails it with `cannot read every privilege on schema <name> through workspace <workspace>`.
 </Warning>
 
 **Done.** Here's the set of credentials you'll need when setting up the connector:
