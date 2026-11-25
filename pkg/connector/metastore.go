@@ -26,7 +26,6 @@ var _ connectorbuilder.StaticEntitlementSyncerV2 = (*metastoreBuilder)(nil)
 
 type metastoreBuilder struct {
 	securableOps
-	// workspaces is the configured allowlist, empty when none was given.
 	workspaces map[string]struct{}
 }
 
