@@ -380,15 +380,37 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 //
 // Vendor semantics: the SCIM single-group GET returns HTTP 404 when the group does not
 // exist (deleted, or not visible from the requested plane). Callers that must distinguish
-// "group vanished" from other failures use isNotFoundError on the returned error; unlike
-// the multi-group list — which the vendor sometimes answers with projection-stripped
-// objects — this read reliably honors the requested attributes.
+// "group vanished" from other failures use isNotFoundError on the returned error. The
+// vendor's attribute projection is unreliable across read shapes: multi-group lists and
+// even single-group GETs can come back with the requested attributes stripped (observed
+// on the CI tenant, actions run 45719189560), while a filtered single-result list honors
+// them — use FindGroup when the caller needs the full projection.
 func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,
 	error,
 ) {
 	return c.getGroup(ctx, c.getNoCache, workspaceId, groupId, vars...)
+}
+
+// FindGroup resolves a single group by id via a filtered list (filter=id eq '<id>',
+// count=1) instead of a direct GET. Vendor semantics: some tenants strip the requested
+// attributes from multi-group lists AND from single-group GETs, but honor them on a
+// filtered list — this is the read to use when the caller needs meta/roles/entitlements
+// and the projection must actually arrive. An empty result means the group does not
+// exist (deleted, or not visible from the requested plane) — the list equivalent of the
+// 404 a direct GET returns.
+func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
+	[]Group,
+	*uint,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return c.ListGroups(
+		ctx,
+		workspaceId,
+		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("id eq '%s'", groupId))}, vars...)...,
+	)
 }
 
 func (c *Client) getGroup(

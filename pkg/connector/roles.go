@@ -230,25 +230,26 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
 			// Classify the group. Groups without meta in the list object get one fallback
-			// single-group GET: some tenants strip the projection from multi-group list
-			// responses (every entry arrives as {"id":"...","displayName":""}) while their
-			// single-group reads honor attributes=roles,entitlements,meta reliably, so a
-			// meta-less list entry is not proof the group is unclassifiable. Only meta-less
-			// entries trigger GETs, and results are not cached across calls.
+			// filtered single-group read: some tenants strip the projection from multi-group
+			// list responses (every entry arrives as {"id":"...","displayName":""}) — and
+			// even from direct single-group GETs — while a filtered list (filter=id eq ...)
+			// honors attributes=roles,entitlements,meta reliably, so a meta-less list entry
+			// is not proof the group is unclassifiable. Only meta-less entries trigger the
+			// fallback read, and results are not cached across calls.
 			if g.GroupClass() == databricks.UnknownGroupClass {
-				l.Debug("databricks-connector: list entry missing meta; classifying via single-group GET",
+				l.Debug("databricks-connector: list entry missing meta; classifying via filtered single-group read",
 					zap.String("group_id", g.ID))
-				gf, _, err := r.client.GetGroupNoCache(ctx, workspaceId, g.ID, databricks.NewGroupRolesAttrVars())
-				if isNotFoundError(err) {
+				found, _, _, err := r.client.FindGroupByID(ctx, workspaceId, g.ID, databricks.NewGroupRolesAttrVars())
+				if err != nil {
+					return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, g.DisplayName, err)
+				}
+				if len(found) == 0 {
 					// The group vanished mid-sync (deleted, or not visible on this plane);
 					// skip it like the other NotFound-on-item cases.
 					l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
 					continue
 				}
-				if err != nil {
-					return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, g.DisplayName, err)
-				}
-				g = *gf
+				g = found[0]
 			}
 
 			switch g.GroupClass() {

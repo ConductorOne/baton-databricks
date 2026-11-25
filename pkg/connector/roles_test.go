@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"fmt"
 	"testing"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
@@ -453,54 +454,57 @@ func TestGrantsEmitsGrantForAccountGroupWithRole(t *testing.T) {
 }
 
 // Stripped multi-group list responses ({"id","displayName"} only) must be classified via
-// a single-group GET fallback instead of failing the sync or silently dropping grants.
-func TestGrantsClassifiesStrippedListViaGetFallback(t *testing.T) {
+// a filtered single-group list fallback instead of failing the sync or silently dropping
+// grants. The vendor strips attributes from multi-group lists — and even from direct
+// single-group GETs (observed on the CI tenant, run 45719189560) — while a filtered list
+// (filter=id eq '<id>', count=1) honors attributes=roles,entitlements,meta.
+func TestGrantsClassifiesStrippedListViaFilteredReadFallback(t *testing.T) {
 	tests := []struct {
-		name        string
-		getBody     string
-		getStatus   int
-		wantGrants  int
-		wantErrCode codes.Code
+		name          string
+		filteredBody  string
+		filteredTotal int
+		wantGrants    int
+		wantErrCode   codes.Code
 	}{
 		{
-			name:       "GET returns account group with the role",
-			getBody:    `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}`,
-			wantGrants: 1,
+			name:          "filtered read returns account group with the role",
+			filteredBody:  `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}`,
+			filteredTotal: 1,
+			wantGrants:    1,
 		},
 		{
-			name:       "GET returns account group without the role",
-			getBody:    `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
-			wantGrants: 0,
+			name:          "filtered read returns account group without the role",
+			filteredBody:  `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
+			filteredTotal: 1,
+			wantGrants:    0,
 		},
 		{
-			name:       "GET returns workspace group",
-			getBody:    `{"id":"g1","displayName":"ws-group","meta":{"resourceType":"WorkspaceGroup"}}`,
-			wantGrants: 0,
+			name:          "filtered read returns workspace group",
+			filteredBody:  `{"id":"g1","displayName":"ws-group","meta":{"resourceType":"WorkspaceGroup"}}`,
+			filteredTotal: 1,
+			wantGrants:    0,
 		},
 		{
-			name:        "GET still returns no meta",
-			getBody:     `{"id":"g1","displayName":"no-meta"}`,
-			wantErrCode: codes.Internal,
+			name:          "filtered read still returns no meta",
+			filteredBody:  `{"id":"g1","displayName":"no-meta"}`,
+			filteredTotal: 1,
+			wantErrCode:   codes.Internal,
 		},
 		{
-			name:       "GET 404s, group vanished mid-sync",
-			getStatus:  http.StatusNotFound,
-			getBody:    `{"detail":"Group not found"}`,
-			wantGrants: 0,
+			name:          "filtered read is empty, group vanished mid-sync",
+			filteredTotal: 0,
+			wantGrants:    0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var gets int
+			var fallbackReads int
 			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				if req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g1" {
-					gets++
-					if tt.getStatus != 0 {
-						w.WriteHeader(tt.getStatus)
-					}
-					_, _ = w.Write([]byte(tt.getBody))
+				if req.URL.Query().Get("filter") == "id eq 'g1'" {
+					fallbackReads++
+					_, _ = w.Write([]byte(fmt.Sprintf(`{"Resources":[%s],"totalResults":%d}`, tt.filteredBody, tt.filteredTotal)))
 					return
 				}
 				// Every group list page is stripped: id and displayName only.
@@ -533,22 +537,23 @@ func TestGrantsClassifiesStrippedListViaGetFallback(t *testing.T) {
 			if groupGrants != tt.wantGrants {
 				t.Errorf("Grants returned %d group-principal grants, want %d", groupGrants, tt.wantGrants)
 			}
-			// Only meta-less list entries trigger GETs: one per group in the stripped page.
-			if gets != 1 {
-				t.Errorf("single-group GET count = %d, want 1", gets)
+			// Only meta-less list entries trigger fallback reads: one per group in the
+			// stripped page.
+			if fallbackReads != 1 {
+				t.Errorf("filtered single-group read count = %d, want 1", fallbackReads)
 			}
 		})
 	}
 }
 
 // Groups whose list object already carries meta must be classified from the list alone,
-// without any fallback GET.
+// without any fallback read.
 func TestGrantsDoesNotFetchWhenListHasMeta(t *testing.T) {
-	var gets int
+	var fallbackReads int
 	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g1" {
-			gets++
+		if req.URL.Query().Get("filter") == "id eq 'g1'" {
+			fallbackReads++
 		}
 		_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}],"totalResults":1}`))
 	})
@@ -557,8 +562,8 @@ func TestGrantsDoesNotFetchWhenListHasMeta(t *testing.T) {
 	if _, err := collectGrants(t, r, role); err != nil {
 		t.Fatalf("Grants returned error: %v", err)
 	}
-	if gets != 0 {
-		t.Errorf("single-group GET count = %d, want 0 for a meta-bearing list page", gets)
+	if fallbackReads != 0 {
+		t.Errorf("filtered single-group read count = %d, want 0 for a meta-bearing list page", fallbackReads)
 	}
 }
 
