@@ -229,9 +229,32 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		// check if group has the role
 		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
-			// classify the group: fail the sync when meta is missing, skip workspace groups
+			// Classify the group. Groups without meta in the list object get one fallback
+			// single-group GET: some tenants strip the projection from multi-group list
+			// responses (every entry arrives as {"id":"...","displayName":""}) while their
+			// single-group reads honor attributes=roles,entitlements,meta reliably, so a
+			// meta-less list entry is not proof the group is unclassifiable. Only meta-less
+			// entries trigger GETs, and results are not cached across calls.
+			if g.GroupClass() == databricks.UnknownGroupClass {
+				l.Debug("databricks-connector: list entry missing meta; classifying via single-group GET",
+					zap.String("group_id", g.ID))
+				gf, _, err := r.client.GetGroupNoCache(ctx, workspaceId, g.ID, databricks.NewGroupRolesAttrVars())
+				if isNotFoundError(err) {
+					// The group vanished mid-sync (deleted, or not visible on this plane);
+					// skip it like the other NotFound-on-item cases.
+					l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
+					continue
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, g.DisplayName, err)
+				}
+				g = *gf
+			}
+
 			switch g.GroupClass() {
 			case databricks.UnknownGroupClass:
+				// Even the single-group GET carries no meta: the group is genuinely
+				// unclassifiable, so fail closed to preserve existing grants.
 				return nil, nil, uhttp.WrapErrors(codes.Internal,
 					fmt.Sprintf("databricks-connector: group %s (%s) missing meta.resourceType in SCIM response "+
 						"despite attributes=roles,entitlements,meta; cannot classify account vs workspace group; "+

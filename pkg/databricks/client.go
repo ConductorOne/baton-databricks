@@ -377,6 +377,12 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 
 // GetGroupNoCache is GetGroup that bypasses the uhttp response cache. Reads that decide a
 // write use it, since a cached group can be up to the cache TTL old.
+//
+// Vendor semantics: the SCIM single-group GET returns HTTP 404 when the group does not
+// exist (deleted, or not visible from the requested plane). Callers that must distinguish
+// "group vanished" from other failures use isNotFoundError on the returned error; unlike
+// the multi-group list — which the vendor sometimes answers with projection-stripped
+// objects — this read reliably honors the requested attributes.
 func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,

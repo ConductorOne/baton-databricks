@@ -452,6 +452,116 @@ func TestGrantsEmitsGrantForAccountGroupWithRole(t *testing.T) {
 	}
 }
 
+// Stripped multi-group list responses ({"id","displayName"} only) must be classified via
+// a single-group GET fallback instead of failing the sync or silently dropping grants.
+func TestGrantsClassifiesStrippedListViaGetFallback(t *testing.T) {
+	tests := []struct {
+		name        string
+		getBody     string
+		getStatus   int
+		wantGrants  int
+		wantErrCode codes.Code
+	}{
+		{
+			name:       "GET returns account group with the role",
+			getBody:    `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}`,
+			wantGrants: 1,
+		},
+		{
+			name:       "GET returns account group without the role",
+			getBody:    `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
+			wantGrants: 0,
+		},
+		{
+			name:       "GET returns workspace group",
+			getBody:    `{"id":"g1","displayName":"ws-group","meta":{"resourceType":"WorkspaceGroup"}}`,
+			wantGrants: 0,
+		},
+		{
+			name:        "GET still returns no meta",
+			getBody:     `{"id":"g1","displayName":"no-meta"}`,
+			wantErrCode: codes.Internal,
+		},
+		{
+			name:       "GET 404s, group vanished mid-sync",
+			getStatus:  http.StatusNotFound,
+			getBody:    `{"detail":"Group not found"}`,
+			wantGrants: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gets int
+			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g1" {
+					gets++
+					if tt.getStatus != 0 {
+						w.WriteHeader(tt.getStatus)
+					}
+					_, _ = w.Write([]byte(tt.getBody))
+					return
+				}
+				// Every group list page is stripped: id and displayName only.
+				_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":""}],"totalResults":1}`))
+			})
+
+			role := testRoleEntitlement(t, false).Resource
+			grants, err := collectGrants(t, r, role)
+			if tt.wantErrCode != 0 {
+				if err == nil {
+					t.Fatal("Grants returned nil error, want fail-closed on still-unknown meta")
+				}
+				if code := status.Code(err); code != tt.wantErrCode {
+					t.Errorf("error code = %s, want %s", code, tt.wantErrCode)
+				}
+				if !strings.Contains(err.Error(), "missing meta.resourceType") {
+					t.Errorf("error %q does not explain the missing meta.resourceType", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Grants returned error: %v", err)
+			}
+			var groupGrants int
+			for _, g := range grants {
+				if g.Principal.Id.ResourceType == groupResourceType.Id {
+					groupGrants++
+				}
+			}
+			if groupGrants != tt.wantGrants {
+				t.Errorf("Grants returned %d group-principal grants, want %d", groupGrants, tt.wantGrants)
+			}
+			// Only meta-less list entries trigger GETs: one per group in the stripped page.
+			if gets != 1 {
+				t.Errorf("single-group GET count = %d, want 1", gets)
+			}
+		})
+	}
+}
+
+// Groups whose list object already carries meta must be classified from the list alone,
+// without any fallback GET.
+func TestGrantsDoesNotFetchWhenListHasMeta(t *testing.T) {
+	var gets int
+	r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == http.MethodGet && req.URL.Path == "/api/2.0/accounts/acc-1/scim/v2/Groups/g1" {
+			gets++
+		}
+		_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}],"totalResults":1}`))
+	})
+
+	role := testRoleEntitlement(t, false).Resource
+	if _, err := collectGrants(t, r, role); err != nil {
+		t.Fatalf("Grants returned error: %v", err)
+	}
+	if gets != 0 {
+		t.Errorf("single-group GET count = %d, want 0 for a meta-bearing list page", gets)
+	}
+}
+
 // collectGrants drives Grants to completion, following next-page tokens, and
 // returns every grant emitted.
 func collectGrants(t *testing.T, r *roleBuilder, role *v2.Resource) ([]*v2.Grant, error) {
