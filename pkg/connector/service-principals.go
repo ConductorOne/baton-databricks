@@ -105,7 +105,12 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		rv = append(rv, gr)
 	}
 
-	token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{s.pageProgress, "service-principals", func() string { return servicePrincipals[0].ID }})
+	// Walk keys include the parent scope so concurrent walks for sibling
+	// workspaces never interleave on the same paginationProgress entry.
+	walk := parentResourceID.GetResource() + "/service-principals"
+	token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{
+		s.pageProgress, walk, func() string { return servicePrincipals[0].ID },
+	})
 	if tokErr != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 	}

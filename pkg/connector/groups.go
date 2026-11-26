@@ -114,7 +114,12 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{g.pageProgress, "groups", func() string { return groups[0].ID }})
+	// Walk keys include the parent scope so concurrent walks for sibling
+	// workspaces never interleave on the same paginationProgress entry.
+	walk := parentResourceID.GetResource() + "/groups"
+	token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{
+		g.pageProgress, walk, func() string { return groups[0].ID },
+	})
 	if tokErr != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 	}

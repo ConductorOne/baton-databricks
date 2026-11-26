@@ -123,3 +123,26 @@ func TestPaginationProgressResetsOnWalkStart(t *testing.T) {
 		t.Fatalf("different role's walk page 2: unexpected error: %v", err)
 	}
 }
+
+// Parent-scoped walk keys keep concurrent walks for same-named roles in
+// sibling workspaces from interleaving on one paginationProgress entry.
+func TestPaginationProgressScopesByParent(t *testing.T) {
+	p := newPaginationProgress()
+	wsA := pageProgressCheck{p, "ws-a/roles/users/admin", func() string { return "u1" }}
+	wsB := pageProgressCheck{p, "ws-b/roles/users/admin", func() string { return "u1" }}
+
+	if _, err := prepareNextToken(1, 50, nil, wsA); err != nil {
+		t.Fatalf("workspace A page 1: %v", err)
+	}
+	if _, err := prepareNextToken(1, 50, nil, wsB); err != nil {
+		t.Fatalf("workspace B page 1 interleaved: unexpected error: %v", err)
+	}
+	// Workspace A page 2 starting at u1 again is non-advancing; B's interleaved
+	// walk must not have overwritten A's state.
+	if _, err := prepareNextToken(51, 50, nil, wsA); err == nil || !strings.Contains(err.Error(), "did not advance") {
+		t.Fatalf("workspace A page 2: error = %v, want non-advancing pagination failure", err)
+	}
+	if _, err := prepareNextToken(51, 50, nil, wsB); err == nil || !strings.Contains(err.Error(), "did not advance") {
+		t.Fatalf("workspace B page 2: error = %v, want non-advancing pagination failure", err)
+	}
+}

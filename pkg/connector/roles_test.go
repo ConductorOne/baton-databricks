@@ -756,7 +756,9 @@ func TestGrantsWarnsOnUnverifiableFallbackGroup(t *testing.T) {
 			if groupGrants != tt.wantGrant {
 				t.Errorf("Grants returned %d group-principal grants, want %d", groupGrants, tt.wantGrant)
 			}
-			warns := logs.FilterMessage("databricks-connector: group carries no permission attributes in the vendor response; its grants cannot be verified on this tenant and may be reported as deleted (no read shape on this tenant returns roles/entitlements; remediation: re-enumerate group-held roles via the account access-control grant_rules API)")
+			warns := logs.FilterMessage("databricks-connector: group carries no permission attributes in the vendor response; " +
+				"its grants cannot be verified on this tenant and may be reported as deleted (no read shape on this tenant " +
+				"returns roles/entitlements; remediation: re-enumerate group-held roles via the account access-control grant_rules API)")
 			if warns.Len() != tt.wantWarn {
 				t.Fatalf("unverifiable-grants Warn count = %d, want %d (all logs: %d)", warns.Len(), tt.wantWarn, logs.Len())
 			}

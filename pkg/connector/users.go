@@ -129,7 +129,12 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		rv = append(rv, ur)
 	}
 
-	token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{u.pageProgress, "users", func() string { return users[0].ID }})
+	// Walk keys include the parent scope so concurrent walks for sibling
+	// workspaces never interleave on the same paginationProgress entry.
+	walk := parentResourceID.GetResource() + "/users"
+	token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{
+		u.pageProgress, walk, func() string { return users[0].ID },
+	})
 	if tokErr != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 	}

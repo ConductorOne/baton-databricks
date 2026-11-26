@@ -212,7 +212,12 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{r.pageProgress, "roles/users/" + roleName, func() string { return users[0].ID }})
+		// Walk keys include the parent scope so concurrent walks for same-named
+		// roles in sibling workspaces never interleave on one paginationProgress entry.
+		walk := parentID + "/roles/users/" + roleName
+		token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{
+			r.pageProgress, walk, func() string { return users[0].ID },
+		})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -357,7 +362,10 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{r.pageProgress, "roles/groups/" + roleName, func() string { return groups[0].ID }})
+		walk := parentID + "/roles/groups/" + roleName
+		token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{
+			r.pageProgress, walk, func() string { return groups[0].ID },
+		})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -396,7 +404,10 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{r.pageProgress, "roles/service-principals/" + roleName, func() string { return servicePrincipals[0].ID }})
+		walk := parentID + "/roles/service-principals/" + roleName
+		token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{
+			r.pageProgress, walk, func() string { return servicePrincipals[0].ID },
+		})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
