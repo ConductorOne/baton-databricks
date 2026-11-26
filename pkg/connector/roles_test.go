@@ -486,6 +486,15 @@ func TestGrantsClassifiesStrippedListViaFallbackChain(t *testing.T) {
 			wantErrContain: "returned group g2 instead",
 		},
 		{
+			name:           "id,displayName re-read returns a different group: fail closed",
+			idDefaultBody:  noMeta,
+			idDefaultTotal: 1,
+			namedBody:      `{"id":"g2","displayName":"admins"}`,
+			wantFallback:   2,
+			wantErr:        true,
+			wantErrContain: "returned group g2 instead",
+		},
+		{
 			name:           "name-filtered read returns a different group: fail closed",
 			idDefaultBody:  noMeta,
 			idDefaultTotal: 1,

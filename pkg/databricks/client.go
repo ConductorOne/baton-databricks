@@ -512,7 +512,7 @@ func (c *Client) FindGroupID(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName)),
+		NewFilterVars(fmt.Sprintf("displayName eq '%s'", escapeSCIMString(displayName))),
 	)
 
 	if err != nil {

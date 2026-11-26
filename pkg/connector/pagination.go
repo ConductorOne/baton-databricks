@@ -116,8 +116,14 @@ func prepareNextToken(page uint, pageTotal int, total *uint, progressChecks ...p
 	}
 	if total == nil {
 		// absent totalResults: continue while the page is at least as full as
-		// the page we asked for (>=, not ==, so a server that clamps or ignores
-		// pageSize still advances by its own page size instead of truncating)
+		// the page we asked for. >= (not ==) covers a server returning LARGER
+		// pages than requested — it advances by the server's own page size
+		// instead of truncating. A server that clamps pages to fewer than
+		// ResourcesPageSize fails this check and ends the walk on its short
+		// page: that is a residual of the fullness-based heuristic, which is
+		// the sanctioned design when totalResults is missing, because a short
+		// page is indistinguishable from end-of-list. Documented, regression-
+		// tested as an inherent limit, not silently claimed away.
 		if pageTotal >= int(ResourcesPageSize) {
 			for _, pc := range progressChecks {
 				if err := pc.progress.check(pc.walk, pc.firstItem(), page == 1); err != nil {

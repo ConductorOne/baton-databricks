@@ -287,6 +287,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 						l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
 						continue
 					}
+					if named[0].ID != g.ID {
+						// The vendor ignored the id filter on this projection too and
+						// returned a different group; fail closed like the sibling reads.
+						return nil, nil, uhttp.WrapErrors(codes.Internal,
+							fmt.Sprintf("databricks-connector: filtered read for group %s returned group %s instead; "+
+								"failing sync so existing grants are preserved", g.ID, named[0].ID))
+					}
 					byName, _, _, err := r.client.FindGroupByName(ctx, workspaceId, named[0].DisplayName)
 					if err != nil {
 						return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, named[0].DisplayName, err)

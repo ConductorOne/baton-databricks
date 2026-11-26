@@ -197,6 +197,31 @@ func TestGetUserByUsername(t *testing.T) {
 	}
 }
 
+// FindGroupID (the rule-set principal path via prepareResourceId) must escape the
+// displayName with escapeSCIMString, like FindGroupByName: a raw double quote would
+// terminate the vendor's JSON-string filter value early and a trailing backslash
+// would swallow the closing quote, 400ing on names this tenant really has.
+func TestFindGroupIDEscapesDisplayNameFilter(t *testing.T) {
+	var filter string
+	c := newServerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		filter = r.URL.Query().Get("filter")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"totalResults":1,"Resources":[{"id":"g1","displayName":"x"}]}`))
+	})
+
+	id, _, err := c.FindGroupID(context.Background(), "", `bad"name\`)
+	if err != nil {
+		t.Fatalf("FindGroupID: %v", err)
+	}
+	if id != "g1" {
+		t.Errorf("FindGroupID = %q, want g1", id)
+	}
+	want := `displayName eq 'bad\"name\\'`
+	if filter != want {
+		t.Errorf("filter = %q, want %q", filter, want)
+	}
+}
+
 func TestEscapeSCIMString(t *testing.T) {
 	tests := []struct {
 		name  string
