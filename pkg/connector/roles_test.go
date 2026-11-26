@@ -518,6 +518,16 @@ func TestGrantsClassifiesStrippedListViaFallbackChain(t *testing.T) {
 			wantFallback:   3,
 		},
 		{
+			name:           "id-filtered stripped, name contains a single quote, still matched via RFC 7644 escaping",
+			idDefaultBody:  noMeta,
+			idDefaultTotal: 1,
+			namedBody:      `{"id":"g1","displayName":"Bob's team"}`,
+			nameBody:       roleWithout,
+			nameTotal:      1,
+			wantGrants:     0,
+			wantFallback:   3,
+		},
+		{
 			name:           "id-filtered stripped and name-filtered still no meta: fail closed",
 			idDefaultBody:  noMeta,
 			idDefaultTotal: 1,
@@ -552,6 +562,9 @@ func TestGrantsClassifiesStrippedListViaFallbackChain(t *testing.T) {
 				case filter == "id eq 'g1'" && attrs == "id,displayName":
 					fallbackReads++
 					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":1}`, tt.namedBody)
+				case filter == `displayName eq 'Bob\'s team'` && attrs == "":
+					fallbackReads++
+					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":%d}`, tt.nameBody, tt.nameTotal)
 				case filter == "displayName eq 'admins'" && attrs == "":
 					fallbackReads++
 					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":%d}`, tt.nameBody, tt.nameTotal)

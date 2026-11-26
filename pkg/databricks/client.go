@@ -383,8 +383,9 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 // "group vanished" from other failures use isNotFoundError on the returned error. The
 // vendor's attribute projection is unreliable across read shapes: multi-group lists and
 // even single-group GETs can come back with the requested attributes stripped (observed
-// on the CI tenant, actions run 45719189560), while a filtered single-result list honors
-// them — use FindGroup when the caller needs the full projection.
+// on the CI tenant, actions run 45719189560) — callers that need meta should use
+// FindGroupByID / FindGroupByName and see those docs for which read shape actually
+// carries it.
 func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,
@@ -421,17 +422,20 @@ func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string,
 // id-filtered read came back projection-stripped while the displayName-filtered read
 // with NO attributes param returned meta twice (actions runs 45719189560/45720792196),
 // making this the only read shape proven to carry meta for account groups. Same empty
-// result semantics as FindGroupByID. Mirrors FindGroupID's filter construction.
+// result semantics as FindGroupByID. Mirrors FindGroupID's filter construction, with
+// single quotes escaped per RFC 7644 §3.4.2.2 so names like "Bob's team" produce a
+// valid filter.
 func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName string, vars ...Vars) (
 	[]Group,
 	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
+	escaped := strings.ReplaceAll(displayName, "'", "\\'")
 	return c.ListGroups(
 		ctx,
 		workspaceId,
-		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName))}, vars...)...,
+		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("displayName eq '%s'", escaped))}, vars...)...,
 	)
 }
 

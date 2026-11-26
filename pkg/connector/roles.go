@@ -253,6 +253,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 					l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
 					continue
 				}
+				if found[0].ID != g.ID {
+					// The vendor ignored the id filter and returned a different group;
+					// trusting it would grant another group's roles to the wrong principal.
+					return nil, nil, uhttp.WrapErrors(codes.Internal,
+						fmt.Sprintf("databricks-connector: filtered read for group %s returned group %s instead; "+
+							"failing sync so existing grants are preserved", g.ID, found[0].ID))
+				}
 				g = found[0]
 				if g.GroupClass() == databricks.UnknownGroupClass {
 					// The default-projection id-filtered read was stripped too. Resolve the
@@ -272,6 +279,14 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 						return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, named[0].DisplayName, err)
 					}
 					if len(byName) != 0 {
+						if byName[0].ID != g.ID {
+							// The vendor ignored the displayName filter and returned a
+							// different group; trusting it would grant another group's roles
+							// to the wrong principal.
+							return nil, nil, uhttp.WrapErrors(codes.Internal,
+								fmt.Sprintf("databricks-connector: filtered read for group %s returned group %s instead; "+
+									"failing sync so existing grants are preserved", g.ID, byName[0].ID))
+						}
 						g = byName[0]
 					}
 					// byName empty or still meta-less: g keeps no meta and the switch below
@@ -281,7 +296,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 
 			switch g.GroupClass() {
 			case databricks.UnknownGroupClass:
-				// Even the single-group GET carries no meta: the group is genuinely
+				// Even the fallback reads carry no meta: the group is genuinely
 				// unclassifiable, so fail closed to preserve existing grants.
 				return nil, nil, uhttp.WrapErrors(codes.Internal,
 					fmt.Sprintf("databricks-connector: group %s (%s) missing meta.resourceType in SCIM response "+
@@ -291,6 +306,18 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 				l.Debug("databricks-connector: skipping workspace-scoped group", zap.String("group_id", g.ID))
 				continue
 			case databricks.AccountGroup:
+			}
+
+			// A fallback-classified account group may have been read with a projection the
+			// vendor stripped: an absent roles/entitlements key decodes to nil, which is
+			// indistinguishable from genuinely holding none. Fail-closing on that would
+			// permanently break sync on tenants that never include these keys (the CI
+			// tenant's account-plane responses never carry them), so surface it as a Warn
+			// instead of silently classifying the group as role-less.
+			if g.GroupClass() == databricks.AccountGroup && len(g.Roles) == 0 {
+				l.Warn("databricks-connector: account group carries no roles in the vendor response; "+
+					"role grants for it cannot be verified on this tenant",
+					zap.String("group_id", g.ID), zap.String("role", roleName))
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
