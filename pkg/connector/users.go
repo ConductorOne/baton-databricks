@@ -20,6 +20,7 @@ import (
 type userBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	pageProgress *paginationProgress
 }
 
 func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -128,7 +129,15 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		rv = append(rv, ur)
 	}
 
-	token := prepareNextToken(page, len(users), total)
+	// Walk keys include the parent scope so concurrent walks for sibling
+	// workspaces never interleave on the same paginationProgress entry.
+	walk := parentResourceID.GetResource() + "/users"
+	token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{
+		u.pageProgress, walk, func() string { return users[0].ID },
+	})
+	if tokErr != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
+	}
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -315,5 +324,6 @@ func newUserBuilder(client *databricks.Client) *userBuilder {
 	return &userBuilder{
 		client:       client,
 		resourceType: userResourceType,
+		pageProgress: newPaginationProgress(),
 	}
 }

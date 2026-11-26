@@ -171,8 +171,8 @@ func (c *Client) GetAccountId() string {
 }
 
 type ListResponse[T any] struct {
-	Resources []T  `json:"Resources"`
-	Total     uint `json:"totalResults"`
+	Resources []T   `json:"Resources"`
+	Total     *uint `json:"totalResults"`
 }
 
 func (c *Client) ListUsers(
@@ -181,7 +181,7 @@ func (c *Client) ListUsers(
 	vars ...Vars,
 ) (
 	[]User,
-	uint,
+	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
@@ -195,7 +195,7 @@ func (c *Client) ListUsers(
 	var res ListResponse[User]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
+		return nil, nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -347,7 +347,7 @@ func (c *Client) ListGroups(
 	vars ...Vars,
 ) (
 	[]Group,
-	uint,
+	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
@@ -361,7 +361,7 @@ func (c *Client) ListGroups(
 	var res ListResponse[Group]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
+		return nil, nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil
@@ -377,12 +377,82 @@ func (c *Client) GetGroup(ctx context.Context, workspaceId, groupId string, vars
 
 // GetGroupNoCache is GetGroup that bypasses the uhttp response cache. Reads that decide a
 // write use it, since a cached group can be up to the cache TTL old.
+//
+// Vendor semantics: the SCIM single-group GET returns HTTP 404 when the group does not
+// exist (deleted, or not visible from the requested plane). Callers that must distinguish
+// "group vanished" from other failures use isNotFoundError on the returned error. The
+// vendor's attribute projection is unreliable across read shapes: multi-group lists and
+// even single-group GETs can come back with the requested attributes stripped (observed
+// on the CI tenant, actions run 45719189560) — callers that need meta should use
+// FindGroupByID / FindGroupByName and see those docs for which read shape actually
+// carries it.
 func (c *Client) GetGroupNoCache(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
 	*Group,
 	*v2.RateLimitDescription,
 	error,
 ) {
 	return c.getGroup(ctx, c.getNoCache, workspaceId, groupId, vars...)
+}
+
+// FindGroupByID resolves a single group by id via a filtered list (filter=id eq '<id>',
+// count=1) instead of a direct GET. Vendor semantics (CI tenant, runs 45715149358 /
+// 45719189560 / 45720792196): the account-plane SCIM API strips an explicit
+// attributes=roles,entitlements,meta projection from multi-group lists, filtered lists
+// AND single-group GETs alike, but returns meta when NO attributes param is sent (the
+// default projection). Callers that need meta should therefore call this WITHOUT
+// attribute vars; roles/entitlements come back when the vendor includes them in the
+// default projection. An empty result means the group does not exist (deleted, or not
+// visible from the requested plane) — the list equivalent of the 404 a direct GET
+// returns.
+func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string, vars ...Vars) (
+	[]Group,
+	*uint,
+	*v2.RateLimitDescription,
+	error,
+) {
+	return c.ListGroups(
+		ctx,
+		workspaceId,
+		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("id eq '%s'", groupId))}, vars...)...,
+	)
+}
+
+// FindGroupByName resolves a single group by displayName via a filtered list
+// (filter=displayName eq '<name>', count=1). Vendor semantics: on the CI tenant the
+// id-filtered read came back projection-stripped while the displayName-filtered read
+// with NO attributes param returned meta twice (actions runs 45719189560/45720792196),
+// making this the only read shape proven to carry meta for account groups. Same empty
+// result semantics as FindGroupByID. Mirrors FindGroupID's filter construction, with
+// the value run through escapeSCIMString: single quotes stay raw (this vendor rejects
+// the RFC 7644 backslash-quote escape as a bad JSON escape), the backslash is doubled
+// and double quotes are escaped as \" (the vendor parses the value as a JSON string),
+// so names like "Bob's team" produce a filter the vendor accepts.
+func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName string, vars ...Vars) (
+	[]Group,
+	*uint,
+	*v2.RateLimitDescription,
+	error,
+) {
+	escaped := escapeSCIMString(displayName)
+	return c.ListGroups(
+		ctx,
+		workspaceId,
+		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("displayName eq '%s'", escaped))}, vars...)...,
+	)
+}
+
+// escapeSCIMString escapes a value for use inside a single-quoted Databricks SCIM
+// filter string literal. Vendor semantics (CI tenant, run for 77e6e793): Databricks
+// parses the comparison value as a JSON string and REJECTS RFC 7644's \' escape with
+// 400 "Unrecognized character escape" for the \' pair; a raw single quote inside
+// the literal is accepted (the proven-good displayName eq 'test-users' read
+// carried one only by luck, but the O'Brien failure proves \' specifically is
+// wrong). So the backslash
+// is doubled (so a trailing "\" cannot swallow the closing quote) and a double
+// quote is escaped as \" (a literal " would terminate the JSON string early and
+// 400 the filter), while single quotes stay raw.
+func escapeSCIMString(v string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v)
 }
 
 func (c *Client) getGroup(
@@ -442,7 +512,7 @@ func (c *Client) FindGroupID(
 		ctx,
 		workspaceId,
 		&PaginationVars{Count: 1},
-		NewFilterVars(fmt.Sprintf("displayName eq '%s'", displayName)),
+		NewFilterVars(fmt.Sprintf("displayName eq '%s'", escapeSCIMString(displayName))),
 	)
 
 	if err != nil {
@@ -489,7 +559,7 @@ func (c *Client) ListServicePrincipals(
 	vars ...Vars,
 ) (
 	[]ServicePrincipal,
-	uint,
+	*uint,
 	*v2.RateLimitDescription,
 	error,
 ) {
@@ -503,7 +573,7 @@ func (c *Client) ListServicePrincipals(
 	var res ListResponse[ServicePrincipal]
 	ratelimitData, err := c.Get(ctx, u, &res, vars...)
 	if err != nil {
-		return nil, 0, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
+		return nil, nil, ratelimitData, nameWorkspace403Remedy(workspaceId, err)
 	}
 
 	return res.Resources, res.Total, ratelimitData, nil

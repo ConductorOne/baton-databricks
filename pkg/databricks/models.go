@@ -54,12 +54,33 @@ type Member struct {
 type Group struct {
 	BaseResponse
 	Permissions
-	DisplayName string   `json:"displayName"`
-	Members     []Member `json:"members,omitempty"`
-	Meta        struct {
-		Type string `json:"resourceType"`
-	} `json:"meta,omitempty"`
-	Schemas []string `json:"schemas,omitempty"`
+	DisplayName string     `json:"displayName"`
+	Members     []Member   `json:"members,omitempty"`
+	Meta        *GroupMeta `json:"meta,omitempty"`
+	Schemas     []string   `json:"schemas,omitempty"`
+}
+
+type GroupMeta struct {
+	Type string `json:"resourceType"`
+}
+
+type GroupClass int
+
+const (
+	AccountGroup GroupClass = iota
+	WorkspaceGroup
+	UnknownGroupClass // Meta == nil || Meta.Type == "" — absence and empty are the same unknown state
+)
+
+func (g Group) GroupClass() GroupClass {
+	switch {
+	case g.Meta == nil || g.Meta.Type == "":
+		return UnknownGroupClass
+	case g.Meta.Type == "Group":
+		return AccountGroup
+	default:
+		return WorkspaceGroup
+	}
 }
 
 const PatchOpSchema = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
@@ -98,7 +119,7 @@ func (g Group) HaveEntitlement(entitlement string) bool {
 }
 
 func (g Group) IsAccountGroup() bool {
-	return g.Meta.Type == "Group"
+	return g.GroupClass() == AccountGroup
 }
 
 type ServicePrincipal struct {

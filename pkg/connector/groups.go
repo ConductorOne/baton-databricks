@@ -26,6 +26,7 @@ const groupManagerEntitlement = "roles/group.manager"
 type groupBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	pageProgress *paginationProgress
 }
 
 func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -113,7 +114,15 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	token := prepareNextToken(page, len(groups), total)
+	// Walk keys include the parent scope so concurrent walks for sibling
+	// workspaces never interleave on the same paginationProgress entry.
+	walk := parentResourceID.GetResource() + "/groups"
+	token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{
+		g.pageProgress, walk, func() string { return groups[0].ID },
+	})
+	if tokErr != nil {
+		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
+	}
 	nextPage, err := bag.NextToken(token)
 	if err != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -606,5 +615,6 @@ func newGroupBuilder(client *databricks.Client) *groupBuilder {
 	return &groupBuilder{
 		client:       client,
 		resourceType: groupResourceType,
+		pageProgress: newPaginationProgress(),
 	}
 }

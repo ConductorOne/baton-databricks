@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -185,14 +187,60 @@ func TestGetUserByUsername(t *testing.T) {
 			}
 			wantAttrs := NewUserAttrVars().Attrs
 			gotAttrs := query["attributes"]
-			if len(gotAttrs) != len(wantAttrs) {
-				t.Fatalf("attributes = %v, want %v", gotAttrs, wantAttrs)
+			if len(gotAttrs) != 1 {
+				t.Fatalf("attributes = %v, want a single attributes key", gotAttrs)
 			}
-			for i := range wantAttrs {
-				if gotAttrs[i] != wantAttrs[i] {
-					t.Errorf("attributes = %v, want %v", gotAttrs, wantAttrs)
-					break
-				}
+			if parts := strings.Split(gotAttrs[0], ","); !slices.Equal(parts, wantAttrs) {
+				t.Errorf("attributes = %v, want %v", gotAttrs, wantAttrs)
+			}
+		})
+	}
+}
+
+// FindGroupID (the rule-set principal path via prepareResourceId) must escape the
+// displayName with escapeSCIMString, like FindGroupByName: a raw double quote would
+// terminate the vendor's JSON-string filter value early and a trailing backslash
+// would swallow the closing quote, 400ing on names this tenant really has.
+func TestFindGroupIDEscapesDisplayNameFilter(t *testing.T) {
+	var filter string
+	c := newServerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		filter = r.URL.Query().Get("filter")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"totalResults":1,"Resources":[{"id":"g1","displayName":"x"}]}`))
+	})
+
+	id, _, err := c.FindGroupID(context.Background(), "", `bad"name\`)
+	if err != nil {
+		t.Fatalf("FindGroupID: %v", err)
+	}
+	if id != "g1" {
+		t.Errorf("FindGroupID = %q, want g1", id)
+	}
+	want := `displayName eq 'bad\"name\\'`
+	if filter != want {
+		t.Errorf("filter = %q, want %q", filter, want)
+	}
+}
+
+func TestEscapeSCIMString(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"plain", "team-a", "team-a"},
+		{"single quote stays raw (vendor rejects the backslash-quote escape)", "Bob's team", "Bob's team"},
+		{"trailing backslash", `team\`, `team\\`},
+		{"backslash before quote", `a\b'c`, `a\\b'c`},
+		{"double quote escapes as JSON string escape", `He said "hi"`, `He said \"hi\"`},
+		{"backslash and double quote together", `a\"b`, `a\\\"b`},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escapeSCIMString(tt.value); got != tt.want {
+				t.Errorf("escapeSCIMString(%q) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
 	}

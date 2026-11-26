@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -38,6 +39,11 @@ var entitlements = []string{
 type roleBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	// unverifiableRoleWarns is the builder's process-wide count, which samples the
+	// stripped-projection warning (same logarithmic pattern as the audit feed's
+	// lookup-failure warning).
+	unverifiableRoleWarns *atomic.Int64
+	pageProgress          *paginationProgress
 }
 
 func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -206,7 +212,15 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token := prepareNextToken(page, len(users), total)
+		// Walk keys include the parent scope so concurrent walks for same-named
+		// roles in sibling workspaces never interleave on one paginationProgress entry.
+		walk := parentID + "/roles/users/" + roleName
+		token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{
+			r.pageProgress, walk, func() string { return users[0].ID },
+		})
+		if tokErr != nil {
+			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
+		}
 		err = bag.Next(token)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -224,10 +238,120 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		}
 
 		// check if group has the role
+		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
-			// skip workspace specific groups (admins and users)
-			if !g.IsAccountGroup() {
+			fromFallback := false
+			// Classify the group. Groups without meta in the list object get a fallback
+			// read chain. Vendor evidence (CI tenant, runs 45715149358 / 45719189560 /
+			// 45720792196): the account-plane SCIM API strips an explicit
+			// attributes=roles,entitlements,meta projection from multi-group lists,
+			// filtered lists AND single-group GETs; a filtered read with NO attributes
+			// param filtered by id also came back stripped; but a displayName-filtered
+			// read with no attributes param returned meta twice. So: read by id with the
+			// default projection; if that still carries no meta, resolve the group's
+			// displayName via the honored id,displayName projection and re-read by
+			// displayName. Only meta-less entries trigger fallback reads, and results
+			// are not cached across calls.
+			if g.GroupClass() == databricks.UnknownGroupClass {
+				l.Debug("databricks-connector: list entry missing meta; classifying via filtered single-group read",
+					zap.String("group_id", g.ID))
+				found, _, _, err := r.client.FindGroupByID(ctx, workspaceId, g.ID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, g.DisplayName, err)
+				}
+				if len(found) == 0 {
+					// The group vanished mid-sync (deleted, or not visible on this plane);
+					// skip it like the other NotFound-on-item cases.
+					l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
+					continue
+				}
+				if found[0].ID != g.ID {
+					// The vendor ignored the id filter and returned a different group;
+					// trusting it would grant another group's roles to the wrong principal.
+					return nil, nil, uhttp.WrapErrors(codes.Internal,
+						fmt.Sprintf("databricks-connector: filtered read for group %s returned group %s instead; "+
+							"failing sync so existing grants are preserved", g.ID, found[0].ID))
+				}
+				g = found[0]
+				fromFallback = true
+				if g.GroupClass() == databricks.UnknownGroupClass {
+					// The default-projection id-filtered read was stripped too. Resolve the
+					// display name (the id,displayName projection IS honored) and read by
+					// name, the one shape proven to carry meta on this tenant.
+					named, _, _, err := r.client.FindGroupByID(ctx, workspaceId, g.ID, databricks.NewGroupAttrVars())
+					if err != nil {
+						return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s display name to classify it: %w", g.ID, err)
+					}
+					if len(named) == 0 {
+						// Vanished between reads.
+						l.Debug("databricks-connector: skipping group missing at read time", zap.String("group_id", g.ID))
+						continue
+					}
+					if named[0].ID != g.ID {
+						// The vendor ignored the id filter on this projection too and
+						// returned a different group; fail closed like the sibling reads.
+						return nil, nil, uhttp.WrapErrors(codes.Internal,
+							fmt.Sprintf("databricks-connector: filtered read for group %s returned group %s instead; "+
+								"failing sync so existing grants are preserved", g.ID, named[0].ID))
+					}
+					byName, _, _, err := r.client.FindGroupByName(ctx, workspaceId, named[0].DisplayName)
+					if err != nil {
+						return nil, nil, fmt.Errorf("databricks-connector: failed to fetch group %s (%s) to classify it: %w", g.ID, named[0].DisplayName, err)
+					}
+					if len(byName) != 0 {
+						if byName[0].ID != g.ID {
+							// The vendor ignored the displayName filter and returned a
+							// different group; trusting it would grant another group's roles
+							// to the wrong principal.
+							return nil, nil, uhttp.WrapErrors(codes.Internal,
+								fmt.Sprintf("databricks-connector: filtered read for group %s returned group %s instead; "+
+									"failing sync so existing grants are preserved", g.ID, byName[0].ID))
+						}
+						g = byName[0]
+						fromFallback = true
+					}
+					// byName empty or still meta-less: g keeps no meta and the switch below
+					// fails closed.
+				}
+			}
+
+			switch g.GroupClass() {
+			case databricks.UnknownGroupClass:
+				// Even the fallback reads carry no meta: the group is genuinely
+				// unclassifiable, so fail closed to preserve existing grants.
+				return nil, nil, uhttp.WrapErrors(codes.Internal,
+					fmt.Sprintf("databricks-connector: group %s (%s) missing meta.resourceType in SCIM response "+
+						"despite attributes=roles,entitlements,meta; cannot classify account vs workspace group; "+
+						"failing sync so existing grants are preserved", g.ID, g.DisplayName))
+			case databricks.WorkspaceGroup:
+				l.Debug("databricks-connector: skipping workspace-scoped group", zap.String("group_id", g.ID))
 				continue
+			case databricks.AccountGroup:
+			}
+
+			// A fallback-classified group may have been read with a projection the vendor
+			// stripped: an absent roles/entitlements key decodes to nil, which is
+			// indistinguishable from genuinely holding none. Fail-closing on that would
+			// permanently break sync on tenants that never include these keys (the CI
+			// tenant's account-plane responses never carry them), so surface it as a
+			// sampled Warn instead of silently classifying the group as role-less. The
+			// grant is still dropped when the vendor stripped the field — the log makes
+			// that visible, nothing more.
+			fromFallbackUnverifiable := false
+			if isWorkspaceRole {
+				fromFallbackUnverifiable = fromFallback && len(g.Entitlements) == 0
+			} else {
+				fromFallbackUnverifiable = fromFallback && len(g.Roles) == 0
+			}
+			if fromFallbackUnverifiable {
+				if count := r.unverifiableRoleWarns.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
+					l.Warn("databricks-connector: group carries no permission attributes in the vendor response; "+
+						"its grants cannot be verified on this tenant and may be reported as deleted "+
+						"(no read shape on this tenant returns roles/entitlements; remediation: re-enumerate "+
+						"group-held roles via the account access-control grant_rules API)",
+						zap.String("group_id", g.ID), zap.String("role", roleName),
+						zap.Int64("total_occurrences", count))
+				}
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
@@ -245,7 +369,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token := prepareNextToken(page, len(groups), total)
+		walk := parentID + "/roles/groups/" + roleName
+		token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{
+			r.pageProgress, walk, func() string { return groups[0].ID },
+		})
+		if tokErr != nil {
+			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
+		}
 		err = bag.Next(token)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -281,7 +411,13 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token := prepareNextToken(page, len(servicePrincipals), total)
+		walk := parentID + "/roles/service-principals/" + roleName
+		token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{
+			r.pageProgress, walk, func() string { return servicePrincipals[0].ID },
+		})
+		if tokErr != nil {
+			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
+		}
 		err = bag.Next(token)
 		if err != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to create next page token: %w", err)
@@ -522,7 +658,9 @@ func principalLookupError(err error, principalLabel, principalId string, isWorks
 
 func newRoleBuilder(client *databricks.Client) *roleBuilder {
 	return &roleBuilder{
-		client:       client,
-		resourceType: roleResourceType,
+		client:                client,
+		resourceType:          roleResourceType,
+		unverifiableRoleWarns: &atomic.Int64{},
+		pageProgress:          newPaginationProgress(),
 	}
 }
