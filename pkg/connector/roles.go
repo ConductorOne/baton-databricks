@@ -212,7 +212,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{r.pageProgress, "roles/users", func() string { return users[0].ID }})
+		token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{r.pageProgress, "roles/users/" + roleName, func() string { return users[0].ID }})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -357,7 +357,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{r.pageProgress, "roles/groups", func() string { return groups[0].ID }})
+		token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{r.pageProgress, "roles/groups/" + roleName, func() string { return groups[0].ID }})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -396,7 +396,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{r.pageProgress, "roles/service-principals", func() string { return servicePrincipals[0].ID }})
+		token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{r.pageProgress, "roles/service-principals/" + roleName, func() string { return servicePrincipals[0].ID }})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}

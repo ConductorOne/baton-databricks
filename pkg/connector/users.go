@@ -23,7 +23,6 @@ type userBuilder struct {
 	pageProgress *paginationProgress
 }
 
-
 func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return userResourceType
 }

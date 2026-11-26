@@ -70,12 +70,18 @@ func newPaginationProgress() *paginationProgress {
 
 // check records the first item key of the current page and fails closed when it
 // equals the previous page's, i.e. when pagination made no forward progress.
-func (p *paginationProgress) check(walk, firstItem string) error {
+// A walk's first page (reset=true) overwrites any state left by a previous walk
+// on this builder instead of being compared against it: two different walks can
+// legitimately start at the same item.
+func (p *paginationProgress) check(walk, firstItem string, reset bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	prev, seen := p.lasts[walk]
 	p.lasts[walk] = firstItem
-	if seen && prev == firstItem {
+	if reset || !seen {
+		return nil
+	}
+	if prev == firstItem {
 		return uhttp.WrapErrors(codes.Internal, fmt.Sprintf(
 			"databricks-connector: pagination for %s did not advance (page starts at the same item %s as the previous page); "+
 				"the server appears to ignore pagination offsets while totalResults is absent; "+
@@ -114,7 +120,7 @@ func prepareNextToken(page uint, pageTotal int, total *uint, progressChecks ...p
 		// pageSize still advances by its own page size instead of truncating)
 		if pageTotal >= int(ResourcesPageSize) {
 			for _, pc := range progressChecks {
-				if err := pc.progress.check(pc.walk, pc.firstItem()); err != nil {
+				if err := pc.progress.check(pc.walk, pc.firstItem(), page == 1); err != nil {
 					return "", err
 				}
 			}

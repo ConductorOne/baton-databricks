@@ -444,9 +444,10 @@ func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName s
 // escapeSCIMString escapes a value for use inside a single-quoted Databricks SCIM
 // filter string literal. Vendor semantics (CI tenant, run for 77e6e793): Databricks
 // parses the comparison value as a JSON string and REJECTS RFC 7644's \' escape with
-// 400 "Unrecognized character escape '''"; a raw single quote inside the literal is
-// accepted (the proven-good 'displayName eq 'test-users'' read carried one only by
-// luck, but the O'Brien failure proves \' specifically is wrong). So the backslash
+// 400 "Unrecognized character escape" for the \' pair; a raw single quote inside
+// the literal is accepted (the proven-good displayName eq 'test-users' read
+// carried one only by luck, but the O'Brien failure proves \' specifically is
+// wrong). So the backslash
 // is doubled (so a trailing "\" cannot swallow the closing quote) and a double
 // quote is escaped as \" (a literal " would terminate the JSON string early and
 // 400 the filter), while single quotes stay raw.

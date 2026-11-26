@@ -84,3 +84,42 @@ func TestPrepareNextTokenForwardProgressGuard(t *testing.T) {
 		}
 	}
 }
+
+// Two consecutive walks on the same builder (e.g. a second role's Grants after the
+// first) can legitimately start at the same first item; a walk's page 1 must reset
+// the guard rather than compare against the previous walk's last page.
+func TestPaginationProgressResetsOnWalkStart(t *testing.T) {
+	p := newPaginationProgress()
+	check := pageProgressCheck{p, "roles/users/admin", func() string { return "u1" }}
+
+	// Walk 1: full page 1, then a short page 2 (terminates without storing).
+	got, err := prepareNextToken(1, 50, nil, check)
+	if err != nil || got != "51" {
+		t.Fatalf("walk 1 page 1: got %q, err %v", got, err)
+	}
+	got, err = prepareNextToken(51, 17, nil, check)
+	if err != nil || got != "" {
+		t.Fatalf("walk 1 page 2: got %q, err %v", got, err)
+	}
+
+	// Walk 2 of the same builder starts at the same first item u1: must NOT fail.
+	got, err = prepareNextToken(1, 50, nil, check)
+	if err != nil {
+		t.Fatalf("walk 2 page 1: unexpected error from stale previous-walk state: %v", err)
+	}
+	if got != "51" {
+		t.Fatalf("walk 2 page 1 token = %q, want %q", got, "51")
+	}
+
+	// But within walk 2, a page starting at u1 again IS non-advancing.
+	_, err = prepareNextToken(51, 50, nil, check)
+	if err == nil || !strings.Contains(err.Error(), "did not advance") {
+		t.Fatalf("walk 2 page 2: error = %v, want non-advancing pagination failure", err)
+	}
+
+	// Role-scoped walk keys do not cross-contaminate.
+	other := pageProgressCheck{p, "roles/users/viewer", func() string { return "u1" }}
+	if _, err := prepareNextToken(51, 50, nil, other); err != nil {
+		t.Fatalf("different role's walk page 2: unexpected error: %v", err)
+	}
+}
