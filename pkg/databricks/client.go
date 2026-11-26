@@ -423,8 +423,9 @@ func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string,
 // with NO attributes param returned meta twice (actions runs 45719189560/45720792196),
 // making this the only read shape proven to carry meta for account groups. Same empty
 // result semantics as FindGroupByID. Mirrors FindGroupID's filter construction, with
-// single quotes escaped per RFC 7644 §3.4.2.2 so names like "Bob's team" produce a
-// valid filter.
+// the value run through escapeSCIMString: single quotes stay raw (this vendor rejects
+// the RFC 7644 backslash-quote escape as a bad JSON escape) and only the backslash is
+// doubled, so names like "Bob's team" produce a filter the vendor accepts.
 func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName string, vars ...Vars) (
 	[]Group,
 	*uint,
@@ -442,8 +443,8 @@ func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName s
 // escapeSCIMString escapes a value for use inside a single-quoted Databricks SCIM
 // filter string literal. Vendor semantics (CI tenant, run for 77e6e793): Databricks
 // parses the comparison value as a JSON string and REJECTS RFC 7644's \' escape with
-// 400 "Unrecognized character escape ”'"; a raw single quote inside the literal is
-// accepted (the proven-good 'displayName eq 'test-users” read carried one only by
+// 400 "Unrecognized character escape '''"; a raw single quote inside the literal is
+// accepted (the proven-good 'displayName eq 'test-users'' read carried one only by
 // luck, but the O'Brien failure proves \' specifically is wrong). Only the backslash
 // is escaped, doubled so a trailing "\" cannot swallow the closing quote.
 func escapeSCIMString(v string) string {
