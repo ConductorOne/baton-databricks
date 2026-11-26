@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/conductorone/baton-databricks/pkg/databricks"
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
@@ -38,6 +39,10 @@ var entitlements = []string{
 type roleBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	// unverifiableRoleWarns is the builder's process-wide count, which samples the
+	// stripped-projection warning (same logarithmic pattern as the audit feed's
+	// lookup-failure warning).
+	unverifiableRoleWarns *atomic.Int64
 }
 
 func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -229,6 +234,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 		// check if group has the role
 		l := ctxzap.Extract(ctx)
 		for _, g := range groups {
+			fromFallback := false
 			// Classify the group. Groups without meta in the list object get a fallback
 			// read chain. Vendor evidence (CI tenant, runs 45715149358 / 45719189560 /
 			// 45720792196): the account-plane SCIM API strips an explicit
@@ -261,6 +267,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 							"failing sync so existing grants are preserved", g.ID, found[0].ID))
 				}
 				g = found[0]
+				fromFallback = true
 				if g.GroupClass() == databricks.UnknownGroupClass {
 					// The default-projection id-filtered read was stripped too. Resolve the
 					// display name (the id,displayName projection IS honored) and read by
@@ -288,6 +295,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 									"failing sync so existing grants are preserved", g.ID, byName[0].ID))
 						}
 						g = byName[0]
+						fromFallback = true
 					}
 					// byName empty or still meta-less: g keeps no meta and the switch below
 					// fails closed.
@@ -308,16 +316,27 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			case databricks.AccountGroup:
 			}
 
-			// A fallback-classified account group may have been read with a projection the
-			// vendor stripped: an absent roles/entitlements key decodes to nil, which is
+			// A fallback-classified group may have been read with a projection the vendor
+			// stripped: an absent roles/entitlements key decodes to nil, which is
 			// indistinguishable from genuinely holding none. Fail-closing on that would
 			// permanently break sync on tenants that never include these keys (the CI
-			// tenant's account-plane responses never carry them), so surface it as a Warn
-			// instead of silently classifying the group as role-less.
-			if g.GroupClass() == databricks.AccountGroup && len(g.Roles) == 0 {
-				l.Warn("databricks-connector: account group carries no roles in the vendor response; "+
-					"role grants for it cannot be verified on this tenant",
-					zap.String("group_id", g.ID), zap.String("role", roleName))
+			// tenant's account-plane responses never carry them), so surface it as a
+			// sampled Warn instead of silently classifying the group as role-less. The
+			// grant is still dropped when the vendor stripped the field — the log makes
+			// that visible, nothing more.
+			fromFallbackUnverifiable := false
+			if isWorkspaceRole {
+				fromFallbackUnverifiable = fromFallback && len(g.Entitlements) == 0
+			} else {
+				fromFallbackUnverifiable = fromFallback && len(g.Roles) == 0
+			}
+			if fromFallbackUnverifiable {
+				if count := r.unverifiableRoleWarns.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
+					l.Warn("databricks-connector: group carries no permission attributes in the vendor response; "+
+						"its grants cannot be verified on this tenant",
+						zap.String("group_id", g.ID), zap.String("role", roleName),
+						zap.Int64("total_occurrences", count))
+				}
 			}
 
 			if (!isWorkspaceRole && g.HaveRole(roleName)) || (isWorkspaceRole && g.HaveEntitlement(roleName)) {
@@ -618,7 +637,8 @@ func principalLookupError(err error, principalLabel, principalId string, isWorks
 
 func newRoleBuilder(client *databricks.Client) *roleBuilder {
 	return &roleBuilder{
-		client:       client,
-		resourceType: roleResourceType,
+		client:                client,
+		resourceType:          roleResourceType,
+		unverifiableRoleWarns: &atomic.Int64{},
 	}
 }

@@ -431,12 +431,20 @@ func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName s
 	*v2.RateLimitDescription,
 	error,
 ) {
-	escaped := strings.ReplaceAll(displayName, "'", "\\'")
+	escaped := escapeSCIMString(displayName)
 	return c.ListGroups(
 		ctx,
 		workspaceId,
 		append([]Vars{&PaginationVars{Count: 1}, NewFilterVars(fmt.Sprintf("displayName eq '%s'", escaped))}, vars...)...,
 	)
+}
+
+// escapeSCIMString escapes a value for use inside a single-quoted SCIM filter string
+// literal per RFC 7644 §3.4.2.2: the backslash first (so a trailing "\" does not
+// escape the closing quote), then the single quote.
+func escapeSCIMString(v string) string {
+	escaped := strings.ReplaceAll(v, `\`, `\\`)
+	return strings.ReplaceAll(escaped, "'", `\'`)
 }
 
 func (c *Client) getGroup(

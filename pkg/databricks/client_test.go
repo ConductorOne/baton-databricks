@@ -196,3 +196,25 @@ func TestGetUserByUsername(t *testing.T) {
 		})
 	}
 }
+
+func TestEscapeSCIMString(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"plain", "team-a", "team-a"},
+		{"single quote", "Bob's team", `Bob\'s team`},
+		{"trailing backslash", `team\`, `team\\`},
+		{"quote after backslash", `a\b'c`, `a\\b\'c`},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escapeSCIMString(tt.value); got != tt.want {
+				t.Errorf("escapeSCIMString(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
