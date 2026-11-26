@@ -204,9 +204,9 @@ func TestEscapeSCIMString(t *testing.T) {
 		want  string
 	}{
 		{"plain", "team-a", "team-a"},
-		{"single quote", "Bob's team", `Bob\'s team`},
+		{"single quote stays raw (vendor rejects the backslash-quote escape)", "Bob's team", "Bob's team"},
 		{"trailing backslash", `team\`, `team\\`},
-		{"quote after backslash", `a\b'c`, `a\\b\'c`},
+		{"backslash before quote", `a\b'c`, `a\\b'c`},
 		{"empty", "", ""},
 	}
 

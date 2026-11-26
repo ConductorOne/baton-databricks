@@ -439,12 +439,15 @@ func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName s
 	)
 }
 
-// escapeSCIMString escapes a value for use inside a single-quoted SCIM filter string
-// literal per RFC 7644 §3.4.2.2: the backslash first (so a trailing "\" does not
-// escape the closing quote), then the single quote.
+// escapeSCIMString escapes a value for use inside a single-quoted Databricks SCIM
+// filter string literal. Vendor semantics (CI tenant, run for 77e6e793): Databricks
+// parses the comparison value as a JSON string and REJECTS RFC 7644's \' escape with
+// 400 "Unrecognized character escape ”'"; a raw single quote inside the literal is
+// accepted (the proven-good 'displayName eq 'test-users” read carried one only by
+// luck, but the O'Brien failure proves \' specifically is wrong). Only the backslash
+// is escaped, doubled so a trailing "\" cannot swallow the closing quote.
 func escapeSCIMString(v string) string {
-	escaped := strings.ReplaceAll(v, `\`, `\\`)
-	return strings.ReplaceAll(escaped, "'", `\'`)
+	return strings.ReplaceAll(v, `\`, `\\`)
 }
 
 func (c *Client) getGroup(
