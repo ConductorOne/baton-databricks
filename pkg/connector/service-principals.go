@@ -20,6 +20,7 @@ import (
 type servicePrincipalBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	pageProgress *paginationProgress
 }
 
 func (s *servicePrincipalBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -104,7 +105,7 @@ func (s *servicePrincipalBuilder) List(ctx context.Context, parentResourceID *v2
 		rv = append(rv, gr)
 	}
 
-	token, tokErr := prepareNextToken(page, len(servicePrincipals), total)
+	token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{s.pageProgress, "service-principals", func() string { return servicePrincipals[0].ID }})
 	if tokErr != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 	}
@@ -425,5 +426,6 @@ func newServicePrincipalBuilder(client *databricks.Client) *servicePrincipalBuil
 	return &servicePrincipalBuilder{
 		client:       client,
 		resourceType: servicePrincipalResourceType,
+		pageProgress: newPaginationProgress(),
 	}
 }

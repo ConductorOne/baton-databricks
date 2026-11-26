@@ -20,7 +20,9 @@ import (
 type userBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	pageProgress *paginationProgress
 }
+
 
 func (u *userBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
 	return userResourceType
@@ -128,7 +130,7 @@ func (u *userBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId,
 		rv = append(rv, ur)
 	}
 
-	token, tokErr := prepareNextToken(page, len(users), total)
+	token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{u.pageProgress, "users", func() string { return users[0].ID }})
 	if tokErr != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 	}
@@ -318,5 +320,6 @@ func newUserBuilder(client *databricks.Client) *userBuilder {
 	return &userBuilder{
 		client:       client,
 		resourceType: userResourceType,
+		pageProgress: newPaginationProgress(),
 	}
 }

@@ -424,8 +424,9 @@ func (c *Client) FindGroupByID(ctx context.Context, workspaceId, groupId string,
 // making this the only read shape proven to carry meta for account groups. Same empty
 // result semantics as FindGroupByID. Mirrors FindGroupID's filter construction, with
 // the value run through escapeSCIMString: single quotes stay raw (this vendor rejects
-// the RFC 7644 backslash-quote escape as a bad JSON escape) and only the backslash is
-// doubled, so names like "Bob's team" produce a filter the vendor accepts.
+// the RFC 7644 backslash-quote escape as a bad JSON escape), the backslash is doubled
+// and double quotes are escaped as \" (the vendor parses the value as a JSON string),
+// so names like "Bob's team" produce a filter the vendor accepts.
 func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName string, vars ...Vars) (
 	[]Group,
 	*uint,
@@ -445,10 +446,12 @@ func (c *Client) FindGroupByName(ctx context.Context, workspaceId, displayName s
 // parses the comparison value as a JSON string and REJECTS RFC 7644's \' escape with
 // 400 "Unrecognized character escape '''"; a raw single quote inside the literal is
 // accepted (the proven-good 'displayName eq 'test-users'' read carried one only by
-// luck, but the O'Brien failure proves \' specifically is wrong). Only the backslash
-// is escaped, doubled so a trailing "\" cannot swallow the closing quote.
+// luck, but the O'Brien failure proves \' specifically is wrong). So the backslash
+// is doubled (so a trailing "\" cannot swallow the closing quote) and a double
+// quote is escaped as \" (a literal " would terminate the JSON string early and
+// 400 the filter), while single quotes stay raw.
 func escapeSCIMString(v string) string {
-	return strings.ReplaceAll(v, `\`, `\\`)
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v)
 }
 
 func (c *Client) getGroup(

@@ -437,7 +437,7 @@ func TestGrantsEmitsGrantForAccountGroupWithRole(t *testing.T) {
 	})
 
 	role := testRoleEntitlement(t, false).Resource
-	grants, err := collectGrants(t, r, role)
+	grants, err := collectGrants(context.Background(), t, r, role)
 	if err != nil {
 		t.Fatalf("Grants returned error: %v", err)
 	}
@@ -475,7 +475,27 @@ func TestGrantsClassifiesStrippedListViaFallbackChain(t *testing.T) {
 		wantGrants     int
 		wantFallback   int
 		wantErr        bool
+		wantErrContain string
 	}{
+		{
+			name:           "id-filtered read returns a different group: fail closed",
+			idDefaultBody:  `{"id":"g2","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
+			idDefaultTotal: 1,
+			wantFallback:   1,
+			wantErr:        true,
+			wantErrContain: "returned group g2 instead",
+		},
+		{
+			name:           "name-filtered read returns a different group: fail closed",
+			idDefaultBody:  noMeta,
+			idDefaultTotal: 1,
+			namedBody:      `{"id":"g1","displayName":"admins"}`,
+			nameBody:       `{"id":"g2","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
+			nameTotal:      1,
+			wantFallback:   3,
+			wantErr:        true,
+			wantErrContain: "returned group g2 instead",
+		},
 		{
 			name:           "id-filtered default read carries meta and the role",
 			idDefaultBody:  roleWithAdmin,
@@ -575,13 +595,19 @@ func TestGrantsClassifiesStrippedListViaFallbackChain(t *testing.T) {
 			})
 
 			role := testRoleEntitlement(t, false).Resource
-			grants, err := collectGrants(t, r, role)
+			grants, err := collectGrants(context.Background(), t, r, role)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Grants returned nil error, want fail-closed on still-unknown meta")
 				}
 				if code := status.Code(err); code != codes.Internal {
 					t.Errorf("error code = %s, want %s", code, codes.Internal)
+				}
+				if tt.wantErrContain != "" {
+					if !strings.Contains(err.Error(), tt.wantErrContain) {
+						t.Errorf("error %q does not contain %q", err, tt.wantErrContain)
+					}
+					return
 				}
 				if !strings.Contains(err.Error(), "missing meta.resourceType") {
 					t.Errorf("error %q does not explain the missing meta.resourceType", err)
@@ -620,7 +646,7 @@ func TestGrantsDoesNotFetchWhenListHasMeta(t *testing.T) {
 	})
 
 	role := testRoleEntitlement(t, false).Resource
-	if _, err := collectGrants(t, r, role); err != nil {
+	if _, err := collectGrants(context.Background(), t, r, role); err != nil {
 		t.Fatalf("Grants returned error: %v", err)
 	}
 	if fallbackReads != 0 {
@@ -630,12 +656,12 @@ func TestGrantsDoesNotFetchWhenListHasMeta(t *testing.T) {
 
 // collectGrants drives Grants to completion, following next-page tokens, and
 // returns every grant emitted.
-func collectGrants(t *testing.T, r *roleBuilder, role *v2.Resource) ([]*v2.Grant, error) {
+func collectGrants(ctx context.Context, t *testing.T, r *roleBuilder, role *v2.Resource) ([]*v2.Grant, error) {
 	t.Helper()
 	token := ""
 	var all []*v2.Grant
 	for range 10 {
-		grants, res, err := r.Grants(context.Background(), role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
+		grants, res, err := r.Grants(ctx, role, rs.SyncOpAttrs{PageToken: pagination.Token{Token: token}})
 		if err != nil {
 			return nil, err
 		}
@@ -675,5 +701,71 @@ func TestGrantsSkipsWorkspaceGroups(t *testing.T) {
 	}
 	if logs.FilterMessage("databricks-connector: skipping workspace-scoped group").Len() != 1 {
 		t.Errorf("want exactly one skip Debug log, got %d", logs.FilterMessage("databricks-connector: skipping workspace-scoped group").Len())
+	}
+}
+
+// A fallback-classified group whose read carries no permission attributes must emit
+// the sampled Warn (with total_occurrences) while the sync succeeds; a fallback
+// group whose read DOES carry the role must not warn.
+func TestGrantsWarnsOnUnverifiableFallbackGroup(t *testing.T) {
+	tests := []struct {
+		name      string
+		idDefault string
+		wantWarn  int
+		wantGrant int
+	}{
+		{
+			name:      "fallback read stripped of roles: sampled Warn fires",
+			idDefault: `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[]}`,
+			wantWarn:  1,
+			wantGrant: 0,
+		},
+		{
+			name:      "fallback read carries the role: no Warn",
+			idDefault: `{"id":"g1","displayName":"admins","meta":{"resourceType":"Group"},"roles":[{"value":"` + AccountAdminRole + `"}]}`,
+			wantWarn:  0,
+			wantGrant: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			ctx := ctxzap.ToContext(context.Background(), zap.New(core))
+
+			r := newRoleBuilderWithHandler(t, func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if req.URL.Query().Get("filter") == "id eq 'g1'" && req.URL.Query().Get("attributes") == "" {
+					_, _ = fmt.Fprintf(w, `{"Resources":[%s],"totalResults":1}`, tt.idDefault)
+					return
+				}
+				// Every group list page is stripped: id and displayName only.
+				_, _ = w.Write([]byte(`{"Resources":[{"id":"g1","displayName":""}],"totalResults":1}`))
+			})
+
+			role := testRoleEntitlement(t, false).Resource
+			grants, err := collectGrants(ctx, t, r, role)
+			if err != nil {
+				t.Fatalf("Grants returned error: %v", err)
+			}
+			var groupGrants int
+			for _, g := range grants {
+				if g.Principal.Id.ResourceType == groupResourceType.Id {
+					groupGrants++
+				}
+			}
+			if groupGrants != tt.wantGrant {
+				t.Errorf("Grants returned %d group-principal grants, want %d", groupGrants, tt.wantGrant)
+			}
+			warns := logs.FilterMessage("databricks-connector: group carries no permission attributes in the vendor response; its grants cannot be verified on this tenant and may be reported as deleted (no read shape on this tenant returns roles/entitlements; remediation: re-enumerate group-held roles via the account access-control grant_rules API)")
+			if warns.Len() != tt.wantWarn {
+				t.Fatalf("unverifiable-grants Warn count = %d, want %d (all logs: %d)", warns.Len(), tt.wantWarn, logs.Len())
+			}
+			if tt.wantWarn == 1 {
+				occ := warns.All()[0].ContextMap()["total_occurrences"]
+				if occ != int64(1) {
+					t.Errorf("warn total_occurrences = %v, want 1", occ)
+				}
+			}
+		})
 	}
 }

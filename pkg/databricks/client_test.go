@@ -207,6 +207,8 @@ func TestEscapeSCIMString(t *testing.T) {
 		{"single quote stays raw (vendor rejects the backslash-quote escape)", "Bob's team", "Bob's team"},
 		{"trailing backslash", `team\`, `team\\`},
 		{"backslash before quote", `a\b'c`, `a\\b'c`},
+		{"double quote escapes as JSON string escape", `He said "hi"`, `He said \"hi\"`},
+		{"backslash and double quote together", `a\"b`, `a\\\"b`},
 		{"empty", "", ""},
 	}
 

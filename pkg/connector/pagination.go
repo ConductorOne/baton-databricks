@@ -5,9 +5,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	v2 "github.com/conductorone/baton-sdk/pb/c1/connector/v2"
 	"github.com/conductorone/baton-sdk/pkg/pagination"
+	"github.com/conductorone/baton-sdk/pkg/uhttp"
+	"google.golang.org/grpc/codes"
 )
 
 const ResourcesPageSize uint = 50
@@ -52,17 +55,56 @@ func convertPageToken(token string) (uint, error) {
 	return uint(page), nil
 }
 
+// paginationProgress remembers the first item key of the previous page for
+// each walk so a server that both omits totalResults and ignores startIndex
+// (returning the same full page for any offset) fails closed instead of being
+// walked forever until the sync deadline.
+type paginationProgress struct {
+	mu    sync.Mutex
+	lasts map[string]string
+}
+
+func newPaginationProgress() *paginationProgress {
+	return &paginationProgress{lasts: make(map[string]string)}
+}
+
+// check records the first item key of the current page and fails closed when it
+// equals the previous page's, i.e. when pagination made no forward progress.
+func (p *paginationProgress) check(walk, firstItem string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	prev, seen := p.lasts[walk]
+	p.lasts[walk] = firstItem
+	if seen && prev == firstItem {
+		return uhttp.WrapErrors(codes.Internal, fmt.Sprintf(
+			"databricks-connector: pagination for %s did not advance (page starts at the same item %s as the previous page); "+
+				"the server appears to ignore pagination offsets while totalResults is absent; "+
+				"failing sync so existing grants are preserved", walk, firstItem))
+	}
+	return nil
+}
+
+// pageProgressCheck carries the guard and the walk key plus a lazy accessor for
+// the current page's first item identity (nil-safe: only evaluated in the
+// absent-totalResults continuation path, where the page is known non-empty).
+type pageProgressCheck struct {
+	progress  *paginationProgress
+	walk      string
+	firstItem func() string
+}
+
 // prepareNextToken prepares the next page token.
 // It calculates the next page number and returns it as a string, or an error
 // when an empty page arrives while totalResults says more items remain: ending
 // the sync there would make C1 treat the missing items as deleted, so we fail
 // closed instead.
-func prepareNextToken(page uint, pageTotal int, total *uint) (string, error) {
+func prepareNextToken(page uint, pageTotal int, total *uint, progressChecks ...pageProgressCheck) (string, error) {
 	if pageTotal == 0 {
 		// empty page is terminal evidence only when totalResults is absent or
 		// already reached; otherwise the server dropped items mid-list
 		if total != nil && page < *total+1 {
-			return "", fmt.Errorf("databricks-connector: empty page at offset %d but totalResults=%d; failing sync so missing items are not treated as deleted", page, *total)
+			return "", uhttp.WrapErrors(codes.Internal, fmt.Sprintf(
+				"databricks-connector: empty page at offset %d but totalResults=%d; failing sync so missing items are not treated as deleted", page, *total))
 		}
 		return "", nil // kills the same-token non-termination
 	}
@@ -71,6 +113,11 @@ func prepareNextToken(page uint, pageTotal int, total *uint) (string, error) {
 		// the page we asked for (>=, not ==, so a server that clamps or ignores
 		// pageSize still advances by its own page size instead of truncating)
 		if pageTotal >= int(ResourcesPageSize) {
+			for _, pc := range progressChecks {
+				if err := pc.progress.check(pc.walk, pc.firstItem()); err != nil {
+					return "", err
+				}
+			}
 			return strconv.FormatUint(uint64(page+uint(pageTotal)), 10), nil // #nosec G115
 		}
 		return "", nil

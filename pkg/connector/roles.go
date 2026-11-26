@@ -43,6 +43,7 @@ type roleBuilder struct {
 	// stripped-projection warning (same logarithmic pattern as the audit feed's
 	// lookup-failure warning).
 	unverifiableRoleWarns *atomic.Int64
+	pageProgress          *paginationProgress
 }
 
 func (r *roleBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -211,7 +212,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(users), total)
+		token, tokErr := prepareNextToken(page, len(users), total, pageProgressCheck{r.pageProgress, "roles/users", func() string { return users[0].ID }})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -333,7 +334,9 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			if fromFallbackUnverifiable {
 				if count := r.unverifiableRoleWarns.Add(1); count == 1 || count == 10 || count == 100 || count%1000 == 0 {
 					l.Warn("databricks-connector: group carries no permission attributes in the vendor response; "+
-						"its grants cannot be verified on this tenant",
+						"its grants cannot be verified on this tenant and may be reported as deleted "+
+						"(no read shape on this tenant returns roles/entitlements; remediation: re-enumerate "+
+						"group-held roles via the account access-control grant_rules API)",
 						zap.String("group_id", g.ID), zap.String("role", roleName),
 						zap.Int64("total_occurrences", count))
 				}
@@ -354,7 +357,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(groups), total)
+		token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{r.pageProgress, "roles/groups", func() string { return groups[0].ID }})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -393,7 +396,7 @@ func (r *roleBuilder) Grants(ctx context.Context, resource *v2.Resource, attr rs
 			}
 		}
 
-		token, tokErr := prepareNextToken(page, len(servicePrincipals), total)
+		token, tokErr := prepareNextToken(page, len(servicePrincipals), total, pageProgressCheck{r.pageProgress, "roles/service-principals", func() string { return servicePrincipals[0].ID }})
 		if tokErr != nil {
 			return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 		}
@@ -640,5 +643,6 @@ func newRoleBuilder(client *databricks.Client) *roleBuilder {
 		client:                client,
 		resourceType:          roleResourceType,
 		unverifiableRoleWarns: &atomic.Int64{},
+		pageProgress:          newPaginationProgress(),
 	}
 }

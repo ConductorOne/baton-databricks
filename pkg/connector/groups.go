@@ -26,6 +26,7 @@ const groupManagerEntitlement = "roles/group.manager"
 type groupBuilder struct {
 	client       *databricks.Client
 	resourceType *v2.ResourceType
+	pageProgress *paginationProgress
 }
 
 func (g *groupBuilder) ResourceType(ctx context.Context) *v2.ResourceType {
@@ -113,7 +114,7 @@ func (g *groupBuilder) List(ctx context.Context, parentResourceID *v2.ResourceId
 		rv = append(rv, gr)
 	}
 
-	token, tokErr := prepareNextToken(page, len(groups), total)
+	token, tokErr := prepareNextToken(page, len(groups), total, pageProgressCheck{g.pageProgress, "groups", func() string { return groups[0].ID }})
 	if tokErr != nil {
 		return nil, nil, fmt.Errorf("databricks-connector: failed to prepare next page token: %w", tokErr)
 	}
@@ -609,5 +610,6 @@ func newGroupBuilder(client *databricks.Client) *groupBuilder {
 	return &groupBuilder{
 		client:       client,
 		resourceType: groupResourceType,
+		pageProgress: newPaginationProgress(),
 	}
 }
